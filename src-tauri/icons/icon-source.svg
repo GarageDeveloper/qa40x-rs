@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tick" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d90ef"/><stop offset="1" stop-color="#199e70"/>
+    </linearGradient>
+    <linearGradient id="bgg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d25"/><stop offset="1" stop-color="#0b0f14"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#bgg)" stroke="#33404b" stroke-width="6"/>
+  <!-- grid hint -->
+  <g stroke="#222c35" stroke-width="4">
+    <line x1="180" y1="420" x2="844" y2="420"/>
+    <line x1="180" y1="540" x2="844" y2="540"/>
+    <line x1="352" y1="300" x2="352" y2="660"/>
+    <line x1="524" y1="300" x2="524" y2="660"/>
+    <line x1="696" y1="300" x2="696" y2="660"/>
+  </g>
+  <!-- noise floor + 1 kHz peak -->
+  <path d="M180 630 L230 618 L270 634 L310 616 L350 630 L390 612 L430 628 L470 618
+           L500 624 L512 380 L524 250 L536 380 L548 624 L580 616 L620 630 L660 614
+           L700 628 L740 618 L780 632 L820 620 L844 626"
+        fill="none" stroke="#3d90ef" stroke-width="18" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- calibration tick baseline -->
+  <rect x="180" y="676" width="664" height="18" rx="9" fill="url(#tick)"/>
+  <text x="512" y="806" text-anchor="middle" font-family="Menlo, monospace" font-weight="bold"
+        font-size="104" letter-spacing="4" fill="#e9eef2">QA40x-rs</text>
+</svg>

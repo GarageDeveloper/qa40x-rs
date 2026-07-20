@@ -1,0 +1,290 @@
+/* Graph grid — M3: toolbar + multi-tile grid (presets, focus, drag). */
+.graph {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 8px;
+}
+
+.graph__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.graph__spacer {
+  flex: 1;
+}
+
+.graph__fps {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  min-width: 64px;
+}
+
+.graph__ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph__ctl-label {
+  font-size: 11px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+}
+
+/* ---- one tile -------------------------------------------------------- */
+.tile {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-1);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.tile--hidden {
+  display: none;
+}
+
+.tile--dragging {
+  opacity: 0.4;
+}
+
+.tile--drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+/* The floating copy that follows the pointer during a drag ("moving the
+ * window" feedback) — a visual clone, never hit-tested. */
+.tile--ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  margin: 0;
+  pointer-events: none;
+  opacity: 0.8;
+  z-index: 1000;
+  box-shadow: var(--shadow-2, 0 12px 32px rgba(0, 0, 0, 0.45));
+  will-change: transform;
+}
+
+.tile__head,
+.tile__strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  flex: none;
+}
+
+.tile__strip:empty {
+  display: none;
+}
+
+.tile__handle {
+  cursor: grab;
+  color: var(--ink-3);
+  user-select: none;
+  touch-action: none;
+}
+
+.tile--dragging .tile__handle {
+  cursor: grabbing;
+}
+
+.tile__spacer {
+  flex: 1;
+}
+
+.tile__add {
+  max-width: 90px;
+}
+
+.tile__hidden {
+  display: none;
+}
+
+.field--small {
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+/* Room for the shared ▾ chevron, tightened to the small silhouette. */
+select.field--small {
+  padding-right: 18px;
+  background-position: right 5px center;
+}
+
+.tile__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.tile__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-1);
+  background: var(--bg-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tile__chip-label {
+  font-size: 10px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tile__chip-value {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-1);
+}
+
+/* Legend under the chart (v1 style): clickable chips toggle their curve. */
+.tile__legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 8px 6px;
+  flex: none;
+}
+
+.tile__legend:empty {
+  display: none;
+}
+
+.tile__trace {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tile__trace--off {
+  opacity: 0.45;
+}
+
+.tile__trace--off .tile__trace-label {
+  text-decoration: line-through;
+}
+
+.tile__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tile__trace-x {
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 2px;
+}
+
+.tile__trace-x:hover {
+  color: var(--ink-1);
+}
+
+.tile__chart {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--chart-surface);
+}
+
+/* ---- gear dialog ------------------------------------------------------ */
+.gear {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 340px;
+}
+
+.gear__tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.gear__tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gear__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gear__label {
+  min-width: 130px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.gear__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.gear__note {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin: 0;
+}
+
+/* Progress pill of the running measurement program, floating over the
+   chart of any tile that draws its result trace. */
+.tile__progress {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 3px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 11px;
+  background: var(--bg-1);
+  color: var(--ink-1);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}

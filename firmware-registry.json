@@ -1,0 +1,1132 @@
+{
+  "schema": "qa40x-firmware-registry/1",
+  "generated": "2026-07-07",
+  "source": "QuantAsylum/QA40x GitHub releases \u2014 SHA-256 of the SB2.1 firmware images embedded in QA40x.exe (78 releases, 0.983 \u2192 1.223)",
+  "notes": [
+    "This file contains ONLY SHA-256 hashes and version strings. NO QuantAsylum firmware is included or redistributed here; hashes are used solely to recognise a user-supplied official image.",
+    "An image's SHA-256 changes from build to build even when the firmware version does not (observed across releases), so a hash identifies a specific official BUILD (integrity/provenance), NOT a firmware version.",
+    "AUTHENTICITY is proven cryptographically by the embedded RSA-2048/SHA-256 signature (verify_sb2_signature) \u2014 works even for builds absent here.",
+    "device inferred from image size and order: the QA402 image is invariably 52724 B and comes first; the second image is the QA403 (size varies by version). Single-image older builds: 52724 -> QA402, else null.",
+    "firmware_version inferred from release notes: >=1.200 -> 60, 1.142..1.199 -> 58, 1.139..1.141 -> 56; older left null. Verify by flashing + reading register 0x10."
+  ],
+  "releases": [
+    {
+      "app_version": "1.223",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "b109ccd83763b224ed973df3a6ac82b65c4b57e7e236dd0d60c490b6bc501ef8"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "b5c43c5fe9d94b04377dfe63cbfad833f1d46c86703a4ed372ee1d8f4635b8d8"
+        }
+      ]
+    },
+    {
+      "app_version": "1.222",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "5908c36495d49936c3f970080cd5d443b7baab4d4fcb53f100930771ac57afcf"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "2095d4228ed70adaa691198688ddaade289300c2e253cc757a29b6f653bae01a"
+        }
+      ]
+    },
+    {
+      "app_version": "1.221",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "7aadf301b2221bc8be1ca91a83a9f0ac9f36627992ae1b26534dc14d66958e7f"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "cf39774d8aa73ff5831fecb0adf6d16758d72862be1dd5794971ae41ee2d076c"
+        }
+      ]
+    },
+    {
+      "app_version": "1.220",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "cb956514140a26fe116bb50d18456c763867887fb05d1671f71f9499f82535d8"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "27b5805d73b773c0a7284f3039f32e68299a7a7ed540bb73981ebc22c65ddc3c"
+        }
+      ]
+    },
+    {
+      "app_version": "1.219",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "a8ef9865910584d4d2e253fc077c9cca78588f21f7a8349de53f618bde8762a0"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "4bb9e401ae4f13fc91937a3078ef32cb8cb498b305cdd49762e16297533cc44c"
+        }
+      ]
+    },
+    {
+      "app_version": "1.218",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "1aa686cd47f1cb08eb43928dfe76c2ba0e795a85693dfee262d1140d5cb57260"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "cdbfc940643b768f3df5fb8986fa534939421cd1f7fcd5977abf8744dbbfdeab"
+        }
+      ]
+    },
+    {
+      "app_version": "1.216",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "44913d79210bc15b3570e28f6cf3a9f7324eb5a89de7fe98e419ea7ceb497c24"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "2cf688bcc2e820e80c79d383d48251cf6d4e12d918d26c255587befa313f3c9f"
+        }
+      ]
+    },
+    {
+      "app_version": "1.215",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "7d3d876abfe5559dabe610f4f660aad93815d393a556c52b9ddac2af458823cd"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "69d8efc10f4ca66b53acad8631886711907471ac47879e1d2776f369e1202193"
+        }
+      ]
+    },
+    {
+      "app_version": "1.214",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "2ca1e4ad9306953ca7a04c50e1a8348c016c39fc905cef581fa9cebc23502d7a"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "59f831c649b27d0d3696c0dd494a269c5c55f71901c4e01c1ed4614aaf3f4531"
+        }
+      ]
+    },
+    {
+      "app_version": "1.213",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "f0c84c29aa9504c622a1c588bf3b50cbb114f6095a663d458f6f35f72e2ed931"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "5f4565824a8b315a65c12b5b731f51bc1d3f99b739c96f4bb524ec007cbd637b"
+        }
+      ]
+    },
+    {
+      "app_version": "1.212",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "ee94905d2257dcd020f387a043d43e41a23ed094010ad9a254bad6f3ce8186f5"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "09cc27ef2fcc7f63ede639a355b5b58de1ddd6a621bab55e2b92ba48028be8bd"
+        }
+      ]
+    },
+    {
+      "app_version": "1.211",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "bc978d20abd46c496a7195f4431decef44d04ff748706b7aa86d0dc9ab6caa14"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "d40ac8d88d1c24504e73f848cec2e2bd8374b9ab1cdb6bf4d3329eaf0ff35e8e"
+        }
+      ]
+    },
+    {
+      "app_version": "1.210",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "884fcc3dc783273846ae2b688ba48d56ac862172315822ea3cce9a6a7ac07a8e"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "cddbedba01c044a584027ff4a34b96cb130d5a6bdea0a3319b66b49ef3d6869e"
+        }
+      ]
+    },
+    {
+      "app_version": "1.208",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "0d1260734bbdd05bc9b8b5c49a85555e25fa58f2f2a331eddb236c7d8745eea6"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "10bd92783f04f1fb83b8163d5756101158a0d5bcd0312f8847b63ae813d89430"
+        }
+      ]
+    },
+    {
+      "app_version": "1.207",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "81397028ed0e5b7ceaf7ddbeb622711bba60941bc2b4d85956bfd13c08c8989b"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "e0bf714ccffd612674e595cfee901a146c5e68e80a8bd2d266555393bfd6e98e"
+        }
+      ]
+    },
+    {
+      "app_version": "1.205",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "81985c67e89261c678d213a205cdf0ea455f9823818b0cc6400252967a6349de"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "44acfd51073448cc72b57b072da3cf074949b8b05089488c16c0863d42a721d0"
+        }
+      ]
+    },
+    {
+      "app_version": "1.204",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "5bf34a28ab31fa252501823ac97a1760bd3abd27657d7cd5dd8f00fec74a285e"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "1dfd79d86142ee2410af6365e4cd10b09ae8c843435698c00f25771ee8904a19"
+        }
+      ]
+    },
+    {
+      "app_version": "1.203",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "01af134b87f8dfbee0691f81975ec49b19ef339eb6418252a5b2dd709e65261e"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "e83a6eee93ed4bd8b9e1388dbb95849cd208ab1deb3a17778876d293a31808bc"
+        }
+      ]
+    },
+    {
+      "app_version": "1.202",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "97c84b04c6aab42bf6eaecc93748d3b8ae34f06ac74ad4a84c4ba424c080390c"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "152bea692a3f99250fae1d992918a57238abe488c1c96dc96c3d7200a7b13e5d"
+        }
+      ]
+    },
+    {
+      "app_version": "1.201",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "d7a9b9f25da078ea3a8c7a0c26799fd665b2fe5b59effc16947362b34fe30735"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "45a46ee2acd93bad7c5771cd6c1a71e44af7c45f9177f0a6ddd7763b7cac8b07"
+        }
+      ]
+    },
+    {
+      "app_version": "1.200",
+      "firmware_version": "60",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "e6bd00224df986b267e532b9f200c906ca66631cebbf2268a7800f99e4dce5b4"
+        },
+        {
+          "device": "QA403",
+          "size": 52660,
+          "sha256": "f49e302e548bc52b4ea16b7c86d690f205fe6fff6de032b2df11caf8ee6e6ef1"
+        }
+      ]
+    },
+    {
+      "app_version": "1.199",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "3b3bc3cf0019aca300adbccaa73c1eb7fb4ea1a7d17be21f2e752130a74c7601"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "434fc74e294b196132930c34f45afc42ebe76a64953f3922763d49d04a730108"
+        }
+      ]
+    },
+    {
+      "app_version": "1.198",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "1f325b9063331b9410b9d64300ebca9e31a1412a7b870a5824a5357a42c827b5"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "f4a197eb8d2b27d5e4063cf40079fd9b1ad2c8ad3c22c72543696ec99e347123"
+        }
+      ]
+    },
+    {
+      "app_version": "1.197",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "1a774a248f47a2eb9aec7f3efbacca19477e1150b02eeff826f2b60be193db90"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "899c37f2677032e263f0570c35e1f4f1126651320d11b70f5b1627e387bfd283"
+        }
+      ]
+    },
+    {
+      "app_version": "1.194",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "0483d9382303ba4d4ea056e773cde5e2025d5ef730e536b47381fd589ddbb875"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "9b7192d33c06b839f9c4ee480a3d1c0dc3e970e99c63c758bb1da69e4fecd65e"
+        }
+      ]
+    },
+    {
+      "app_version": "1.193",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "2e884759749ddcd05b62bb84f7ee27f08e22be79b199c05118b98a35135f9888"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "935e32e5860d76830cb3f76b8bc46dfceb7b4962467977d57b887e410a70b22c"
+        }
+      ]
+    },
+    {
+      "app_version": "1.192",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "845808c3ad374f4aaaf355a9fbb557294e45b25c0c6e1de8a71a5a17e462c1ff"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "b117b62e24a13b93eb73611b01a20ef7dce4d75945349234378485a6c1765ffd"
+        }
+      ]
+    },
+    {
+      "app_version": "1.189",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "74954208c6d4cf5371c9d8ebe092e726c90687a4c28ddea467eeda477aa744f5"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "ce8d4e4ba27e97c9b7b21f8262d9fbbbbc2d2e0a413169a14e46e82a7a3a783d"
+        }
+      ]
+    },
+    {
+      "app_version": "1.188",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "91d4712b4a272d61564d4919d82a601b233a6da0410cf83cbb25a82437b9057f"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "2d9558152755f23b5ff9a828d590f151f1de9f65c1b5d0bcd0c6bdbbbe30b325"
+        }
+      ]
+    },
+    {
+      "app_version": "1.183",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "748dcad812cdebd50a1c3b8d15f4933dbe3ec691c14d8d14cd938b974f2a66bf"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "a2a41f98e22b0c738abcd1b7d435043959a235481d4380055dc8d28aba37c9e9"
+        }
+      ]
+    },
+    {
+      "app_version": "1.181",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "ea01c15f0d079035ba4c6bfee3e5b1365eae80148f7c3dd76e39fdc982e89905"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "0939b424ee3919b7378859b3b68b2b3ce6a7ae45b1ee2fdda475b4be6feb8a72"
+        }
+      ]
+    },
+    {
+      "app_version": "1.180",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "120585ae6aceae42270ee9b5d5e7d92c7cc441f4a5931598ad4e49630d937f28"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "7c2afbe024f3664d211390cc1bc22df6a79c086456ffb6d1b629b8e936f245b2"
+        }
+      ]
+    },
+    {
+      "app_version": "1.178",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "20d8ef01e96d1a5a5c2e6bff447ca2051ef5e68df1fea097e48b61f573f3d03c"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "7cae4e277060419386f9dbe239290d8a2b6f518bd9f9b8f7d4f3c4b44e3c0281"
+        }
+      ]
+    },
+    {
+      "app_version": "1.176",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "2324e4c318af76ccf667680eca415131c16c66785c8b373607477fcfcb2466be"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "88676bbeb4670962616c37aaecfb4f854a6df88b733b8ca25ee70c88f56809b5"
+        }
+      ]
+    },
+    {
+      "app_version": "1.175",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "be099408542ef6890e7feba0d2d5f9249a92308469eef66f6ca8cca26834581b"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "71d878658009a89687a48961ebb3d0b649986969921d613287cbb396dd3feb49"
+        }
+      ]
+    },
+    {
+      "app_version": "1.173",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "fe9c1416ae0154146692f44e83cd4106e0df29d8c370fdd74acb9d2893dcf67a"
+        },
+        {
+          "device": "QA403",
+          "size": 52884,
+          "sha256": "92ae89e8e660dc6375c0d0175769da3f0cd497ba5c935a1053b35d21926706d7"
+        }
+      ]
+    },
+    {
+      "app_version": "1.171",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "58f9cee521fa1f7a3b37c97debb23b8c24cb7382d47ca9cf98c49da85971983f"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "3056c0027245e649b956c2f7c2969cfc82f3fbab8cef5571afda13b72cab2c5e"
+        }
+      ]
+    },
+    {
+      "app_version": "1.170",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "8454c5fc0116c362ae6673cba9524b14824c7c5d61a2a795ffba309e4c1312cc"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "e55411d3629b03db597b3c8ae059eaf6e45f1ef42d591cbcb77a15a2474350d9"
+        }
+      ]
+    },
+    {
+      "app_version": "1.168",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "ca7e76a195f856ca4a766ffb686b37d4f8cc354856e310ea4abe1d56ce8ef798"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "ce930e6f430a75bcb5d253eb3170e4fee87245d66832459a7a3d821fef272973"
+        }
+      ]
+    },
+    {
+      "app_version": "1.167",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "dc9fe25ac9f44d3c9825d4c1726d62d0fb3367faf3fbb76222745b5b5f89ac71"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "a77528f7adbcf8153e396e8e854545c2d83da56042a4ef4e6a3d1d4e63edf342"
+        }
+      ]
+    },
+    {
+      "app_version": "1.165",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "6e15384e559e1f2e61c4cc05ce19d2a653dd69a86c85f6063ef4e54ffc28ab68"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "50fa54cd6329f971a1a5053d70d4778c7e88629161fc7dee45ac8176474d28d9"
+        }
+      ]
+    },
+    {
+      "app_version": "1.161",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "74e084886e257c265c027487d73c515b47bbedaaef9686e59c0eb3a5abd64a25"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "4d1b66a67115211202013f793b057d50eeb99674ca6d99dde20f8aaa87257699"
+        }
+      ]
+    },
+    {
+      "app_version": "1.160",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "1ecaad37376e884f90abec0780dba6376cb4e1c4b7283877bba565349959f0df"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "a563016281e873d3dff4581faedbbe4b58d7307363d01e4af44e9288c2cfa618"
+        }
+      ]
+    },
+    {
+      "app_version": "1.154",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "af6af07c171beed8badc2fee5cb2dfc0eb426878119c2c45859212844ef70091"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "cbdec9551eaa70895fbd83539310f2f11838b26c5758cfa383abd653f8b84eba"
+        }
+      ]
+    },
+    {
+      "app_version": "1.153",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "e40c858a2a6d0e810a4e2e551ddf3e708cb65d547d5457423e3cbf54783c9323"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "621f2682f8579e2cad8ac886cfb0c06778c4ab5afa682cafdadda34f65b8283b"
+        }
+      ]
+    },
+    {
+      "app_version": "1.152",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "d1ae3c627eee870edf73045e526b0676bee15b52db245460e754e57560cf154d"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "75872f5dedf15ab3a2978ab16f888fad48958c96922951c9339fae67f6a6ddad"
+        }
+      ]
+    },
+    {
+      "app_version": "1.149",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "a0daa9943eb53281c8e59f8e38fdfe675724c541b1640668bb8b2152ac0f444c"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "3a1549ab148cfd4f7526b9570d3d900e030e07e0984cd1fc17378e61384c5532"
+        }
+      ]
+    },
+    {
+      "app_version": "1.142",
+      "firmware_version": "58",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "62f67888ea7f028f5b50e2b76b7a7c62725ef0b7cef8d90a8019e7dc7b88c7ad"
+        },
+        {
+          "device": "QA403",
+          "size": 52900,
+          "sha256": "fc41ee21fea7646471bfd7501265ccd1ae15ff915196ff514c1c32a596d38c53"
+        }
+      ]
+    },
+    {
+      "app_version": "1.140",
+      "firmware_version": "56",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "d2c978f0c9b0c9abb28073829ae1c2f846957239409cbb33ddaed9848a5cbe25"
+        },
+        {
+          "device": "QA403",
+          "size": 52916,
+          "sha256": "91d925a2cd47700e4195a5dd00191958f684b25f64da7b2290bfddee346807bb"
+        }
+      ]
+    },
+    {
+      "app_version": "1.139",
+      "firmware_version": "56",
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "9c41e87f00133c62834ef6d9a7de6d077cee4db9cb3800592fe388bde07ff786"
+        },
+        {
+          "device": "QA403",
+          "size": 52916,
+          "sha256": "6bb06d01a1ad3bcfedbfd3d91ecd123379fe49695952d0c5b52660c86a237876"
+        }
+      ]
+    },
+    {
+      "app_version": "1.138",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "e9c31b73e478208b644f660ba71a56602dfea0f78e970cecf840ba69c32caf2f"
+        },
+        {
+          "device": "QA403",
+          "size": 52916,
+          "sha256": "0de069d1f4802b8a2e1427d44e8a5dca4d705dd4e62524d68b8e2cd8805c3f4d"
+        }
+      ]
+    },
+    {
+      "app_version": "1.135",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "9572ec316aea6e865cc7d66dc9d09df2ab21cac34a549e75ac7ef7f82d00a85f"
+        },
+        {
+          "device": "QA403",
+          "size": 52916,
+          "sha256": "603aa07f9d2ba0b4ac5aec5bedf11dca630aaffafdde5673c1b74515700c6556"
+        }
+      ]
+    },
+    {
+      "app_version": "1.134",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "168617dd3ebfab1022caa192d4e5560b0d7e68f12ba98671b98dd9d8d01141f0"
+        }
+      ]
+    },
+    {
+      "app_version": "1.133",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "dac17b8f91e7585174454c6208ff3801e2c031473986ec62bb21d6b456486773"
+        }
+      ]
+    },
+    {
+      "app_version": "1.132",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": "QA402",
+          "size": 52724,
+          "sha256": "7d7b56032bd7d5729edec5ad06ba1e8264c745e6c24f79a5582cf66343c34a41"
+        }
+      ]
+    },
+    {
+      "app_version": "1.131",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52676,
+          "sha256": "0baa3136176debde600b24a6d299d0ed7d21c99650cc3be4dd52377fce3a575b"
+        }
+      ]
+    },
+    {
+      "app_version": "1.110",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52676,
+          "sha256": "1e22cfc80323aed979615ca576a030589e01ac915aef7af81c6a4d2f259b1eb9"
+        }
+      ]
+    },
+    {
+      "app_version": "1.100",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52644,
+          "sha256": "6fe5bff86925ed402254af83713e95f1980a21e0be1a1a8d998358ad8bfacdbb"
+        }
+      ]
+    },
+    {
+      "app_version": "1.13",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52676,
+          "sha256": "e6d621fd715132f51a0c7108014751e9411338c78f07ae6fa3ec3b1b1cc6a1fe"
+        }
+      ]
+    },
+    {
+      "app_version": "1.12",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52676,
+          "sha256": "0f118f3f58264af21e1649847f262f6aa6432c19df7f9fcc0f20963febffb45f"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9999",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "164cced67abc943d6a0d9896595e9198ac3a0d84d5e6f22fee99eba8ef6967fb"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9992",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "2d7016ff6d5bf9ae0a4c11a47468e5e11cccfa6df5706d4db7fd5accc91096ba"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9991",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "5afd0d13468ea75655d38c56dcc9073c2bb3e87ac67e4d4a163d4a86ca8deb54"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9970",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "aa31e3ff3a46da7f7816c90ae5853da9892a62b0ed5ee3a7f3d4ee3f6aad5508"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9963",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "940124f45efc909fe56afb778055acd46b708ef434f78f359c0b6ac36d3b3d0f"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9962",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "b1e4bfc5f4429ed9a7eaeb4d84ab5e20ac80bd58ab3fff8d5195c57cb90f8db3"
+        }
+      ]
+    },
+    {
+      "app_version": "0.9961",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "64e780c19850e552f3dbf6c42223a47fe6a726e1d39468b89261ce36d13c638c"
+        }
+      ]
+    },
+    {
+      "app_version": "0.999",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "ec24a37775c963debdcbe7270ad691d24408c6f9db9ec5f5ab4d260dc8e7e853"
+        }
+      ]
+    },
+    {
+      "app_version": "0.998",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "8b7b1b5df659f0f3727956296fce70bdad394028732a23bdb1646bf31c00bd63"
+        }
+      ]
+    },
+    {
+      "app_version": "0.996",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "2e0675daddf7f4d5f370710b9357c4f4df8434199ea35d66f96f6d3b86a8b347"
+        }
+      ]
+    },
+    {
+      "app_version": "0.995",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "37155e21bde87d24087da83c60d20a788f48b51e7b1297c55c1129f4c41f0e42"
+        }
+      ]
+    },
+    {
+      "app_version": "0.994",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "3bfb8201fcdc54a442436b7899b3b0a146e19de4e9c57b1c6e823a4440d34f52"
+        }
+      ]
+    },
+    {
+      "app_version": "0.993",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "35f894d5131bdc32ee8f7a69de5f410b7ce4a552fea4ba65abd0fe69dce1db86"
+        }
+      ]
+    },
+    {
+      "app_version": "0.992",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "ad731bfdfbef9fc1bad5929afee5c1b10de0c9d177167ebe706cc1df51423c2d"
+        }
+      ]
+    },
+    {
+      "app_version": "0.991",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "24373a30960b0ee435cabff617bd550eb11fe67f16bf978b018d2c21af88c14d"
+        }
+      ]
+    },
+    {
+      "app_version": "0.990",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 52612,
+          "sha256": "520a7179c5aec997f53fcc75c36fe95b0d77a2ab2723053e40d6e01f01c85dff"
+        }
+      ]
+    },
+    {
+      "app_version": "0.986",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 57764,
+          "sha256": "94310868348c2348ee063561a8d2c6bbeee16c84d7282f234e37b2409d0b475c"
+        }
+      ]
+    },
+    {
+      "app_version": "0.983",
+      "firmware_version": null,
+      "images": [
+        {
+          "device": null,
+          "size": 57764,
+          "sha256": "ab7c19e90768570ac75f60cea046f335b8b02ca9e4b1a247172504ee438b4b0d"
+        }
+      ]
+    }
+  ]
+}

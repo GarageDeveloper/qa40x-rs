@@ -1,0 +1,83 @@
+# Continuous Integration — runs automatically on every push and pull request.
+#
+# What CI is, in one line: GitHub spins up a fresh machine, checks out your code,
+# and runs these steps so you find out immediately if something is broken.
+#
+# This workflow only *checks* the code (compile + tests + type-check). It does
+# NOT produce downloadable apps — that is `build.yml`.
+#
+# Where to watch it run: the "Actions" tab of the GitHub repository. A green tick
+# next to a commit means every step below passed.
+
+name: CI
+
+# Triggers: when does this run?
+on:
+  push:
+    branches: ["main", "prepare/**"]
+  pull_request:
+  workflow_dispatch: # adds a "Run workflow" button in the Actions tab
+
+# Cancel an in-progress run if you push again to the same branch (saves minutes).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- Rust backend: compile + unit tests -------------------------------------
+  rust:
+    name: Rust (build + test)
+    # Self-hosted (ovh1) while hosted minutes are exhausted. Private-repo only —
+    # never point a public repo's workflows at these runners (fork PRs).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tauri needs these system libraries to build on Linux; hidapi needs libudev.
+      # Skipped when the system deps are already present.
+      - name: Install Linux system dependencies
+        run: |
+          if dpkg -s libwebkit2gtk-4.1-dev libudev-dev >/dev/null 2>&1; then
+            echo "System deps already present — skipping apt-get"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            libgtk-3-dev libssl-dev libudev-dev patchelf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Cache compiled dependencies so later runs are much faster.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+      # Lint. Informational for now (won't fail the build) — tighten later by
+      # removing `|| true` once the tree is clippy-clean.
+      - name: Clippy (non-blocking)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features || true
+
+  # ---- Frontend: TypeScript type-check + bundle -------------------------------
+  frontend:
+    name: Frontend (tsc + vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type-check + build
+        run: npm run build
+      - name: Unit tests (vitest)
+        run: npm run test

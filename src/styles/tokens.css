@@ -1,0 +1,204 @@
+/* Design tokens — the single source of truth for both themes.
+ * Ported verbatim from the validated legacy palette (src/styles.css).
+ * Charts can't read CSS custom properties: they mirror these via
+ * readCssVars() and repaint on theme change. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces — a graded plane from deep base to raised controls */
+  --bg-0: #0b0f14;      /* page plane */
+  --bg-1: #141a21;      /* panels, cards */
+  --bg-2: #1b232c;      /* inputs, raised controls */
+  --bg-chart: #0f141a;  /* chart surface (mirrored in chart.ts) */
+
+  /* Hairlines */
+  --line-1: #222c35;
+  --line-2: #33404b;
+  --edge-hi: rgba(255, 255, 255, 0.045); /* top highlight for depth */
+
+  /* Ink */
+  --ink-1: #e9eef2;
+  --ink-2: #a6b1bb;
+  --ink-3: #6f7e8b;
+
+  /* Interactive accent (series-1 blue, validated on the dark surface) */
+  --accent: #3d90ef;
+  --accent-down: #2a6ac2;
+  --accent-dim: rgba(61, 144, 239, 0.14);
+  --accent-glow: rgba(61, 144, 239, 0.35);
+
+  /* Series (validated set — see dataviz palette) */
+  --series-l: #3987e5;
+  --series-r: #199e70;
+  --series-phase: #9085e9;
+
+  /* Marker annotation colours (mirrored in chart.ts) */
+  --marker-a: #e6a23c;
+  --marker-b: #e06ca6;
+
+  /* Status */
+  --good: #23b247;
+  --good-glow: rgba(35, 178, 71, 0.5);
+  --err: #d84c4c;
+  --warn: #fab219;
+
+  /* Front-panel scrims — translucent inset/readout grounds shared by the
+     top-bar readout strip, annunciator pills, chart overlays and mode toggle. */
+  --panel-inset: #0c1116;
+  --scrim: rgba(11, 15, 20, 0.82);
+  --topbar-a: #161d25;
+  --topbar-b: #121820;
+
+  /* Tinted front-panel text (readout glow, active LED labels, danger text). */
+  --readout-ink: #cfe6ff;
+  --readout-glow: rgba(61, 144, 239, 0.28);
+  --led-good-ink: #9ef0b6;
+  --led-warn-ink: #f5cf7a;
+  --danger-ink: #f2a3a3;
+  --danger-bg: rgba(216, 76, 76, 0.14);
+  --danger-bg-strong: rgba(216, 76, 76, 0.22);
+
+  /* Canvas chart palette (mirrored in chart.ts / thd.ts / wowflutter.ts /
+     levels.ts via readCssVars — this is the single source of truth). */
+  --chart-surface: #0f141a;
+  --chart-plot-fill: rgba(120, 170, 220, 0.022);
+  --chart-grid-minor: #19222b;
+  --chart-grid-major: #232f39;
+  --chart-axis: #33414d;
+  --chart-zero-line: #3c4b58;
+  --chart-ink: #e8edf1;
+  --chart-ink-secondary: #a7b1ba;
+  --chart-ink-muted: #6f7e8b;
+  --chart-crosshair: rgba(232, 237, 241, 0.28);
+  --chart-marker-line: rgba(232, 237, 241, 0.45);
+  --chart-low-conf: rgba(167, 177, 186, 0.42);
+  --chart-readout-bg: rgba(11, 15, 20, 0.95);
+  --chart-readout-border: rgba(255, 255, 255, 0.13);
+  --chart-chip-ink: #0f141a;      /* knockout text on saturated chip fills */
+  --chart-shadow: rgba(0, 0, 0, 0.5);
+  --chart-peak-hold: rgba(214, 146, 17, 0.85);
+  --chart-track: #151c24;         /* level-meter track */
+  --chart-thdn: #c98500;          /* THD+N amber trace */
+  --chart-hot: #e0a53c;           /* meter "hot" amber */
+  --chart-clip: #e05555;          /* meter "clip" red */
+  --chart-faint-band: rgba(255, 255, 255, 0.016); /* flutter band tint */
+  --chart-box-glow: #131a22;      /* .chart-box top radial highlight */
+  --chart-box-ring: rgba(0, 0, 0, 0.25);
+  --chart-box-inset: rgba(0, 0, 0, 0.35);
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 8px 26px rgba(0, 0, 0, 0.42);
+
+  /* Type */
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  --radius: 9px;
+  --topbar-h: 54px;
+
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-1);
+  background-color: var(--bg-0);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ------------------------------------------------------------------ */
+/* Light instrument theme                                              */
+/* A cool near-white ground with a subtle blue bias to sit under the    */
+/* blue accent; deep, saturated series/status colours so traces and     */
+/* pills keep their contrast on the light chart surface. Dark stays the  */
+/* default (:root above); this block only overrides.                    */
+/* ------------------------------------------------------------------ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Surfaces — light plane, white cards, faintly-grey raised controls */
+  --bg-0: #e7ecf2;
+  --bg-1: #fbfcfe;
+  --bg-2: #eef2f7;
+  --bg-chart: #f1f4f8;
+
+  /* Hairlines */
+  --line-1: #d7dee6;
+  --line-2: #c1ccd7;
+  --edge-hi: rgba(255, 255, 255, 0.75);
+
+  /* Ink — cool near-black stepping down to muted slate */
+  --ink-1: #1b2531;
+  --ink-2: #4c5a68;
+  --ink-3: #7b8794;
+
+  /* Accent — a deeper blue that stays vivid on white */
+  --accent: #1f6fe0;
+  --accent-down: #175bc0;
+  --accent-dim: rgba(31, 111, 224, 0.12);
+  --accent-glow: rgba(31, 111, 224, 0.28);
+
+  /* Series — deepened for contrast on the light chart surface */
+  --series-l: #1f6fe0;
+  --series-r: #0f8a5f;
+  --series-phase: #6a5fd6;
+
+  /* Markers */
+  --marker-a: #b9741a;
+  --marker-b: #c24d86;
+
+  /* Status — legible as text on white and as saturated LED fills */
+  --good: #1a8a44;
+  --good-glow: rgba(26, 138, 68, 0.35);
+  --err: #cf3535;
+  --warn: #b0760d;
+
+  /* Front-panel scrims — light insets with a cool bias */
+  --panel-inset: #eaeff5;
+  --scrim: rgba(255, 255, 255, 0.9);
+  --topbar-a: #ffffff;
+  --topbar-b: #eef2f7;
+
+  /* Tinted front-panel text */
+  --readout-ink: #0f4f9e;
+  --readout-glow: rgba(31, 111, 224, 0.18);
+  --led-good-ink: #12703a;
+  --led-warn-ink: #8a5a06;
+  --danger-ink: #b42d2d;
+  --danger-bg: rgba(207, 53, 53, 0.1);
+  --danger-bg-strong: rgba(207, 53, 53, 0.17);
+
+  /* Elevation — softer, cool-tinted shadows */
+  --shadow-1: 0 1px 2px rgba(26, 40, 60, 0.1);
+  --shadow-2: 0 10px 28px rgba(26, 40, 60, 0.14);
+
+  /* Canvas chart palette (light) */
+  --chart-surface: #f1f4f8;
+  --chart-plot-fill: rgba(31, 90, 160, 0.03);
+  --chart-grid-minor: #e2e8ee;
+  --chart-grid-major: #cdd6df;
+  --chart-axis: #aab6c1;
+  --chart-zero-line: #8f9fad;
+  --chart-ink: #1b2531;
+  --chart-ink-secondary: #4c5a68;
+  --chart-ink-muted: #7b8794;
+  --chart-crosshair: rgba(27, 37, 49, 0.32);
+  --chart-marker-line: rgba(27, 37, 49, 0.42);
+  --chart-low-conf: rgba(96, 110, 124, 0.5);
+  --chart-readout-bg: rgba(255, 255, 255, 0.96);
+  --chart-readout-border: rgba(22, 38, 58, 0.16);
+  --chart-chip-ink: #ffffff;
+  --chart-shadow: rgba(30, 45, 65, 0.22);
+  --chart-peak-hold: rgba(176, 116, 10, 0.92);
+  --chart-track: #e2e8ef;
+  --chart-thdn: #b0760d;
+  --chart-hot: #b8830f;
+  --chart-clip: #cf3b3b;
+  --chart-faint-band: rgba(22, 42, 70, 0.03);
+  --chart-box-glow: #ffffff;
+  --chart-box-ring: rgba(22, 40, 70, 0.05);
+  --chart-box-inset: rgba(22, 40, 70, 0.07);
+}

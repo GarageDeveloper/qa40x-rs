@@ -1,0 +1,136 @@
+.device-panel {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  height: var(--topbar-h);
+  padding: 0 14px;
+  background: linear-gradient(var(--topbar-a), var(--topbar-b));
+  border-bottom: 1px solid var(--line-1);
+}
+
+.device-panel__conn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.device-panel__ctls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.device-panel__ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.device-panel__ctl-label {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* Disconnected: the whole control (label + select) reads as inert. */
+.device-panel__ctl:has(.field:disabled) {
+  opacity: 0.45;
+}
+
+.field:disabled {
+  cursor: default;
+}
+
+.device-panel__annunciators {
+  display: flex;
+  gap: 6px;
+}
+
+.annunciator {
+  padding: 2px 8px;
+  border: 1px solid var(--line-1);
+  border-radius: 999px;
+  background: var(--panel-inset);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.annunciator--lit {
+  color: var(--readout-ink);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 6px var(--readout-glow);
+}
+
+.annunciator--alarm {
+  color: var(--danger-ink);
+  border-color: var(--err);
+  background: var(--danger-bg);
+  box-shadow: none;
+}
+
+/* Near full scale (backend ClipState "near"): amber, weaker than alarm. */
+.annunciator--warn {
+  color: var(--led-warn-ink);
+  border-color: var(--warn);
+  box-shadow: none;
+}
+
+/* ≡ App-menu button + the v1 brand signature (calibration tick). */
+.device-panel__menu {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink-2);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.device-panel__menu:hover {
+  background: var(--accent-dim);
+  color: var(--ink-1);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.brand__model {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding-left: 13px;
+  color: var(--ink-1);
+}
+
+/* Signature: a calibration tick before the model name (v1 port). */
+.brand__model::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 4px;
+  height: 15px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--series-r));
+  box-shadow: 0 0 9px var(--accent-glow);
+}
+
+.brand__sub {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}

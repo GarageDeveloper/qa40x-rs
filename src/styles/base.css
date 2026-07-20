@@ -1,0 +1,134 @@
+/* Reset + shared primitives (.btn, .chip, .led). Component styles live in
+ * each component's own BEM file — nothing component-specific belongs here. */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+  overflow: hidden;
+  background-image:
+    radial-gradient(1100px 520px at 78% -8%, rgba(61, 144, 239, 0.05), transparent 70%),
+    radial-gradient(760px 420px at 10% 108%, rgba(25, 158, 112, 0.04), transparent 72%);
+  background-attachment: fixed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* --- primitives ---------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn:active {
+  background: var(--accent-dim);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn--primary:active {
+  background: var(--accent-down);
+}
+
+select.field,
+input.field {
+  padding: 5px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* Single muted ▾ (the v1 select chevron, ported verbatim): the greyed
+   arrow recedes so the white value carries the readout. */
+select.field {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M1 1l3 3 3-3' fill='none' stroke='%2371808d' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  padding-right: 24px;
+}
+
+.led {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  vertical-align: middle;
+}
+
+.led--on {
+  background: var(--good);
+  box-shadow: 0 0 6px var(--good-glow);
+}
+
+.led--busy {
+  background: var(--warn);
+}
+
+/* Utility: hide an element regardless of its component display. */
+.u-hidden {
+  display: none !important;
+}
+
+/* Collapsible sidebar sections (M5): the chevron lives in the section head
+   (first child); collapsing hides every other child. */
+.collapse-btn {
+  padding: 0 4px;
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.collapse-btn:hover {
+  color: var(--ink-1);
+}
+
+.is-collapsed > :not(:first-child) {
+  display: none;
+}

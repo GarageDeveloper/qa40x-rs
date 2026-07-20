@@ -1,0 +1,78 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust/Cargo
+/target/
+src-tauri/target/
+# Cargo.lock is committed (this is an application): reproducible CI + user builds.
+**/*.rs.bk
+*.pdb
+
+# Tauri
+src-tauri/gen/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build artifacts
+*.dmg
+*.app
+*.exe
+*.msi
+*.deb
+*.AppImage
+
+# Local reference material (manuals, etc.) — never commit
+/ignore/
+
+# USB captures & recovered vendor firmware — NEVER commit / publish.
+# These contain QuantAsylum's proprietary firmware image and protocol data.
+# Kept local only, out of respect for the author and for legal reasons
+# (vendor IP / copyright). See docs/qa402-usb-capture-analysis.html.
+docs/captures/
+*.pcapng
+*.pcap
+*.sb
+qa40x-firmware*
+
+# Private reverse-engineering material — kept LOCAL, not committed for now:
+# USB-capture protocol analysis, recovered vendor firmware, and the
+# extraction/verification scripts. Proprietary/sensitive; revisit later.
+# Public docs and screenshots live in /doc (tracked); /docs is entirely local.
+/docs/
+/firmwares/
+/tools/
+
+# Local Claude Code assistant files (internal working notes / RE narrative — not shipped)
+/.claude/
+claude.md
+CLAUDE.md
+
+# e2e harness output (tests/e2e): screenshots + Playwright artifacts
+/tests/e2e/screenshots/
+/tests/e2e/.results/

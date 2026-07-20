@@ -1,0 +1,30 @@
+{
+  "name": "qa40x-rs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "gen:types": "cd src-tauri && cargo test export_bindings",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "dev:fake": "vite --config vite.e2e.config.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tauri-apps/cli": "^2",
+    "jsdom": "^29.1.1",
+    "typescript": "~6.0.3",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.10"
+  }
+}

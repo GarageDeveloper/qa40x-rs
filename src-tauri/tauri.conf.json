@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "qa40x-rs Audio Analyzer",
+  "version": "0.1.0",
+  "identifier": "com.root42.qa40x-rs",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "qa40x-rs Audio Analyzer",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 960,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'self'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'self'; form-action 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/udev/rules.d/99-qa40x.rules": "../packaging/linux/99-qa40x.rules"
+        },
+        "postInstallScript": "../packaging/linux/postinstall.sh",
+        "postRemoveScript": "../packaging/linux/postremove.sh"
+      },
+      "rpm": {
+        "files": {
+          "/usr/lib/udev/rules.d/99-qa40x.rules": "../packaging/linux/99-qa40x.rules"
+        },
+        "postInstallScript": "../packaging/linux/postinstall.sh",
+        "postRemoveScript": "../packaging/linux/postremove.sh"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

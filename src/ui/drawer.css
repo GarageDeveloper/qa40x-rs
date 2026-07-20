@@ -1,0 +1,97 @@
+/* Slide-in drawer (v1 chrome ported to BEM). */
+
+.drawer__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 9, 13, 0.55);
+  z-index: 40;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(380px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border-left: 1px solid var(--line-2);
+  box-shadow: -18px 0 40px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  transform: translateX(100%);
+  transition: transform 0.22s ease;
+}
+
+.drawer--open {
+  transform: none;
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-1);
+  background: linear-gradient(180deg, var(--topbar-a), var(--topbar-b));
+  flex-shrink: 0;
+}
+
+.drawer__title {
+  margin: 0;
+  margin-right: auto;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-1);
+}
+
+.drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+
+/* Shared section chrome for drawer content. */
+.drawer__section {
+  margin-bottom: 18px;
+}
+
+.drawer__section-title {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.drawer__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+
+.drawer__key {
+  width: 90px;
+  flex: none;
+  color: var(--ink-3);
+}
+
+.drawer__val {
+  font-family: var(--mono);
+  color: var(--ink-1);
+}
+
+.drawer__hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.drawer__hint--warn {
+  color: var(--warn);
+}

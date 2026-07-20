@@ -1,0 +1,275 @@
+/* Signal Sources panel — full M2 rows (all kinds, tone/script editors,
+   per-slot errors) + Σ-peak / clip / range / output-only footer. */
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sources__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* The "+" add menu (v1 pattern: one small button, a dropdown of kinds). */
+.sources__addwrap {
+  position: relative;
+}
+
+/* `display: flex` below would beat the UA's `[hidden] { display: none }` —
+   restate it, or the menu never visually closes. */
+.sources__menu[hidden] {
+  display: none;
+}
+
+.sources__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg-1);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+
+.sources__menu-item {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sources__menu-item:hover {
+  background: var(--bg-2);
+}
+
+/* Every brick has the same silhouette: name + route + transport on the top
+   line, the kind-specific params below. */
+.sources__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--bg-2);
+}
+
+.sources__rowline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sources__params {
+  display: flex;
+  flex-wrap: wrap; /* the sidebar is narrow — wrap, never overflow the page */
+  align-items: center;
+  gap: 6px;
+}
+
+.sources__params:empty {
+  display: none;
+}
+
+/* Per-slot backend error (bad script, unknown waveform…): named on its row. */
+.sources__err {
+  display: none;
+  font-size: 11px;
+  color: var(--err);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sources__err--on {
+  display: block;
+}
+
+/* Expandable editors (sine tone list / script text). */
+.sources__detail {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--line-2);
+}
+
+.sources__detail--open {
+  display: flex;
+}
+
+.sources__tones {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sources__tone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding-left: 2px;
+}
+
+.sources__tones-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sources__tonestats {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+/* The script editor dialog body (panels/sources/scriptdialog.ts). */
+.scriptdialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scriptdialog__text {
+  width: min(680px, 86vw);
+  min-height: 320px;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.sources__name {
+  min-width: 44px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Waveform re-select (10d): reads like the row title's first word. */
+.sources__kind {
+  border: none;
+  background: none;
+  color: var(--ink-1);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.sources__kind:hover {
+  color: var(--accent);
+}
+
+.sources__f {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sources__u {
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.sources__num {
+  width: 62px;
+}
+
+.sources__route {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sources__route-ch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.sources__footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.sources__clip {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+}
+
+.sources__clip--lit {
+  background: var(--err);
+  border-color: var(--err);
+  box-shadow: 0 0 6px var(--err);
+}
+
+.sources__range {
+  color: var(--ink-3);
+}
+
+.sources__spacer {
+  flex: 1;
+}
+
+.sources__outonly {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* Program-lock note (M4): the transports below are greyed with a reason. */
+.sources__lock {
+  padding: 4px 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+/* A playing source held paused by a running program. */
+.sources__play--held {
+  opacity: 0.7;
+}

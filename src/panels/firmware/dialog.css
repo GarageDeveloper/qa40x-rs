@@ -1,0 +1,271 @@
+/* Firmware dialog (M5) — extract / verify / dry-run / flash. */
+
+.fw {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 460px;
+  max-width: 560px;
+}
+
+.fw__title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.fw__note {
+  margin: 2px 0;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.fw__error {
+  margin: 2px 0;
+  color: var(--danger-ink);
+  font-size: 12px;
+}
+
+.fw__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.fw__gh {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.fw__source-caption {
+  margin: 2px 0;
+  font-size: 12px;
+}
+
+.fw__source-file {
+  font-family: var(--mono);
+  color: var(--ink-1);
+}
+
+.fw__source-kind {
+  color: var(--ink-3);
+}
+
+/* --- image cards --- */
+
+.fw__card {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-1);
+  border-radius: 6px;
+  background: var(--bg-2);
+}
+
+.fw__card--mine {
+  border-color: var(--accent);
+}
+
+.fw__card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.fw__device {
+  font-weight: 600;
+}
+
+.fw__mine {
+  color: var(--accent);
+  font-size: 11.5px;
+}
+
+.fw__chip {
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 10.5px;
+}
+
+.fw__chip--known {
+  background: rgba(35, 178, 71, 0.16);
+  color: var(--led-good-ink);
+}
+
+.fw__chip--unknown {
+  background: var(--bg-1);
+  color: var(--ink-3);
+  border: 1px solid var(--line-2);
+}
+
+.fw__chip--flag {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.fw__signature {
+  margin: 4px 0 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.fw__signature--valid {
+  background: rgba(35, 178, 71, 0.12);
+  color: var(--led-good-ink);
+}
+
+.fw__signature--invalid {
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+}
+
+.fw__signer {
+  color: var(--ink-3);
+}
+
+.fw__meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.fw__meta dt {
+  color: var(--ink-3);
+}
+
+.fw__meta dd {
+  margin: 0;
+  font-family: var(--mono);
+}
+
+.fw__sha {
+  cursor: help;
+}
+
+.fw__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.fw__reason {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+/* --- dry-run / flash output --- */
+
+.fw__dry {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+}
+
+.fw__dry--ok {
+  border-color: var(--good);
+}
+
+.fw__dry--bad {
+  border-color: var(--err);
+}
+
+.fw__dry-head {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.fw__prog-bar {
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 3px;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.fw__prog-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
+/* --- releases picker --- */
+
+.fw__fw-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 10px;
+  text-align: left;
+  color: var(--ink-1);
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.fw__fw-choice:hover {
+  border-color: var(--accent);
+}
+
+.fw__fw-name {
+  font-weight: 600;
+}
+
+.fw__fw-count {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.fw__fw-arrow {
+  margin-left: auto;
+  color: var(--ink-3);
+}
+
+.fw__releases-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+.fw__releases-title {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.fw__release-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.fw__release-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.fw__release-ver {
+  font-family: var(--mono);
+}
+
+.fw__release-date,
+.fw__release-noasset {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}

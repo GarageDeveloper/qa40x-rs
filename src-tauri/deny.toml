@@ -1,0 +1,64 @@
+# cargo-deny configuration — advisory tracking (task #37).
+#
+# Run:  cargo install cargo-deny  &&  cargo deny --manifest-path src-tauri/Cargo.toml check advisories
+#
+# Two advisories have no fixed release we can adopt yet. Both were assessed by
+# reading how the crate is actually used here and found NON-EXPLOITABLE in this
+# app. They are ignored below WITH a rationale and a re-review trigger, rather
+# than left as silent noise — the standard RustSec "accepted risk" workflow.
+# Re-review whenever a fixed release appears (drop the ignore and bump) or the
+# usage below changes.
+
+[advisories]
+# Fetch the advisory DB when online; offline runs use the last local clone.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # RSA — RUSTSEC-2023-0071 "Marvin" timing side-channel. It affects RSA
+    # PRIVATE-KEY DECRYPTION timing (recovering a key by timing decrypt ops).
+    # We hold no private key and never decrypt: `rsa` is used only in
+    # firmware::verify_sb2_signature — RsaPublicKey::verify (PKCS#1 v1.5) over an
+    # offline firmware image. The attack is structurally inapplicable here. No
+    # fixed release exists upstream. Re-review if we ever add RSA decryption.
+    "RUSTSEC-2023-0071",
+
+    # quick-xml — RUSTSEC-2026-0194 / -0195 (ReDoS / memory exhaustion parsing
+    # untrusted XML). Transitive only, via tauri -> plist; our own code never
+    # parses XML/plist and never feeds it attacker-controlled input at runtime.
+    # Fix is >= 0.41.0, which requires a tauri/plist minor bump — do that when
+    # bumping Tauri, then drop these two ignores.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
+
+# Unmaintained/yanked and licence/source policy are out of scope for this task
+# (the audit's Cleanup item, #38); left at cargo-deny defaults so a first run
+# surfaces them without failing the advisory check.
+[bans]
+multiple-versions = "allow"
+
+[licenses]
+# Release policy (#38): permissive licences only, plus MPL-2.0 which is
+# file-level weak copyleft carried by unmodified transitive deps (cssparser,
+# selectors, option-ext) — assessed in THIRD_PARTY.md, no obligation triggered.
+# Keep in sync with `accepted` in about.toml.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+# dlopen2/dlopen2_derive ship no `license` manifest field (warning only);
+# their packaged MIT LICENSE file is identified by the confidence scan, and
+# about.toml pins it by SHA-256 for the generated attribution file.
+
+[sources]
+unknown-registry = "allow"
+unknown-git = "allow"

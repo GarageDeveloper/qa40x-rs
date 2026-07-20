@@ -1,0 +1,33 @@
+# cargo-about configuration — generates THIRD_PARTY_LICENSES.html:
+#   cargo about generate about.hbs > ../THIRD_PARTY_LICENSES.html
+#
+# Everything accepted here is permissive, except MPL-2.0 which is file-level
+# weak copyleft carried by unmodified transitive deps (cssparser, selectors,
+# option-ext) — assessed in THIRD_PARTY.md: no obligation triggered.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+
+# dlopen2 ships no `license` field in its Cargo.toml manifest, but both crates
+# package an MIT LICENSE file — pinned here by checksum as the source of truth.
+[dlopen2.clarify]
+license = "MIT"
+[[dlopen2.clarify.files]]
+path = "LICENSE"
+checksum = "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2"
+
+[dlopen2_derive.clarify]
+license = "MIT"
+[[dlopen2_derive.clarify.files]]
+path = "LICENSE"
+checksum = "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2"

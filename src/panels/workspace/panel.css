@@ -1,0 +1,91 @@
+/* Workspace bar — head card of the sidebar (the bench's title): name +
+   Save + Load ▾. The v1 placement, above SIGNAL SOURCES. */
+
+.wsbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.wsbar__label {
+  margin: 0;
+}
+
+.wsbar__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wsbar__name {
+  flex: 1;
+  min-width: 0;
+}
+
+.wsbar__load {
+  position: relative;
+}
+
+.wsbar__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 230px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.wsbar__menu-head {
+  padding: 6px 8px 3px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.wsbar__menu-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.wsbar__menu-item {
+  flex: 1;
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  text-align: left;
+  color: var(--ink-1);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.wsbar__menu-item:hover {
+  background: var(--accent-dim);
+}
+
+.wsbar__del {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.wsbar__del:hover {
+  color: var(--danger-ink);
+  background: var(--danger-bg);
+}

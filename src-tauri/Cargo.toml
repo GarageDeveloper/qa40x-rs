@@ -1,0 +1,64 @@
+[package]
+name = "qa40x-rs"
+version = "0.1.0"
+description = "qa40x-rs Audio Analyzer — control & analysis for QuantAsylum QA402/QA403 (unofficial)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/GarageDeveloper/qa40x-rs"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Firmware extraction / verification
+sha2 = { version = "0.10", features = ["oid"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# SB2.1 image signature verification (RSA-2048 / SHA-256, pure Rust)
+x509-cert = "0.2"
+rsa = "0.9"
+
+# Pure-Rust Inno Setup 6 payload extractor (raw LZMA2 codec, no external tools)
+lzma-rs = "0.3"
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+async-trait = "0.1"
+
+# Base64 for the REST server's raw-data (Data/*) payloads, matching QA40x
+base64 = "0.22"
+
+# USB communication (nusb: pure-Rust, cross-platform — WinUSB/IOKit/libusb-free)
+nusb = { version = "0.2", features = ["tokio"] }
+hidapi = "2"
+
+# Audio processing
+rustfft = "6.2"
+realfft = "3.3"
+
+# Math and utilities
+num-complex = "0.4"
+thiserror = "2.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rhai = { version = "1.25.1", features = ["sync"] }
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-compat"] }
+

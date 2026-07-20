@@ -1,0 +1,9 @@
+/* App drawer (≡) — REST + appearance. Most chrome comes from ui/drawer.css. */
+
+.appmenu__expose {
+  cursor: pointer;
+}
+
+.appmenu__expose input {
+  margin: 0;
+}

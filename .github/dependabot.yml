@@ -1,0 +1,50 @@
+# Dependabot — automatic dependency-update pull requests.
+# Docs: https://docs.github.com/code-security/dependabot
+#
+# This is separate from "Dependabot alerts" (which you enable with a toggle in
+# Settings → Security). This file schedules *update PRs*; updates are grouped so
+# you get a few tidy PRs, not dozens.
+
+version: 2
+updates:
+  # Keep the GitHub Actions in .github/workflows current (this is what would have
+  # bumped actions/checkout etc. off the deprecated Node 20 for you).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Rust crates (needs Cargo.lock, which is committed). Monthly, grouped, capped.
+  # Major bumps are IGNORED here (they need code migration and have broken main
+  # before — e.g. nusb/sha2/rand); we do majors deliberately, by hand. Security
+  # fixes still surface via Dependabot ALERTS regardless of this ignore.
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Frontend npm packages (needs package-lock.json, which is committed).
+  # Same policy: minor/patch only; do majors deliberately.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

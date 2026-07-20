@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="660" viewBox="0 0 660 660">
+  <!-- DMG window background, 660x400, drawn centred in a square canvas:
+       qlmanage renders SVGs on a square, and sips crops from the centre, so
+       the useful design lives in rows 130..530. Regenerate with:
+         qlmanage -t -s 1320 -o . background.svg
+         mv background.svg.png background.png && sips -c 800 1320 background.png
+       Window coordinates below are the DMG's: (x, y-130) in settings.py terms.
+       App icon centre (180,170), Applications centre (480,170), README (330,312). -->
+  <rect width="660" height="660" fill="#20262b"/>
+  <g transform="translate(0,130)">
+    <text x="330" y="62" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+          font-size="22" font-weight="600" fill="#c8d2da">qa40x-rs Audio Analyzer</text>
+    <text x="330" y="90" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+          font-size="14" fill="#71808d">Drag the app onto the Applications folder to install</text>
+    <!-- Arrow from the app icon to Applications -->
+    <g stroke="#8fa1b3" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.9">
+      <path d="M 268 170 L 380 170"/>
+      <path d="M 380 170 L 356 152 M 380 170 L 356 188" stroke-linejoin="round"/>
+    </g>
+    <!-- README icon sits bottom-centre (icon at (330,312)); no hint line —
+         tagged builds are notarized, so first launch needs no workaround. -->
+  </g>
+</svg>

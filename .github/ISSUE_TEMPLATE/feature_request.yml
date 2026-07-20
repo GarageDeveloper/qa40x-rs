@@ -1,0 +1,22 @@
+name: Feature request
+description: A measurement, workflow or UI capability you're missing
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The measurement or workflow, not (only) the solution — context helps.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you use today
+      description: E.g. the official app, REST scripting, manual post-processing.

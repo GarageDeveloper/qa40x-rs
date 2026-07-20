@@ -1,0 +1,180 @@
+{
+  "version": 4,
+  "name": "Amp / DAC bench",
+  "layout": {
+    "pattern": "2x2",
+    "slots": [
+      "g-spec",
+      "g-thd",
+      "g-fr",
+      "g-scope"
+    ]
+  },
+  "graphs": [
+    {
+      "id": "g-spec",
+      "title": "Spectrum L",
+      "domain": "fd",
+      "series": [
+        {
+          "traceId": "hw-in-left",
+          "domain": "fd"
+        }
+      ],
+      "x": {
+        "log": true,
+        "label": "Frequency (Hz)"
+      },
+      "y": {
+        "autoscale": true,
+        "label": "Level (dBFS)"
+      },
+      "measurements": [
+        "thd",
+        "thddb",
+        "thdn",
+        "sinad"
+      ]
+    },
+    {
+      "id": "g-thd",
+      "title": "THD vs freq",
+      "domain": "sweep",
+      "series": [
+        {
+          "traceId": "t-thd",
+          "domain": "sweep"
+        }
+      ],
+      "x": {
+        "log": true,
+        "label": "Frequency (Hz)"
+      },
+      "y": {
+        "autoscale": true,
+        "label": "THD (dB)"
+      },
+      "measurements": [],
+      "showPhase": true
+    },
+    {
+      "id": "g-fr",
+      "title": "Frequency response",
+      "domain": "sweep",
+      "series": [
+        {
+          "traceId": "t-fr",
+          "domain": "sweep"
+        }
+      ],
+      "x": {
+        "log": true,
+        "label": "Frequency (Hz)"
+      },
+      "y": {
+        "autoscale": true,
+        "label": "THD (dB)"
+      },
+      "measurements": [],
+      "showPhase": true
+    },
+    {
+      "id": "g-scope",
+      "title": "Scope L",
+      "domain": "td",
+      "series": [
+        {
+          "traceId": "hw-in-left",
+          "domain": "td"
+        }
+      ],
+      "x": {
+        "label": "Time"
+      },
+      "y": {
+        "label": "Level"
+      },
+      "measurements": [
+        "rms",
+        "peak",
+        "crest"
+      ]
+    }
+  ],
+  "traces": [
+    {
+      "id": "hw-in-left",
+      "source": {
+        "kind": "hw_input",
+        "channel": "left"
+      },
+      "label": "Input L"
+    },
+    {
+      "id": "hw-in-right",
+      "source": {
+        "kind": "hw_input",
+        "channel": "right"
+      },
+      "label": "Input R"
+    },
+    {
+      "id": "t-gen",
+      "label": "Sine 1000 Hz",
+      "source": {
+        "kind": "generator",
+        "params": {
+          "waveform": "sine",
+          "frequency": 1000,
+          "level": -12,
+          "extraTones": [],
+          "output": "both",
+          "window": 8192
+        }
+      },
+      "unit": "dbfs",
+      "run": "idle",
+      "seq": 0
+    },
+    {
+      "id": "t-thd",
+      "label": "THD vs freq",
+      "source": {
+        "kind": "sweep",
+        "params": {
+          "measurement": "thd",
+          "channel": "left",
+          "start": 20,
+          "end": 20000,
+          "level": -6,
+          "points": 30,
+          "duration": 1,
+          "metric": "thd_db"
+        }
+      },
+      "unit": "db",
+      "run": "idle",
+      "seq": 0
+    },
+    {
+      "id": "t-fr",
+      "label": "FR L",
+      "source": {
+        "kind": "sweep",
+        "params": {
+          "measurement": "fr",
+          "channel": "left",
+          "start": 20,
+          "end": 20000,
+          "level": -6,
+          "points": 30,
+          "duration": 1,
+          "metric": "thd_db"
+        }
+      },
+      "unit": "db",
+      "run": "idle",
+      "seq": 0
+    }
+  ]
+}
