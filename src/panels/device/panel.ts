@@ -17,6 +17,7 @@ import {
 import type { Ipc } from "../../ipc/ipc";
 import {
   connect,
+  connectVirtual,
   disconnect,
   setInputRange,
   setOutputRange,
@@ -85,6 +86,22 @@ export function mountDevicePanel(
       else if (status === "disconnected") void connect(store, ipc);
     },
   }, "Connect");
+  // Demo mode: one click attaches the embedded virtual QA403 — for trying
+  // the app with no hardware, and for development. Hidden once connected;
+  // the DEMO chip then marks the session so it can't pass for a measurement.
+  const demoBtn = el("button.btn", {
+    "data-testid": "btn-demo",
+    title: "Demo mode — connect to a built-in virtual QA403 (no hardware needed)",
+    onclick: () => {
+      if (store.get().device.status === "disconnected")
+        void connectVirtual(store, ipc);
+    },
+  }, "Demo");
+  const demoChip = el(
+    "span.device-panel__demo-chip.u-hidden",
+    { "data-testid": "demo-chip", title: "Connected to the built-in virtual device" },
+    "DEMO"
+  );
 
   const inputSel = select("input-range", "In", (v) =>
     void setInputRange(store, ipc, v)
@@ -133,7 +150,7 @@ export function mountDevicePanel(
       {},
       menuBtn,
       brand,
-      el("div.device-panel__conn", {}, led, connectBtn),
+      el("div.device-panel__conn", {}, led, connectBtn, demoBtn, demoChip),
       el(
         "div.device-panel__ctls",
         {},
@@ -162,6 +179,11 @@ export function mountDevicePanel(
       connectBtn.textContent =
         device.status === "connected" ? "Disconnect" : "Connect";
       connectBtn.toggleAttribute("disabled", device.status === "connecting");
+      demoBtn.classList.toggle("u-hidden", device.status !== "disconnected");
+      demoChip.classList.toggle(
+        "u-hidden",
+        !(device.status === "connected" && device.info?.is_virtual)
+      );
 
       const cfg = device.config;
       setOptions(

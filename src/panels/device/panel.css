@@ -14,6 +14,20 @@
   gap: 10px;
 }
 
+/* DEMO chip: amber, annunciator-shaped — marks a virtual-device session so a
+   demo screen can never be mistaken for a hardware measurement. */
+.device-panel__demo-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--led-warn-ink);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
 .device-panel__ctls {
   display: flex;
   align-items: center;

@@ -252,6 +252,24 @@ async fn connect_device(
     Ok("Connected successfully".to_string())
 }
 
+/// Connect to the embedded virtual QA40x (demo mode). The simulator runs
+/// in-process behind the same endpoint queues as the hardware, so the whole
+/// app works on it; no USB monitor is started — a virtual device never
+/// unplugs, it only disconnects through `disconnect_device`.
+#[tauri::command]
+async fn connect_virtual_device(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, String> {
+    info!("Connect virtual device (demo mode) command called");
+    let device = state.lock().await.device.clone();
+    let device_lock = device.lock().await;
+    device_lock
+        .connect_virtual()
+        .await
+        .map_err(|e| format!("Failed to connect to the virtual device: {}", e))?;
+    Ok("Connected to the virtual QA40x (demo mode)".to_string())
+}
+
 #[tauri::command]
 async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
     info!("Disconnect device command called");
@@ -1115,6 +1133,7 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             connect_device,
+            connect_virtual_device,
             disconnect_device,
             is_device_connected,
             is_device_present,

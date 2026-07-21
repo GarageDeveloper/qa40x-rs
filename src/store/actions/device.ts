@@ -71,6 +71,38 @@ export async function connect(
 }
 
 /**
+ * Demo mode: connect to the embedded virtual QA40x. No hardware, no
+ * download — the backend runs the simulator in-process and the whole app
+ * (measurements, generator, REST, scripts) works on it. The session is
+ * badged via `DeviceMeta.is_virtual`.
+ */
+export async function connectVirtual(
+  store: Store<AppState>,
+  ipc: Ipc
+): Promise<void> {
+  store.update("device/connecting", (s) => ({
+    ...s,
+    device: { ...s.device, status: "connecting", userDisconnected: false },
+  }));
+  try {
+    await ipc.call("connect_virtual_device", {});
+    const info = await ipc.call("get_device_info", {});
+    store.update("device/connected", (s) => ({
+      ...s,
+      device: { ...s.device, status: "connected", present: true, info },
+    }));
+    await refreshConfig(store, ipc);
+    toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
+  } catch (e) {
+    store.update("device/connect-failed", (s) => ({
+      ...s,
+      device: { ...s.device, status: "disconnected" },
+    }));
+    toast(store, "error", `Demo mode failed: ${e}`);
+  }
+}
+
+/**
  * Auto-connect tick (v1 parity): while the user hasn't explicitly
  * disconnected, connect whenever a device is present on the bus. Runs at
  * startup and on a slow poll — also what reconnects after a replug.

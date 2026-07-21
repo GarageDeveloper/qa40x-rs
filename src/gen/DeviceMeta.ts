@@ -35,4 +35,10 @@ supports_flash: boolean,
  * [`Capabilities`] doc for why the output Vrms limits are informational
  * for now (task #48).
  */
-capabilities: Capabilities, };
+capabilities: Capabilities, 
+/**
+ * True when this is the embedded virtual device (demo mode), not real
+ * hardware — the UI badges the session so a demo can never be mistaken
+ * for a measurement.
+ */
+is_virtual: boolean, };

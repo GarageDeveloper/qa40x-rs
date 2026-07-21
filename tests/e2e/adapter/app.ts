@@ -49,6 +49,51 @@ export class AppV2 {
     );
   }
 
+  async waitDisconnected(timeoutMs = 15_000): Promise<void> {
+    await this.drv.waitUntil(
+      () =>
+        document
+          .querySelector('[data-testid="device-led"]')
+          ?.classList.contains("led--on") === false,
+      undefined as void,
+      { timeoutMs }
+    );
+  }
+
+  /** Unplug/replug the fake bus device (same seam as the v1 suite). */
+  async setPresent(present: boolean): Promise<void> {
+    await this.drv.eval(
+      (p: boolean) => window.__qa40xE2E.device.setPresent(p),
+      present
+    );
+  }
+
+  /** Demo mode: the Demo button (visible only while disconnected). */
+  async clickDemo(): Promise<void> {
+    await this.drv.click('[data-testid="btn-demo"]');
+  }
+
+  async demoButtonVisible(): Promise<boolean> {
+    return this.drv.eval(
+      () =>
+        document
+          .querySelector('[data-testid="btn-demo"]')
+          ?.classList.contains("u-hidden") === false,
+      undefined as void
+    );
+  }
+
+  /** The DEMO chip badging a virtual-device session. */
+  async demoChipVisible(): Promise<boolean> {
+    return this.drv.eval(
+      () =>
+        document
+          .querySelector('[data-testid="demo-chip"]')
+          ?.classList.contains("u-hidden") === false,
+      undefined as void
+    );
+  }
+
   async identity(): Promise<string | null> {
     return this.drv.text('[data-testid="device-identity"]');
   }

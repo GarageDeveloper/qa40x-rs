@@ -37,6 +37,10 @@ project under MIT OR Apache-2.0:
   TLS for downloading official installers over HTTPS.
 - **Tauri, wry, tao** (Apache-2.0 OR MIT) — the desktop app framework.
 - **rustfft, realfft** (MIT / Apache-2.0 OR MIT) — FFT/DSP.
+- **vqa40x-core** (MIT) — the virtual QA402/QA403 device model behind Demo
+  mode, from our own
+  [virtual-qa40x-rs](https://github.com/GarageDeveloper/virtual-qa40x-rs)
+  project (git dependency, pinned to a release tag).
 
 ## Attribution obligation
 
