@@ -92,7 +92,8 @@
   box-shadow: none;
 }
 
-/* ≡ App-menu button + the v1 brand signature (calibration tick). */
+/* ⚙ App-settings button (top-right, matching its right-anchored drawer)
+   + the v1 brand signature (calibration tick). */
 .device-panel__menu {
   padding: 2px 8px;
   border: 0;
