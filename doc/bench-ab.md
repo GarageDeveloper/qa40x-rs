@@ -116,9 +116,11 @@ Frequency-response deviation, linearity and THD @ 1 kHz agree to within
 0.03 dB / 0.001 dB / 0.9 dB — the acquisition chains track each other
 remarkably well. Three real divergences surfaced:
 
-1. **Right channel silent on qa40x-rs**: the REST `acquisition()` drives the
-   tone on the left output only (`generate_and_capture(&tone, &silence)`,
-   `src/rest.rs`), while the official Gen1 drives both outputs.
+1. **Right channel silent on qa40x-rs** *(fixed on this branch)*: the REST
+   `acquisition()` drove the tone on the left output only, while the official
+   Gen1 drives both outputs. It now routes the stimulus with
+   `route_stimulus(&tone, Route::Both)`; verified in loopback (R at
+   −9.61 dBV, THD R −107.6 dB, FR R matching the official trace).
 2. **Integrated noise**: qa40x-rs `RmsDbv` with the generator off reads
    ≈ −76 dBV (20 Hz–20 kHz) where the official app reads ≈ −108 dBV on the
    same wiring; THD+N and SNR differ by ≈ 10 dB in the same direction. The
