@@ -716,6 +716,13 @@ impl QA40xDevice {
         if self.is_virtual() {
             return true;
         }
+        self.is_hardware_present().await
+    }
+
+    /// Whether REAL hardware is on the USB bus — never satisfied by the
+    /// virtual device. The frontend polls this during a demo session to hand
+    /// over to a QA40x the moment one is plugged in.
+    pub async fn is_hardware_present(&self) -> bool {
         match nusb::list_devices().await {
             Ok(mut devices) => {
                 devices.any(|dev| dev.vendor_id() == QA40X_VID && Model::from_pid(dev.product_id()).is_some())

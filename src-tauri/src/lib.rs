@@ -322,6 +322,16 @@ async fn is_device_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
     Ok(device.is_present().await)
 }
 
+/// Whether REAL hardware is on the USB bus — the virtual device never counts.
+/// Polled by the frontend during a demo session so a newly plugged QA40x
+/// takes over from the simulator.
+#[tauri::command]
+async fn is_hardware_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let app_state = state.lock().await;
+    let device = app_state.device.lock().await;
+    Ok(device.is_hardware_present().await)
+}
+
 #[tauri::command]
 async fn set_input_gain(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
@@ -1135,6 +1145,7 @@ pub fn run() {
             connect_device,
             connect_virtual_device,
             disconnect_device,
+            is_hardware_present,
             is_device_connected,
             is_device_present,
             set_input_gain,

@@ -31,3 +31,25 @@ test("demo button connects the virtual device and badges the session", async ({
   expect(await app.demoChipVisible()).toBe(false);
   expect(await app.demoButtonVisible()).toBe(true);
 });
+
+test("plugging real hardware in mid-demo hands the session over", async ({
+  app,
+}) => {
+  await app.waitConnected();
+  await app.setPresent(false);
+  await app.waitDisconnected();
+
+  await app.clickDemo();
+  await app.waitConnected();
+  expect(await app.demoChipVisible()).toBe(true);
+
+  // A unit appears on the bus: the demo session must yield to it (the
+  // absent→present edge, polled on the 2 s auto-connect tick).
+  await app.setPresent(true);
+  await expect
+    .poll(() => app.demoChipVisible(), { timeout: 15_000 })
+    .toBe(false);
+  await app.waitConnected();
+  expect(await app.connectLabel()).toBe("Disconnect");
+  expect(await app.demoButtonVisible()).toBe(false);
+});

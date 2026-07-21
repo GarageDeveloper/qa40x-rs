@@ -45,6 +45,9 @@ export interface Commands {
   disconnect_device: { args: Record<string, never>; result: string };
   is_device_connected: { args: Record<string, never>; result: boolean };
   is_device_present: { args: Record<string, never>; result: boolean };
+  // Real hardware on the USB bus (the virtual device never counts) — polled
+  // during a demo session so a newly plugged QA40x takes over.
+  is_hardware_present: { args: Record<string, never>; result: boolean };
   get_device_info: { args: Record<string, never>; result: DeviceMeta | null };
 
   // Configuration

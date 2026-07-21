@@ -249,6 +249,9 @@ export class FakeDevice {
       /* -- presence / connection -- */
       case "is_device_present":
         return this.present;
+      case "is_hardware_present":
+        // The bus device, never the virtual one — mirrors the backend.
+        return this.present;
       case "is_device_connected":
         return this.connected;
       case "connect_device":
