@@ -125,18 +125,21 @@ export function mountDevicePanel(
     "aria-label": "Toggle theme",
   }, "◐");
 
-  // ≡ opens the App drawer (application periphery: REST, appearance…);
-  // the brand is the v1 signature — calibration tick + model + subtitle.
+  // ⚙ opens the App drawer (application periphery: REST, appearance…).
+  // Top-RIGHT, like the drawer it opens and the status bar's REST indicator —
+  // a left trigger for a right-anchored panel broke the spatial link (#13);
+  // the top-left corner stays the brand's (and a future real app menu's).
   const menuBtn = el(
     "button.device-panel__menu",
     {
       "data-testid": "btn-app-menu",
-      title: "App menu (REST automation, appearance…)",
-      "aria-label": "App menu",
+      title: "App settings (REST automation, appearance…)",
+      "aria-label": "App settings",
       onclick: () => openAppDrawer(store, ipc),
     },
-    "≡"
+    "⚙︎"
   );
+  // The brand is the v1 signature — calibration tick + model + subtitle.
   const brand = el(
     "div.brand",
     {},
@@ -148,7 +151,6 @@ export function mountDevicePanel(
     el(
       "div.device-panel",
       {},
-      menuBtn,
       brand,
       el("div.device-panel__conn", {}, led, connectBtn, demoBtn, demoChip),
       el(
@@ -160,7 +162,8 @@ export function mountDevicePanel(
         fftSel.root
       ),
       badges,
-      themeBtn
+      themeBtn,
+      menuBtn
     )
   );
 
