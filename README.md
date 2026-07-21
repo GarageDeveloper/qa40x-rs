@@ -88,11 +88,11 @@ Latest release (all platforms and older versions) on the
 Direct downloads for the current version:
 
 - **macOS (Apple Silicon)** —
-  [`qa40x-rs Audio Analyzer_0.1.0_aarch64.dmg`](https://github.com/GarageDeveloper/qa40x-rs/releases/download/v0.1.0/qa40x-rs.Audio.Analyzer_0.1.0_aarch64.dmg):
+  [`qa40x-rs Audio Analyzer_0.2.0_aarch64.dmg`](https://github.com/GarageDeveloper/qa40x-rs/releases/download/v0.2.0/qa40x-rs.Audio.Analyzer_0.2.0_aarch64.dmg):
   drag the app onto Applications. Release builds are signed with a Developer ID
   and notarized by Apple, so they open with no Gatekeeper warning.
 - **macOS (Intel, legacy)** —
-  [`qa40x-rs Audio Analyzer_0.1.0_x86_64-legacy.dmg`](https://github.com/GarageDeveloper/qa40x-rs/releases/download/v0.1.0/qa40x-rs.Audio.Analyzer_0.1.0_x86_64-legacy.dmg):
+  [`qa40x-rs Audio Analyzer_0.2.0_x86_64-legacy.dmg`](https://github.com/GarageDeveloper/qa40x-rs/releases/download/v0.2.0/qa40x-rs.Audio.Analyzer_0.2.0_x86_64-legacy.dmg):
   same signed + notarized build for older Intel Macs. Provided for the shrinking
   Intel-Mac base and expected to be retired within a year or two.
 - **Linux** — `.deb` / `.rpm` (both install the USB udev rule and reload udev
