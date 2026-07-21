@@ -33,6 +33,13 @@ application **v1** and the upcoming **v2** expected in 2026.
 > official application, and please [report](https://github.com/GarageDeveloper/qa40x-rs/issues)
 > anything that looks wrong. The software comes with no warranty (see the
 > [license](#license)).
+>
+> That cross-check is itself automated: an A/B loopback bench runs the same
+> measurement battery against this app and the official one on the same
+> QA402. Frequency response, linearity and THD currently agree within
+> 0.03 dB / 0.001 dB / 1 dB; the known divergences (integrated-noise
+> readouts, ≈ 0.4 dB absolute level) are tracked in
+> [doc/bench-ab.md](doc/bench-ab.md).
 
 ---
 
