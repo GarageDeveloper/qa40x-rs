@@ -63,7 +63,9 @@ application **v1** and the upcoming **v2** expected in 2026.
   download. The whole app runs on it — simulated DAC→ADC loopback with a
   realistic noise floor and mild harmonic distortion, a real factory
   calibration page, live telemetry, REST and scripting included. Sessions
-  are badged **DEMO** so a demo screen can never pass for a measurement.
+  are badged **DEMO** so a demo screen can never pass for a measurement,
+  and plugging a real unit in mid-demo hands the session over to it
+  automatically.
 - **Firmware tools** *(advanced, opt-in — see the warning below)* — extract
   official firmware from a QuantAsylum installer you already own, verify it
   against a known-hash registry and its cryptographic signature, and flash it.
@@ -71,6 +73,13 @@ application **v1** and the upcoming **v2** expected in 2026.
 ---
 
 ## Install
+
+> **No QA40x at hand?** You can still try everything: click **Demo** (next to
+> Connect) and the app attaches a built-in virtual QA403 — spectrum, THD,
+> sweeps, generator, REST and scripting all work against a simulated,
+> calibrated loopback. Nothing extra to download. The session is badged
+> **DEMO**, and the moment you plug a real unit in, the app switches over to
+> it automatically.
 
 ### Prebuilt apps
 
