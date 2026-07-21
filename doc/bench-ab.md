@@ -106,6 +106,25 @@ can gate a release checklist.
 - **HTTP.sys quirks**: body-less PUT/POST get an explicit `Content-Length: 0`
   (411 otherwise), and the Host header is pinned to `localhost:9402` through
   the relay (see above).
+- **Generator designators**: `Gen1`/`Gen2` in the official API (numeric
+  designators get a 400); qa40x-rs ignores the segment, so the official form
+  works on both. Band bounds must be integer Hz for the official parser.
+
+## Findings from the first hardware run (2026-07-21, QA402 fw 60 vs app 1.220)
+
+Frequency-response deviation, linearity and THD @ 1 kHz agree to within
+0.03 dB / 0.001 dB / 0.9 dB — the acquisition chains track each other
+remarkably well. Three real divergences surfaced:
+
+1. **Right channel silent on qa40x-rs**: the REST `acquisition()` drives the
+   tone on the left output only (`generate_and_capture(&tone, &silence)`,
+   `src/rest.rs`), while the official Gen1 drives both outputs.
+2. **Integrated noise**: qa40x-rs `RmsDbv` with the generator off reads
+   ≈ −76 dBV (20 Hz–20 kHz) where the official app reads ≈ −108 dBV on the
+   same wiring; THD+N and SNR differ by ≈ 10 dB in the same direction. The
+   qa40x-rs REST measurement chain (windowing/integration) needs a look.
+3. **Absolute level**: −9.67 dBV vs −10.04 dBV for the nominally identical
+   stimulus (output-range mapping / calibration difference of ≈ 0.36 dB).
 
 ## Usage
 
