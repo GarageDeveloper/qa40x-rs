@@ -226,9 +226,26 @@ pub fn flash_via_hid(
                 let _ = api.refresh_devices();
             }
             Err(_) => {
-                return Err(format!(
-                    "The device did not switch to the NXP bootloader ({NXP_VID:04x}:{NXP_PID:04x}) in time — flash aborted (nothing was written)."
-                ));
+                // Present-but-unopenable means a permission problem (e.g. no
+                // udev rule for the bootloader's hidraw node on Linux), not a
+                // device that never re-enumerated — say so.
+                let present = api
+                    .device_list()
+                    .any(|d| d.vendor_id() == NXP_VID && d.product_id() == NXP_PID);
+                return Err(if present {
+                    let hint = if cfg!(target_os = "linux") {
+                        " This usually means missing permissions on its hidraw device node: add the 1fc9:0022 udev rules from 99-qa40x.rules, reload udev, then power-cycle the analyzer and retry."
+                    } else {
+                        " Another application may be holding the device open — close it, power-cycle the analyzer and retry."
+                    };
+                    format!(
+                        "The NXP bootloader ({NXP_VID:04x}:{NXP_PID:04x}) enumerated but could not be opened — flash aborted (nothing was written).{hint}"
+                    )
+                } else {
+                    format!(
+                        "The device did not switch to the NXP bootloader ({NXP_VID:04x}:{NXP_PID:04x}) in time — flash aborted (nothing was written)."
+                    )
+                });
             }
         }
     };
