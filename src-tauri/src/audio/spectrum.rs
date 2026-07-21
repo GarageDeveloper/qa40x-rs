@@ -51,8 +51,10 @@ pub struct Peak {
 pub struct SpectrumAnalyzer {
     config: SpectrumConfig,
     fft_processor: FftProcessor,
-    accumulator: Option<Vec<f32>>,
-    num_accumulated: usize,
+    /// Rolling window of the last N power spectra for power-averaging mode.
+    /// A window (not a batch accumulator): once full it keeps rolling, so the
+    /// displayed average never restarts from a single frame (issue #10).
+    power_buf: std::collections::VecDeque<Vec<f32>>,
     /// Coherent (complex) averaging mode: sum the complex spectra so the phase-
     /// locked signal adds while random noise cancels. Off = power averaging.
     coherent: bool,
@@ -71,8 +73,7 @@ impl SpectrumAnalyzer {
         Self {
             config,
             fft_processor: FftProcessor::new(),
-            accumulator: None,
-            num_accumulated: 0,
+            power_buf: std::collections::VecDeque::new(),
             coherent: false,
             complex_buf: std::collections::VecDeque::new(),
             last_lin: Vec::new(),
@@ -92,8 +93,7 @@ impl SpectrumAnalyzer {
     pub fn set_coherent(&mut self, on: bool) {
         if self.coherent != on {
             self.coherent = on;
-            self.accumulator = None;
-            self.num_accumulated = 0;
+            self.power_buf.clear();
             self.complex_buf.clear();
         }
     }
@@ -103,6 +103,9 @@ impl SpectrumAnalyzer {
         self.config.num_averages = n.max(1);
         while self.complex_buf.len() > self.config.num_averages {
             self.complex_buf.pop_front();
+        }
+        while self.power_buf.len() > self.config.num_averages {
+            self.power_buf.pop_front();
         }
     }
 
@@ -155,49 +158,37 @@ impl SpectrumAnalyzer {
             return self.accumulate_coherent(&fft_result, sample_rate);
         }
 
-        // Accumulate for averaging
+        // Power averaging: rolling window of the last N power spectra, same
+        // shape as the coherent path. Drop the history if the FFT size changed
+        // (e.g. the caller switched sample counts); averaging across different
+        // lengths would index out of bounds.
         let power = fft_result.power;
-
-        match self.accumulator {
-            // Reset the accumulator if the FFT size changed (e.g. the caller
-            // switched sample counts); accumulating across different lengths
-            // would index out of bounds.
-            Some(ref acc) if acc.len() != power.len() => {
-                self.accumulator = Some(power.clone());
-                self.num_accumulated = 1;
-            }
-            Some(ref mut acc) => {
-                for (a, &p) in acc.iter_mut().zip(power.iter()) {
-                    *a += p;
-                }
-                self.num_accumulated += 1;
-            }
-            None => {
-                self.accumulator = Some(power.clone());
-                self.num_accumulated = 1;
-            }
+        if self.power_buf.back().is_some_and(|b| b.len() != power.len()) {
+            self.power_buf.clear();
+        }
+        self.power_buf.push_back(power);
+        while self.power_buf.len() > self.config.num_averages.max(1) {
+            self.power_buf.pop_front();
         }
 
-        // Check if we have enough averages
-        if self.num_accumulated >= self.config.num_averages {
-            let result = self.compute_result(&fft_result.frequencies, sample_rate);
-            // Reset accumulator
-            self.accumulator = None;
-            self.num_accumulated = 0;
-            result
-        } else {
-            // Return intermediate result
-            self.compute_result(&fft_result.frequencies, sample_rate)
-        }
+        self.compute_result(&fft_result.frequencies, sample_rate)
     }
 
-    /// Compute spectrum result from accumulated data
+    /// Compute spectrum result by averaging the rolling power window.
     fn compute_result(&self, frequencies: &[f32], _sample_rate: u32) -> SpectrumResult {
-        let acc = self.accumulator.as_ref().unwrap();
-        let n = self.num_accumulated.max(1);
+        let n = self.power_buf.len().max(1) as f32;
+        let bins = self.power_buf.back().map_or(0, |b| b.len());
 
-        // Average power spectrum
-        let averaged_power: Vec<f32> = acc.iter().map(|&p| p / n as f32).collect();
+        // Average power spectrum over the window
+        let mut averaged_power = vec![0.0f32; bins];
+        for frame in &self.power_buf {
+            for (a, &p) in averaged_power.iter_mut().zip(frame.iter()) {
+                *a += p;
+            }
+        }
+        for a in &mut averaged_power {
+            *a /= n;
+        }
 
         // Convert to magnitude in dB. Floor at 1e-20 (→ -200 dBFS) rather than
         // 1e-10: for a POWER value 10·log10(1e-10) = -100 dB, which clamped the
@@ -343,12 +334,11 @@ impl SpectrumAnalyzer {
         peaks
     }
 
-    /// Reset the analyzer: empty BOTH accumulation paths (power accumulator
-    /// and the coherent complex window) so the next frame starts from scratch
+    /// Reset the analyzer: empty BOTH accumulation paths (power window and
+    /// the coherent complex window) so the next frame starts from scratch
     /// whichever averaging mode is active.
     pub fn reset(&mut self) {
-        self.accumulator = None;
-        self.num_accumulated = 0;
+        self.power_buf.clear();
         self.complex_buf.clear();
     }
 
@@ -500,5 +490,44 @@ mod tests {
                 "coherent={coherent}: stale averaging after reset (peak {peak} dBFS)"
             );
         }
+    }
+
+    /// Issue #10: power averaging must be a ROLLING window, like the coherent
+    /// path. After 8 loud frames, one silent frame should still read ≈ the tone
+    /// level (7 of the 8 window slots still hold it, 10·log10(7/8) ≈ −0.6 dB).
+    /// A batch-and-reset accumulator instead starts over after frame N, so
+    /// frame N+1 reads the silent frame alone (≈ −200 dB) — the "averages
+    /// restart on the 8th average" a user reported.
+    #[test]
+    fn test_power_averaging_rolls_instead_of_resetting() {
+        let config = SpectrumConfig {
+            fft_size: 1024,
+            num_averages: 8,
+            freq_min: 20.0,
+            freq_max: 20000.0,
+            log_scale: true,
+        };
+        let sample_rate = 48000;
+        let loud: Vec<f32> = (0..1024)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                0.9 * (2.0 * std::f32::consts::PI * 1000.0 * t).sin()
+            })
+            .collect();
+        let silence = vec![0.0f32; 1024];
+
+        let mut analyzer = SpectrumAnalyzer::new(config);
+        for _ in 0..8 {
+            analyzer.process(&loud, sample_rate);
+        }
+        let ninth = analyzer.process(&silence, sample_rate);
+        let peak = ninth
+            .magnitudes_db
+            .iter()
+            .fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+        assert!(
+            peak > -10.0,
+            "window was dropped after frame 8: frame 9 reads {peak} dBFS instead of ≈ the tone level"
+        );
     }
 }
