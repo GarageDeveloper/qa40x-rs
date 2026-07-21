@@ -71,6 +71,56 @@ export async function connect(
 }
 
 /**
+ * Hardware presence seen by the LAST demo-session poll. Baseline for the
+ * edge detection in {@link autoConnectTick}: a demo session hands over to
+ * real hardware on an absent→present TRANSITION (the user plugs a unit in
+ * mid-demo), never on mere presence — clicking Demo with a unit already
+ * connected to the bus is an explicit choice that must stick.
+ * `null` = no baseline yet (first poll after a demo connect only records).
+ */
+let demoHwPresent: boolean | null = null;
+
+/**
+ * Demo mode: connect to the embedded virtual QA40x. No hardware, no
+ * download — the backend runs the simulator in-process and the whole app
+ * (measurements, generator, REST, scripts) works on it. The session is
+ * badged via `DeviceMeta.is_virtual`.
+ */
+export async function connectVirtual(
+  store: Store<AppState>,
+  ipc: Ipc
+): Promise<void> {
+  demoHwPresent = null;
+  store.update("device/connecting", (s) => ({
+    ...s,
+    device: { ...s.device, status: "connecting", userDisconnected: false },
+  }));
+  try {
+    await ipc.call("connect_virtual_device", {});
+    const info = await ipc.call("get_device_info", {});
+    store.update("device/connected", (s) => ({
+      ...s,
+      device: { ...s.device, status: "connected", present: true, info },
+    }));
+    // Seed the hand-over baseline NOW: hardware plugged in from here on is a
+    // transition; hardware already on the bus was an explicit non-choice.
+    try {
+      demoHwPresent = await ipc.call("is_hardware_present", {});
+    } catch {
+      demoHwPresent = null; // unknown — the tick records a baseline first
+    }
+    await refreshConfig(store, ipc);
+    toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
+  } catch (e) {
+    store.update("device/connect-failed", (s) => ({
+      ...s,
+      device: { ...s.device, status: "disconnected" },
+    }));
+    toast(store, "error", `Demo mode failed: ${e}`);
+  }
+}
+
+/**
  * Auto-connect tick (v1 parity): while the user hasn't explicitly
  * disconnected, connect whenever a device is present on the bus. Runs at
  * startup and on a slow poll — also what reconnects after a replug.
@@ -79,7 +129,28 @@ export async function autoConnectTick(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  const { status, userDisconnected } = store.get().device;
+  const { status, userDisconnected, info } = store.get().device;
+
+  // Demo session: hand over to real hardware the moment a unit is PLUGGED
+  // IN (absent→present edge — see demoHwPresent for why not mere presence).
+  // The switch rides the tested manual paths: disconnect() stops the run
+  // loop / generator and detaches the simulator, connect() claims the unit.
+  if (status === "connected" && info?.is_virtual) {
+    try {
+      const hw = await ipc.call("is_hardware_present", {});
+      const wasAbsent = demoHwPresent === false;
+      demoHwPresent = hw;
+      if (hw && wasAbsent) {
+        toast(store, "info", "QA40x plugged in — leaving demo mode");
+        await disconnect(store, ipc);
+        await connect(store, ipc);
+      }
+    } catch {
+      // Transient USB error — next tick retries.
+    }
+    return;
+  }
+
   if (status !== "disconnected" || userDisconnected) return;
   try {
     const present = await ipc.call("is_device_present", {});

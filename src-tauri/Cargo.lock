@@ -3424,6 +3424,7 @@ dependencies = [
  "tokio",
  "ts-rs",
  "uuid",
+ "vqa40x-core",
  "x509-cert",
 ]
 
@@ -5536,6 +5537,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vqa40x-core"
+version = "0.2.0"
+source = "git+https://github.com/GarageDeveloper/virtual-qa40x-rs?tag=v0.2.0#2a8341e92d01b77928b7e4abe6c5487663ce5f72"
+dependencies = [
+ "async-trait",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
 
 [[package]]
 name = "vswhom"

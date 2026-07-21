@@ -3,15 +3,17 @@ use crate::qa40x::{
     error::{QA40xError, Result},
     register::{registers, RegisterOps},
     settle::{SettleDeadline, RANGE_RELAY_SETTLE},
+    transport::{demo_sim_options, BulkIn, BulkOut, EndpointQueue, VirtEp},
     types::*,
 };
 use async_trait::async_trait;
 use log::{debug, info};
-use nusb::transfer::{Bulk, BulkOrInterrupt, Buffer, Completion, EndpointDirection, In, Out};
-use nusb::Endpoint;
+use nusb::transfer::{Buffer, Bulk, Completion, In, Out};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use vqa40x_core::Simulator;
 
 /// Device identity read at connect: firmware version + serial + product.
 #[derive(Clone, Debug, serde::Serialize, ts_rs::TS)]
@@ -34,6 +36,10 @@ pub struct DeviceMeta {
     /// [`Capabilities`] doc for why the output Vrms limits are informational
     /// for now (task #48).
     pub capabilities: Capabilities,
+    /// True when this is the embedded virtual device (demo mode), not real
+    /// hardware — the UI badges the session so a demo can never be mistaken
+    /// for a measurement.
+    pub is_virtual: bool,
 }
 
 /// Live hardware telemetry, matching the official app's readout. Decoded from
@@ -54,12 +60,14 @@ pub struct Telemetry {
 
 /// The four bulk endpoints, claimed exclusively at connect. nusb 0.2 replaced
 /// `interface.bulk_in/out(addr, ..)` with per-endpoint `Endpoint` objects that
-/// own a submission queue; we claim all four up front and submit/collect on them.
+/// own a submission queue; we claim all four up front and submit/collect on
+/// them. Each is either a real nusb endpoint or a virtual one over the
+/// embedded simulator (demo mode) — same queue semantics either way.
 struct ClaimedEndpoints {
-    register_write: Endpoint<Bulk, Out>,
-    register_read: Endpoint<Bulk, In>,
-    data_write: Endpoint<Bulk, Out>,
-    data_read: Endpoint<Bulk, In>,
+    register_write: BulkOut,
+    register_read: BulkIn,
+    data_write: BulkOut,
+    data_read: BulkIn,
 }
 
 /// QA40x device controller (QA402 / QA403)
@@ -87,6 +95,13 @@ pub struct QA40xDevice {
     /// waited out by [`Self::stream_io`] before the next capture — never
     /// inside one. See [`crate::qa40x::settle`] for the model and timings.
     relay_settle: Arc<Mutex<SettleDeadline>>,
+    /// The embedded virtual QA40x (demo mode), created on the first virtual
+    /// connect and kept for the whole app session — its state survives a demo
+    /// disconnect/reconnect the way a plugged-in unit survives a USB close.
+    virtual_sim: Arc<Mutex<Option<Simulator>>>,
+    /// True while the CURRENT connection is the virtual device. Presence
+    /// checks short-circuit on it: the demo device is not on the USB bus.
+    virtual_active: Arc<AtomicBool>,
 }
 
 impl QA40xDevice {
@@ -104,6 +119,8 @@ impl QA40xDevice {
             last_keepalive: Arc::new(Mutex::new(None)),
             cached_telemetry: Arc::new(Mutex::new(None)),
             relay_settle: Arc::new(Mutex::new(SettleDeadline::default())),
+            virtual_sim: Arc::new(Mutex::new(None)),
+            virtual_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -122,6 +139,7 @@ impl QA40xDevice {
             // Drop the claimed endpoints first (they hold refs to the interface),
             // then the interface and device, so the OS releases the USB claim.
             *self.eps.lock().await = None;
+            self.release_virtual_import().await;
             let mut iface = self.interface.lock().await;
             if iface.is_some() {
                 info!("Releasing existing interface claim before reconnecting");
@@ -230,18 +248,26 @@ impl QA40xDevice {
             QA40xError::DeviceError(format!("Failed to claim {what} endpoint: {e}"))
         };
         let mut eps = ClaimedEndpoints {
-            register_write: interface
-                .endpoint::<Bulk, Out>(self.endpoints.register_write)
-                .map_err(|e| ep_err("register-write", e))?,
-            register_read: interface
-                .endpoint::<Bulk, In>(self.endpoints.register_read)
-                .map_err(|e| ep_err("register-read", e))?,
-            data_write: interface
-                .endpoint::<Bulk, Out>(self.endpoints.data_write)
-                .map_err(|e| ep_err("data-write", e))?,
-            data_read: interface
-                .endpoint::<Bulk, In>(self.endpoints.data_read)
-                .map_err(|e| ep_err("data-read", e))?,
+            register_write: BulkOut::Usb(
+                interface
+                    .endpoint::<Bulk, Out>(self.endpoints.register_write)
+                    .map_err(|e| ep_err("register-write", e))?,
+            ),
+            register_read: BulkIn::Usb(
+                interface
+                    .endpoint::<Bulk, In>(self.endpoints.register_read)
+                    .map_err(|e| ep_err("register-read", e))?,
+            ),
+            data_write: BulkOut::Usb(
+                interface
+                    .endpoint::<Bulk, Out>(self.endpoints.data_write)
+                    .map_err(|e| ep_err("data-write", e))?,
+            ),
+            data_read: BulkIn::Usb(
+                interface
+                    .endpoint::<Bulk, In>(self.endpoints.data_read)
+                    .map_err(|e| ep_err("data-read", e))?,
+            ),
         };
 
         // Clear any stale endpoint halts before doing register I/O.
@@ -256,6 +282,114 @@ impl QA40xDevice {
 
         info!("Successfully connected to QA40x device");
 
+        let serial = device_info
+            .serial_number()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let product = device_info
+            .product_string()
+            .unwrap_or("QA40x Audio Analyzer")
+            .to_string();
+        self.init_device_session(model, serial, product, false).await
+    }
+
+    /// Connect to the embedded virtual QA40x (demo mode): an in-process
+    /// `vqa40x-core` simulator behind the same four bulk-endpoint queues as
+    /// the hardware, so every code path above this line — registers,
+    /// streaming, calibration, telemetry, REST, scripts — runs unchanged.
+    /// No download, no USB/IP, no kernel module.
+    pub async fn connect_virtual(&self) -> Result<()> {
+        // Release any prior claim (real or virtual), same as connect().
+        {
+            *self.eps.lock().await = None;
+            self.release_virtual_import().await;
+            *self.interface.lock().await = None;
+            *self.device.lock().await = None;
+        }
+
+        // First demo connect of the session creates the simulator; later ones
+        // reattach to it (its state persists like a unit left plugged in).
+        let sim = {
+            let mut slot = self.virtual_sim.lock().await;
+            if slot.is_none() {
+                let opts = demo_sim_options();
+                info!(
+                    "Starting embedded virtual {} (serial {}, demo mode)",
+                    opts.model.name(),
+                    opts.serial
+                );
+                *slot = Some(Simulator::new(opts));
+            }
+            slot.as_ref().expect("just created").clone()
+        };
+        if !sim.try_import() {
+            return Err(QA40xError::DeviceError(
+                "Virtual device is already attached".to_string(),
+            ));
+        }
+
+        let model = Model::Qa403;
+        let serial = sim.busid().to_string(); // placeholder; real serial read below
+        *self.model.lock().await = Some(model);
+        *self.eps.lock().await = Some(ClaimedEndpoints {
+            register_write: BulkOut::Virt(VirtEp::new(sim.clone(), self.endpoints.register_write)),
+            register_read: BulkIn::Virt(VirtEp::new(sim.clone(), self.endpoints.register_read)),
+            data_write: BulkOut::Virt(VirtEp::new(sim.clone(), self.endpoints.data_write)),
+            data_read: BulkIn::Virt(VirtEp::new(sim.clone(), self.endpoints.data_read)),
+        });
+        self.virtual_active.store(true, Ordering::SeqCst);
+
+        // The simulator serves the serial through register 0x1D as a packed
+        // u32 of its hex digits — read it back so the UI shows the same
+        // serial a USB enumeration would have carried.
+        let serial = match self.read_register(registers::SERIAL_NUMBER).await {
+            Ok(d) if d.len() == 4 => {
+                let v = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
+                format!("{:04X}_{:04X}", v >> 16, v & 0xFFFF)
+            }
+            _ => serial,
+        };
+        let product = format!("{} Audio Analyzer (virtual)", model.name());
+
+        match self.init_device_session(model, serial, product, true).await {
+            Ok(()) => {
+                info!("Demo mode: connected to the embedded virtual {}", model.name());
+                Ok(())
+            }
+            Err(e) => {
+                // Leave no half-open virtual session behind.
+                self.mark_disconnected().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Detach from the embedded simulator (if this connection was virtual) so
+    /// the next demo connect can re-import it. Keeps the simulator itself —
+    /// its state lives for the whole app session.
+    async fn release_virtual_import(&self) {
+        self.virtual_active.store(false, Ordering::SeqCst);
+        if let Some(sim) = self.virtual_sim.lock().await.as_ref() {
+            sim.release_import();
+        }
+    }
+
+    /// Whether the current connection is the embedded virtual device.
+    pub fn is_virtual(&self) -> bool {
+        self.virtual_active.load(Ordering::SeqCst)
+    }
+
+    /// The shared post-claim bring-up, identical for hardware and the virtual
+    /// device: quiesce leftover streaming, verify the register bus, replay the
+    /// vendor init write, read identity/config/calibration, and force the safe
+    /// 42 dBV input range.
+    async fn init_device_session(
+        &self,
+        model: Model,
+        serial: String,
+        product: String,
+        is_virtual: bool,
+    ) -> Result<()> {
         // Stop any leftover streaming from a previous session BEFORE the verify
         // register read. A process that died mid-stream can leave the QA40x
         // streaming and unresponsive to register I/O; driving register 8 to 0
@@ -300,14 +434,6 @@ impl QA40xDevice {
                 Ok(d) if d.len() == 4 => u32::from_be_bytes([d[0], d[1], d[2], d[3]]),
                 _ => 0,
             };
-            let serial = device_info
-                .serial_number()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            let product = device_info
-                .product_string()
-                .unwrap_or("QA40x Audio Analyzer")
-                .to_string();
             info!("Device identity: {} firmware v{}, serial {}", model.name(), firmware_version, serial);
             *self.meta.lock().await = Some(DeviceMeta {
                 model: model.name().to_string(),
@@ -315,8 +441,12 @@ impl QA40xDevice {
                 serial,
                 product,
                 sample_rates: model.sample_rates().iter().map(|r| r.as_hz()).collect(),
-                supports_flash: model.supports_flash(),
+                // Never offer a firmware flash to the simulator: the demo
+                // must not exercise the DFU/HID path the fake bootloader
+                // can't complete in-process.
+                supports_flash: model.supports_flash() && !is_virtual,
                 capabilities: model.capabilities(),
+                is_virtual,
             });
         }
 
@@ -444,6 +574,7 @@ impl QA40xDevice {
             .await;
         // Drop endpoints (they hold refs to the interface) before the interface.
         *self.eps.lock().await = None;
+        self.release_virtual_import().await;
         *self.interface.lock().await = None;
         *self.device.lock().await = None;
         *self.meta.lock().await = None;
@@ -452,9 +583,11 @@ impl QA40xDevice {
         Ok(())
     }
 
-    /// Check if device is connected (logical state)
+    /// Check if device is connected (logical state). The endpoints are the
+    /// authority: a real connection also holds an interface, the virtual one
+    /// (demo mode) only holds endpoints.
     pub async fn is_connected(&self) -> bool {
-        self.interface.lock().await.is_some()
+        self.eps.lock().await.is_some()
     }
 
     /// Device identity (firmware version + serial + product), read at connect.
@@ -487,6 +620,7 @@ impl QA40xDevice {
     /// to a device that is already going away).
     pub async fn mark_disconnected(&self) {
         *self.eps.lock().await = None;
+        self.release_virtual_import().await;
         *self.interface.lock().await = None;
         *self.device.lock().await = None;
         *self.meta.lock().await = None;
@@ -576,8 +710,19 @@ impl QA40xDevice {
     }
 
     /// Whether a QA40x (QA402 or QA403) is present on the USB bus, regardless of whether we are
-    /// connected to it. Used for auto-connect.
+    /// connected to it. Used for auto-connect. The virtual device (demo mode)
+    /// is "present" while attached — it lives in-process, not on the bus.
     pub async fn is_present(&self) -> bool {
+        if self.is_virtual() {
+            return true;
+        }
+        self.is_hardware_present().await
+    }
+
+    /// Whether REAL hardware is on the USB bus — never satisfied by the
+    /// virtual device. The frontend polls this during a demo session to hand
+    /// over to a QA40x the moment one is plugged in.
+    pub async fn is_hardware_present(&self) -> bool {
         match nusb::list_devices().await {
             Ok(mut devices) => {
                 devices.any(|dev| dev.vendor_id() == QA40X_VID && Model::from_pid(dev.product_id()).is_some())
@@ -591,6 +736,11 @@ impl QA40xDevice {
         // If not logically connected, return false immediately
         if !self.is_connected().await {
             return false;
+        }
+
+        // The virtual device never unplugs: it is attached until disconnect().
+        if self.is_virtual() {
+            return true;
         }
 
         // Check if device is still present in USB device list
@@ -1662,8 +1812,8 @@ impl QA40xDevice {
 /// cancelled it), so on timeout we cancel the endpoint's queued transfers and
 /// drain every cancellation — otherwise the next submit/collect would pick up a
 /// stale completion.
-async fn complete_or_cancel<E: BulkOrInterrupt, D: EndpointDirection>(
-    ep: &mut Endpoint<E, D>,
+async fn complete_or_cancel<T: EndpointQueue>(
+    ep: &mut T,
     timeout: Duration,
 ) -> Result<Completion> {
     match tokio::time::timeout(timeout, ep.next_complete()).await {
@@ -1679,7 +1829,7 @@ async fn complete_or_cancel<E: BulkOrInterrupt, D: EndpointDirection>(
 /// completions, leaving the endpoint's completion queue empty. Leaving even one
 /// stale (cancelled) completion queued would hand it to the next collector and
 /// fail it with "transfer was cancelled" — see `stream_pump`.
-async fn cancel_and_drain<E: BulkOrInterrupt, D: EndpointDirection>(ep: &mut Endpoint<E, D>) {
+async fn cancel_and_drain<T: EndpointQueue>(ep: &mut T) {
     ep.cancel_all();
     while ep.pending() > 0 {
         if tokio::time::timeout(Duration::from_millis(500), ep.next_complete())

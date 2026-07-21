@@ -252,6 +252,24 @@ async fn connect_device(
     Ok("Connected successfully".to_string())
 }
 
+/// Connect to the embedded virtual QA40x (demo mode). The simulator runs
+/// in-process behind the same endpoint queues as the hardware, so the whole
+/// app works on it; no USB monitor is started — a virtual device never
+/// unplugs, it only disconnects through `disconnect_device`.
+#[tauri::command]
+async fn connect_virtual_device(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, String> {
+    info!("Connect virtual device (demo mode) command called");
+    let device = state.lock().await.device.clone();
+    let device_lock = device.lock().await;
+    device_lock
+        .connect_virtual()
+        .await
+        .map_err(|e| format!("Failed to connect to the virtual device: {}", e))?;
+    Ok("Connected to the virtual QA40x (demo mode)".to_string())
+}
+
 #[tauri::command]
 async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
     info!("Disconnect device command called");
@@ -302,6 +320,16 @@ async fn is_device_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
     let app_state = state.lock().await;
     let device = app_state.device.lock().await;
     Ok(device.is_present().await)
+}
+
+/// Whether REAL hardware is on the USB bus — the virtual device never counts.
+/// Polled by the frontend during a demo session so a newly plugged QA40x
+/// takes over from the simulator.
+#[tauri::command]
+async fn is_hardware_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
+    let app_state = state.lock().await;
+    let device = app_state.device.lock().await;
+    Ok(device.is_hardware_present().await)
 }
 
 #[tauri::command]
@@ -1115,7 +1143,9 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             connect_device,
+            connect_virtual_device,
             disconnect_device,
+            is_hardware_present,
             is_device_connected,
             is_device_present,
             set_input_gain,

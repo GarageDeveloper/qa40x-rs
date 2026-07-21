@@ -57,6 +57,15 @@ application **v1** and the upcoming **v2** expected in 2026.
   (Rhai) for measurement sequences.
 - **Device panel** — live telemetry (USB voltage/current, temperature),
   firmware version and serial at connect.
+- **Demo mode** — a **Demo** button next to Connect attaches a built-in
+  virtual QA403 (the [virtual-qa40x-rs](https://github.com/GarageDeveloper/virtual-qa40x-rs)
+  device model, embedded in-process): no hardware, nothing extra to
+  download. The whole app runs on it — simulated DAC→ADC loopback with a
+  realistic noise floor and mild harmonic distortion, a real factory
+  calibration page, live telemetry, REST and scripting included. Sessions
+  are badged **DEMO** so a demo screen can never pass for a measurement,
+  and plugging a real unit in mid-demo hands the session over to it
+  automatically.
 - **Firmware tools** *(advanced, opt-in — see the warning below)* — extract
   official firmware from a QuantAsylum installer you already own, verify it
   against a known-hash registry and its cryptographic signature, and flash it.
@@ -64,6 +73,13 @@ application **v1** and the upcoming **v2** expected in 2026.
 ---
 
 ## Install
+
+> **No QA40x at hand?** You can still try everything: click **Demo** (next to
+> Connect) and the app attaches a built-in virtual QA403 — spectrum, THD,
+> sweeps, generator, REST and scripting all work against a simulated,
+> calibrated loopback. Nothing extra to download. The session is badged
+> **DEMO**, and the moment you plug a real unit in, the app switches over to
+> it automatically.
 
 ### Prebuilt apps
 
@@ -153,8 +169,9 @@ Third-party dependencies and their licenses: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 - [**virtual-qa40x-rs**](https://github.com/GarageDeveloper/virtual-qa40x-rs) —
   a virtual QA402/QA403 over USB/IP, built alongside this project to develop and
-  test without hardware attached. It may be useful to anyone else building
-  around these devices.
+  test without hardware attached. Its transport-agnostic device model
+  (`vqa40x-core`) is also embedded in this app as the **Demo mode** device.
+  It may be useful to anyone else building around these devices.
 - [`doc/device-notes.md`](doc/device-notes.md) — notes on the device's control
   protocol, timing, and measurement-level handling.
 

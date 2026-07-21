@@ -47,6 +47,11 @@ base64 = "0.22"
 nusb = { version = "0.2", features = ["tokio"] }
 hidapi = "2"
 
+# Embedded virtual QA40x (demo mode): the transport-agnostic device model from
+# our virtual-qa40x-rs project, driven in-process through its UsbBackend trait —
+# no USB/IP, no separate binary to download.
+vqa40x-core = { git = "https://github.com/GarageDeveloper/virtual-qa40x-rs", tag = "v0.2.0" }
+
 # Audio processing
 rustfft = "6.2"
 realfft = "3.3"

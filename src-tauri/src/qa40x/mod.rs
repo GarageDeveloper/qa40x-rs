@@ -2,6 +2,7 @@ pub mod device;
 pub mod register;
 pub mod error;
 pub mod settle;
+pub mod transport;
 pub mod types;
 
 pub use device::{DeviceMeta, QA40xDevice, Telemetry};

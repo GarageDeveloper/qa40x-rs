@@ -172,6 +172,8 @@ export class FakeDevice {
 
   private connected = false;
   private present = true;
+  /** True when the session was opened via connect_virtual_device (demo mode). */
+  private virtualDevice = false;
   private generatorRunning = false;
   // Mirrors the real backend: `last_telemetry` does NO USB I/O and returns
   // null until a keepalive has run. A fake that always returned data here
@@ -247,15 +249,27 @@ export class FakeDevice {
       /* -- presence / connection -- */
       case "is_device_present":
         return this.present;
+      case "is_hardware_present":
+        // The bus device, never the virtual one — mirrors the backend.
+        return this.present;
       case "is_device_connected":
         return this.connected;
       case "connect_device":
         if (!this.present) throw new Error("No QA40x on the bus (fake)");
         this.connected = true;
         this.config.input_gain = 42; // connect forces the safe input range
+        this.virtualDevice = false;
         return "Connected to QA402 (e2e fake device)";
+      case "connect_virtual_device":
+        // Demo mode: attaches regardless of bus presence — the virtual
+        // device lives in-process, exactly like the backend's simulator.
+        this.connected = true;
+        this.config.input_gain = 42;
+        this.virtualDevice = true;
+        return "Connected to the virtual QA40x (demo mode, e2e fake)";
       case "disconnect_device":
         this.connected = false;
+        this.virtualDevice = false;
         // Mirror the backend: the stream loop and the gap-free generator are
         // stopped BEFORE the device closes (clean Stopped, never an Error).
         this.stopStream(true);
@@ -266,6 +280,7 @@ export class FakeDevice {
           model: "QA402",
           firmware_version: 991,
           serial: "E2E-FAKE-0001",
+          is_virtual: this.virtualDevice,
           product: "QA402 Audio Analyzer (e2e fake)",
           sample_rates: [48000, 96000, 192000],
           supports_flash: false,
