@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 
 use crate::audio::{AudioAnalyzer, FftProcessor, WindowFunction};
 use crate::qa40x::{AudioData, Channel, InputGain, QA40xDevice, SampleRate};
+use crate::sources::{route_stimulus, Route};
 use crate::utils::SignalGenerator;
 
 const SESSION_ID: &str = "qa40x-rs";
@@ -401,9 +402,11 @@ async fn acquisition(state: &RestState) -> RestResult {
     } else {
         vec![0.0f32; n]
     };
-    let silence = vec![0.0f32; n];
+    // The official app drives Gen1 on both outputs; match it (the A/B bench
+    // caught this driving the left channel only).
+    let (left, right) = route_stimulus(&tone, Route::Both);
     let cap = dev
-        .generate_and_capture(&tone, &silence)
+        .generate_and_capture(&left, &right)
         .await
         .map_err(|e| (500, format!("acquisition failed: {e}")))?;
     drop(dev);

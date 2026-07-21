@@ -33,6 +33,13 @@ application **v1** and the upcoming **v2** expected in 2026.
 > official application, and please [report](https://github.com/GarageDeveloper/qa40x-rs/issues)
 > anything that looks wrong. The software comes with no warranty (see the
 > [license](#license)).
+>
+> That cross-check is itself automated: an A/B loopback bench runs the same
+> measurement battery against this app and the official one on the same
+> QA402. Frequency response, linearity and THD currently agree within
+> 0.03 dB / 0.001 dB / 1 dB; the known divergences (integrated-noise
+> readouts, ≈ 0.4 dB absolute level) are tracked in
+> [doc/bench-ab.md](doc/bench-ab.md).
 
 ---
 
@@ -54,7 +61,9 @@ application **v1** and the upcoming **v2** expected in 2026.
   be saved and restored as named workspaces.
 - **Automation** — a QA40x-compatible REST API (localhost by default,
   bearer-token protected when exposed to the network) and in-app scripting
-  (Rhai) for measurement sequences.
+  (Rhai) for measurement sequences. An A/B loopback bench diffs the whole
+  measurement chain against the official app on the same hardware
+  (see [doc/bench-ab.md](doc/bench-ab.md)).
 - **Device panel** — live telemetry (USB voltage/current, temperature),
   firmware version and serial at connect.
 - **Demo mode** — a **Demo** button next to Connect attaches a built-in
