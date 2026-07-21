@@ -191,8 +191,26 @@ export function mountSourcesPanel(
   host.append(section);
   collapsiblePanel(store, section, head, "sources");
 
-  // Per-row expandable tone editors — transient UI state.
+  // Per-row expandable tone editors — persisted, so a tone list left open
+  // (or closed) comes back the same way after a relaunch.
+  const EXPANDED_KEY = "qa40x-v2-tones-expanded";
   const expanded = new Set<string>();
+  try {
+    const raw = localStorage.getItem(EXPANDED_KEY);
+    if (raw) for (const id of JSON.parse(raw) as string[]) expanded.add(id);
+  } catch {
+    /* no storage */
+  }
+  const saveExpanded = (): void => {
+    try {
+      // Only ids that still name a source: a stale entry must not pop open
+      // a FUTURE source that happens to reuse the id.
+      const live = [...expanded].filter((id) => store.get().sources.byId[id]);
+      localStorage.setItem(EXPANDED_KEY, JSON.stringify(live));
+    } catch {
+      /* no storage */
+    }
+  };
 
   const buildRow = (vm: RowVM): HTMLElement => {
     const src = vm.src;
@@ -279,6 +297,7 @@ export function mountSourcesPanel(
             onclick: () => {
               if (expanded.has(id)) expanded.delete(id);
               else expanded.add(id);
+              saveExpanded();
               render();
             },
           },
@@ -376,6 +395,20 @@ export function mountSourcesPanel(
     if (detail) detail.classList.toggle("sources__detail--open", expanded.has(id));
 
     if (src.kind === "sine") {
+      // The collapsed row must betray a hidden multi-tone: the Tones button
+      // carries the enabled extra-tone count and lights up, so a restored
+      // tone list is never silently active behind a plain "Sine 1000 Hz".
+      const more = node.querySelector<HTMLButtonElement>(
+        `[data-testid="src-more-${id}"]`
+      )!;
+      const enabledExtras = src.extraTones.filter((t) => t.enabled).length;
+      more.textContent = enabledExtras > 0 ? `Tones ×${enabledExtras}` : "Tones";
+      more.classList.toggle("btn--primary", enabledExtras > 0);
+      more.title =
+        enabledExtras > 0
+          ? `${enabledExtras} extra tone${enabledExtras > 1 ? "s" : ""} enabled — the output is a multi-tone`
+          : "Edit the tone list";
+
       const toneRows = node.querySelector<HTMLElement>(`[data-testid="src-tones-${id}"]`)!;
       keyedList(
         toneRows,
