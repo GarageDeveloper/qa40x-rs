@@ -163,6 +163,32 @@ impl AudioAnalyzer {
         }
     }
 
+    /// RMS of the signal restricted to `[lo_hz, hi_hz]`, from an
+    /// amplitude-corrected spectrum: `√(Σ|X|² / enbw_bins)`. Dividing the
+    /// integrated power by the window's equivalent noise bandwidth
+    /// ([`crate::audio::FftResult::enbw_bins`]) makes the sum exact for both
+    /// signal types at once — a coherent tone's main lobe sums to exactly
+    /// ENBW·RMS², and broadband noise is overcounted by exactly ENBW.
+    /// This is what the official QA40x app's band readouts (`RmsDbv`) do;
+    /// a full-band *time-domain* RMS instead drags in DC and out-of-band
+    /// noise, which read ~30 dB above the 20 Hz–20 kHz floor on real
+    /// hardware (issue #7).
+    pub fn band_rms_from_spectrum(
+        magnitudes: &[f32],
+        frequencies: &[f32],
+        lo_hz: f32,
+        hi_hz: f32,
+        enbw_bins: f32,
+    ) -> f32 {
+        let mut power = 0.0f64;
+        for (i, &freq) in frequencies.iter().enumerate() {
+            if freq >= lo_hz && freq <= hi_hz {
+                power += (magnitudes[i] as f64).powi(2);
+            }
+        }
+        (power / enbw_bins.max(1e-12) as f64).sqrt() as f32
+    }
+
     pub fn calculate_thd(
         magnitudes: &[f32],
         frequencies: &[f32],
@@ -522,6 +548,53 @@ mod tests {
         let signal = vec![1.0, 2.0, 3.0, 4.0];
         let dc = AudioAnalyzer::calculate_dc_offset(&signal);
         assert!((dc - 2.5).abs() < 1e-6);
+    }
+
+    /// The ENBW-divided band integral must equal the time-domain RMS for both
+    /// signal classes — a coherent tone (lobe sums to ENBW·RMS² exactly) and
+    /// broadband noise (each bin overcounts by ENBW) — while rejecting what's
+    /// outside the band (DC here).
+    #[test]
+    fn band_rms_from_spectrum_matches_time_domain_rms() {
+        use crate::audio::fft::{FftProcessor, WindowFunction};
+        let sr = 48000u32;
+        let n = 8192usize;
+        let mut fft = FftProcessor::new();
+
+        // Between-bins tone (1 kHz is not on the 5.86 Hz grid) + a DC offset
+        // the 20 Hz–20 kHz band must ignore.
+        let tone_rms = 0.25f32 / std::f32::consts::SQRT_2;
+        let sig: Vec<f32> = (0..n)
+            .map(|i| {
+                0.1 + 0.25 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin()
+            })
+            .collect();
+        let r = fft.process_real_windowed(&sig, sr, WindowFunction::Hann);
+        let band =
+            AudioAnalyzer::band_rms_from_spectrum(&r.magnitudes, &r.frequencies, 20.0, 20000.0, r.enbw_bins);
+        let err_db = 20.0 * (band / tone_rms).log10();
+        assert!(err_db.abs() < 0.05, "tone band RMS off by {err_db:.3} dB");
+
+        // Deterministic pseudo-noise (LCG): near-full-band integral ≈ its
+        // time-domain RMS only once the ENBW overcount is divided out.
+        let mut seed = 0x2545F491u32;
+        let noise: Vec<f32> = (0..n)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 8) as f32 / (1 << 24) as f32 - 0.5
+            })
+            .collect();
+        let t_rms = AudioAnalyzer::calculate_rms(&noise);
+        let r = fft.process_real_windowed(&noise, sr, WindowFunction::Hann);
+        let band = AudioAnalyzer::band_rms_from_spectrum(
+            &r.magnitudes,
+            &r.frequencies,
+            1.0,
+            24000.0,
+            r.enbw_bins,
+        );
+        let err_db = 20.0 * (band / t_rms).log10();
+        assert!(err_db.abs() < 0.3, "noise band RMS off by {err_db:.3} dB");
     }
 
     #[test]

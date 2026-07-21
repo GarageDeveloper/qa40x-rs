@@ -23,6 +23,18 @@ pub struct FftResult {
     /// Imag part of the n-normalized complex spectrum (for coherent averaging).
     #[serde(skip)]
     pub im: Vec<f32>,
+    /// Equivalent noise bandwidth of the analysis window, in bins:
+    /// `N·Σw² / (Σw)²` (1.0 rectangular, 1.5 Hann, ≈3.77 flat-top). Because
+    /// `magnitudes` is amplitude-corrected, summing bin powers over a band
+    /// counts broadband noise ENBW× too high (and a coherent tone's main lobe
+    /// exactly ENBW× its RMS²) — divide an integrated band power by this to
+    /// get the true band power for tones and noise alike.
+    #[serde(default = "default_enbw")]
+    pub enbw_bins: f32,
+}
+
+fn default_enbw() -> f32 {
+    1.0
 }
 
 impl FftResult {
@@ -83,8 +95,11 @@ impl FftProcessor {
         // user switches analysis windows.
         let mut w = vec![1.0f32; n];
         window.apply(&mut w);
-        let coherent_gain = w.iter().sum::<f32>() / n as f32;
+        let sum_w = w.iter().sum::<f32>();
+        let sum_w2 = w.iter().map(|&x| x * x).sum::<f32>();
+        let coherent_gain = sum_w / n as f32;
         let acf = 1.0 / coherent_gain.max(1e-12);
+        let enbw_bins = n as f32 * sum_w2 / (sum_w * sum_w).max(1e-12);
 
         // Apply the chosen analysis window (Rectangular = none).
         window.apply(&mut input);
@@ -143,6 +158,7 @@ impl FftProcessor {
             sample_rate,
             re,
             im,
+            enbw_bins,
         }
     }
 
@@ -185,6 +201,8 @@ impl FftProcessor {
             sample_rate,
             re,
             im,
+            // Periodic Hann: Σw = N/2, Σw² = 3N/8 → N·Σw²/(Σw)² = 3/2 exactly.
+            enbw_bins: 1.5,
         }
     }
 
@@ -315,6 +333,27 @@ mod tests {
 
         // Peak should be at 1000 Hz (within tolerance)
         assert!((peak_freq - frequency).abs() < 10.0);
+    }
+
+    /// The ENBW the band-integration paths divide by must match the classic
+    /// per-window values, or every broadband (noise) readout shifts by the
+    /// difference — the A/B bench caught exactly this against the official app.
+    #[test]
+    fn enbw_matches_the_textbook_values() {
+        let mut p = FftProcessor::new();
+        let signal = vec![0.25f32; 4096];
+        for (window, want, tol) in [
+            (WindowFunction::Rectangular, 1.0, 1e-6),
+            (WindowFunction::Hann, 1.5, 1e-3),
+            (WindowFunction::Hamming, 1.363, 2e-3),
+            (WindowFunction::FlatTop, 3.77, 0.01),
+        ] {
+            let enbw = p.process_real_windowed(&signal, 48000, window).enbw_bins;
+            assert!(
+                (enbw - want).abs() < tol,
+                "{window:?}: ENBW {enbw} want ≈{want}"
+            );
+        }
     }
 
     /// THE absolute-amplitude convention pin: the one-sided
