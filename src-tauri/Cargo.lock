@@ -5540,8 +5540,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vqa40x-core"
-version = "0.2.0"
-source = "git+https://github.com/GarageDeveloper/virtual-qa40x-rs?tag=v0.2.0#2a8341e92d01b77928b7e4abe6c5487663ce5f72"
+version = "0.3.0"
+source = "git+https://github.com/GarageDeveloper/virtual-qa40x-rs?tag=v0.3.0#4601ff44ab15e50c395f1818af0b0243149697b4"
 dependencies = [
  "async-trait",
  "log",
