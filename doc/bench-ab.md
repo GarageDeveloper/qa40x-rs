@@ -23,20 +23,20 @@ Passive loopback, the audiophile reference config:
 
 - QA402 on USB, visible to Parallels as `QA402 Audio Analyzer`
   (`prlsrvctl usb list`).
-- A Parallels VM (default name `Windows 11`) with **Parallels Tools** installed
-  and the official **QA40x** app at
-  `C:\Program Files\QuantAsylum\QA40x\QA40x.exe` (override with `--qa40x-exe`).
-- The official app's REST server reachable from the host on port 9402. If it
-  only listens on `localhost` inside the guest, forward it once (elevated guest
-  shell):
-
-  ```
-  netsh interface portproxy add v4tov4 listenport=9402 listenaddress=0.0.0.0 connectport=9402 connectaddress=127.0.0.1
-  netsh advfirewall firewall add rule name=qa40x-rest dir=in action=allow protocol=TCP localport=9402
-  ```
-
+- A Parallels VM (default name `Windows 11`) with **Parallels Tools** installed,
+  a user logged into the guest console (a GUI app can only start in an
+  interactive session), and the official **QA40x** app at
+  `C:\Program Files (x86)\QuantAsylum\QA40x\QA40x.exe` (override with
+  `--qa40x-exe`).
 - The qa40x-rs GUI must **not** be running (single USB claim, and the bench
   binds the same 9402 port).
+
+No manual REST forwarding is needed: the official app registers
+`http://localhost:9402/` with Windows HTTP.sys, which rejects any other Host
+header (400) and refuses non-loopback sources for `localhost` (403). The bench
+automatically installs a netsh portproxy in the guest (`9403 →
+loopback:9402`, plus a firewall rule) and keeps sending
+`Host: localhost:9402` through it.
 
 ## What it does
 
@@ -46,9 +46,18 @@ Per round (`--rounds N` alternates N times, assessing repeatability):
    qa40x-rs REST server (same code path as the GUI), runs the battery against
    `http://127.0.0.1:9402`, then releases the device.
 2. **VM phase** — `prlsrvctl usb set` assigns the QA402 to the VM,
-   `prlctl start` boots it, `prlctl exec` launches QA40x.exe, then the battery
-   runs against `http://<vm-ip>:9402`. Afterwards the app is closed, the VM is
-   shut down and the analyzer returns to the host (`--keep-vm` skips that).
+   `prlctl start` boots it (a paused VM is resumed, and idle auto-pause is
+   turned off for the VM), the REST relay is installed, and QA40x.exe is
+   launched through a scheduled task bound to the console user's interactive
+   token (`prlctl exec` runs as SYSTEM, from which `cmd /c start` cannot open
+   a GUI app). The battery then runs against `http://<vm-ip>:9403`.
+   Afterwards the app is closed, the VM is shut down and the analyzer returns
+   to the host (`--keep-vm` skips that).
+
+   If the app reports the analyzer as disconnected — typical right after the
+   host releases it — the bench forces a guest-side PnP disable/enable of the
+   QA402 and restarts the app: the scripted equivalent of unplugging and
+   replugging the cable.
 
 ### The battery (per target)
 
@@ -92,7 +101,11 @@ can gate a release checklist.
 - **Async acquisition**: qa40x-rs acquires synchronously and always reports
   `AcquisitionBusy=False`; the client's poll loop works unchanged on both.
 - **Value shapes**: numbers arrive as JSON numbers (qa40x-rs) or strings
-  (official app); the client accepts both.
+  (official app); the client accepts both — including comma decimal
+  separators when the guest runs a French (or similar) locale.
+- **HTTP.sys quirks**: body-less PUT/POST get an explicit `Content-Length: 0`
+  (411 otherwise), and the Host header is pinned to `localhost:9402` through
+  the relay (see above).
 
 ## Usage
 

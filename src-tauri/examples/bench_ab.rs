@@ -66,7 +66,7 @@ impl Default for Cli {
             rounds: 1,
             vm_name: "Windows 11".into(),
             usb_name: "QA402 Audio Analyzer".into(),
-            qa40x_exe: r"C:\Program Files\QuantAsylum\QA40x\QA40x.exe".into(),
+            qa40x_exe: r"C:\Program Files (x86)\QuantAsylum\QA40x\QA40x.exe".into(),
             vm_url: None,
             host_amp_dbfs: -18.0,
             vm_amp_dbv: -10.0,
@@ -153,7 +153,7 @@ USAGE: cargo run --example bench_ab -- [OPTIONS]
   --rounds N         host+VM alternations to run (default 1)
   --vm-name NAME     Parallels VM name (default \"Windows 11\")
   --usb-name NAME    Parallels USB device name (default \"QA402 Audio Analyzer\")
-  --qa40x-exe PATH   QA40x.exe path in the guest (default C:\\Program Files\\QuantAsylum\\QA40x\\QA40x.exe)
+  --qa40x-exe PATH   QA40x.exe path in the guest (default C:\\Program Files (x86)\\QuantAsylum\\QA40x\\QA40x.exe)
   --vm-url URL       override the VM REST base URL (default http://<vm-ip>:9402)
   --host-amp DBFS    generator amplitude for qa40x-rs, in dBFS (default -18)
   --vm-amp DBV       generator amplitude for the official app, in dBV (default -10)
@@ -176,24 +176,42 @@ USAGE: cargo run --example bench_ab -- [OPTIONS]
 struct RestClient {
     base: String,
     http: reqwest::Client,
+    /// Host header override. The official app's HTTP.sys registration only
+    /// accepts `localhost:9402` and only from loopback, so the bench reaches
+    /// it through an in-guest netsh portproxy (host:9403 → loopback:9402)
+    /// while still presenting the localhost Host header.
+    host_header: Option<String>,
 }
 
 impl RestClient {
     fn new(base: &str) -> Self {
+        Self::with_host_header(base, None)
+    }
+
+    fn with_host_header(base: &str, host_header: Option<String>) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("reqwest client"),
+            host_header,
         }
     }
 
     async fn call(&self, method: reqwest::Method, path: &str) -> R<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .request(method.clone(), &url)
+        let mut req = self.http.request(method.clone(), &url);
+        if let Some(h) = &self.host_header {
+            req = req.header("Host", h);
+        }
+        if method != reqwest::Method::GET {
+            // HTTP.sys (official app) rejects body-less PUT/POST with 411:
+            // an explicit Content-Length: 0 is required (reqwest sends none
+            // for an empty body).
+            req = req.header(reqwest::header::CONTENT_LENGTH, "0").body("");
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| format!("{method} {url}: {e}"))?;
@@ -244,7 +262,8 @@ impl RestClient {
 }
 
 /// Numeric field that may arrive as a JSON number (qa40x-rs) or as a string
-/// (the official app serializes most values as strings).
+/// (the official app serializes most values as strings — and with a comma
+/// decimal separator when the guest runs a French locale).
 fn field_f64(v: &Value, key: &str) -> R<f64> {
     let f = &v[key];
     if let Some(n) = f.as_f64() {
@@ -253,6 +272,7 @@ fn field_f64(v: &Value, key: &str) -> R<f64> {
     if let Some(s) = f.as_str() {
         return s
             .trim()
+            .replace(',', ".")
             .parse()
             .map_err(|e| format!("field {key}={s:?}: {e}"));
     }
@@ -351,8 +371,10 @@ impl BatteryResult {
 }
 
 fn gen_path(on: bool, freq: f64, amp: f64) -> String {
+    // The official app addresses generators as Gen1/Gen2; qa40x-rs ignores
+    // the designator segment, so the official form works on both targets.
     let state = if on { "On" } else { "Off" };
-    format!("/Settings/AudioGen/1/{state}/{freq}/{amp}")
+    format!("/Settings/AudioGen/Gen1/{state}/{freq}/{amp}")
 }
 
 async fn run_battery(
@@ -430,8 +452,9 @@ async fn run_battery(
     for f in FR_FREQS {
         client.put(&gen_path(true, f, amp_native)).await?;
         client.acquire().await?;
-        let lo = (f * 0.8).max(10.0);
-        let hi = (f * 1.25).min(23000.0);
+        // Integer band bounds: the official parser rejects fractional Hz.
+        let lo = (f * 0.8).max(10.0).round() as i64;
+        let hi = (f * 1.25).min(23000.0).round() as i64;
         let (l, r) = client.lr(&format!("/RmsDbv/{lo}/{hi}")).await?;
         fr_raw.push((f, l, r));
     }
@@ -552,8 +575,12 @@ fn usb_release(usb_name: &str) -> R<()> {
 }
 
 fn vm_start(vm_name: &str) -> R<()> {
+    // Parallels pauses idle VMs by default, which would freeze the guest (and
+    // its REST server) between bench phases — turn that off for this VM.
+    let _ = sh("prlctl", &["set", vm_name, "--pause-idle", "off"]);
     match vm_status(vm_name)?.as_str() {
         "running" => Ok(()),
+        "paused" => sh("prlctl", &["resume", vm_name]).map(|_| ()),
         _ => sh("prlctl", &["start", vm_name]).map(|_| ()),
     }
 }
@@ -574,6 +601,8 @@ fn vm_stop(vm_name: &str) -> R<()> {
     sh("prlctl", &["stop", vm_name, "--kill"]).map(|_| ())
 }
 
+/// Wait for a routable IPv4 on the guest. Parallels often reports the
+/// link-local IPv6 first, which is useless for reaching the REST relay.
 fn vm_wait_ip(vm_name: &str, timeout: Duration) -> R<String> {
     let t0 = std::time::Instant::now();
     while t0.elapsed() < timeout {
@@ -581,21 +610,62 @@ fn vm_wait_ip(vm_name: &str, timeout: Duration) -> R<String> {
             .as_str()
             .unwrap_or("-")
             .to_string();
-        if ip != "-" && !ip.is_empty() {
+        if ip.contains('.') && !ip.contains(':') {
             return Ok(ip);
         }
         std::thread::sleep(Duration::from_secs(3));
     }
-    Err(format!("VM {vm_name:?} got no IP within {timeout:?}"))
+    Err(format!("VM {vm_name:?} got no IPv4 within {timeout:?}"))
 }
 
-/// Launch QA40x.exe in the interactive guest session (fire-and-forget).
-fn guest_launch(vm_name: &str, exe: &str) -> R<()> {
+/// Run a PowerShell script in the guest through `prlctl exec`, base64-encoded
+/// so nothing gets mangled by the host shell / cmd quoting rules.
+fn guest_ps(vm_name: &str, script: &str) -> R<String> {
+    use base64::Engine as _;
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let enc = base64::engine::general_purpose::STANDARD.encode(utf16);
     sh(
         "prlctl",
-        &["exec", vm_name, "--nowait", "cmd", "/c", "start", "", exe],
+        &[
+            "exec",
+            vm_name,
+            "powershell",
+            "-NoProfile",
+            "-EncodedCommand",
+            &enc,
+        ],
     )
-    .map(|_| ())
+}
+
+/// The user logged into the guest console (needed to launch a GUI app in the
+/// interactive session — `prlctl exec` itself runs as SYSTEM).
+fn guest_console_user(vm_name: &str) -> R<String> {
+    let out = guest_ps(vm_name, "(Get-CimInstance Win32_ComputerSystem).UserName")?;
+    out.lines()
+        .filter_map(|l| l.trim().rsplit('\\').next())
+        .find(|s| !s.is_empty() && !s.starts_with('#') && !s.starts_with('<'))
+        .map(str::to_string)
+        .ok_or_else(|| format!("no interactive user logged into {vm_name:?}"))
+}
+
+/// Launch QA40x.exe in the interactive guest session. `cmd /c start` from the
+/// SYSTEM context silently fails for GUI apps, so this registers and fires a
+/// scheduled task bound to the console user's interactive token (no password
+/// needed with LogonType Interactive).
+fn guest_launch(vm_name: &str, exe: &str) -> R<()> {
+    let probe = guest_ps(vm_name, &format!("Test-Path '{exe}'"))?;
+    if !probe.contains("True") {
+        return Err(format!("{exe} not found in the guest (pass --qa40x-exe)"));
+    }
+    let user = guest_console_user(vm_name)?;
+    let script = format!(
+        "Register-ScheduledTask -TaskName qa40x-bench \
+           -Action (New-ScheduledTaskAction -Execute '{exe}') \
+           -Principal (New-ScheduledTaskPrincipal -UserId '{user}' -LogonType Interactive) \
+           -Force | Out-Null; \
+         Start-ScheduledTask -TaskName qa40x-bench"
+    );
+    guest_ps(vm_name, &script).map(|_| ())
 }
 
 fn guest_kill(vm_name: &str, exe: &str) {
@@ -604,6 +674,47 @@ fn guest_kill(vm_name: &str, exe: &str) {
         "prlctl",
         &["exec", vm_name, "taskkill", "/IM", basename, "/F"],
     );
+}
+
+/// Expose the official app's localhost-only REST server to the host.
+///
+/// The app registers `http://localhost:9402/` with HTTP.sys, which rejects any
+/// other Host header (400) and refuses non-loopback sources for localhost
+/// (403). A netsh portproxy on 9403 relays host traffic to loopback:9402; the
+/// client keeps sending `Host: localhost:9402`. Idempotent.
+fn guest_setup_rest_relay(vm_name: &str) -> R<()> {
+    let script = "netsh interface portproxy delete v4tov4 listenport=9403 listenaddress=0.0.0.0 | Out-Null; \
+                  netsh interface portproxy add v4tov4 listenport=9403 listenaddress=0.0.0.0 connectport=9402 connectaddress=127.0.0.1; \
+                  netsh advfirewall firewall delete rule name=qa40x-rest-9403 | Out-Null; \
+                  netsh advfirewall firewall add rule name=qa40x-rest-9403 dir=in action=allow protocol=TCP localport=9403"
+        .to_string();
+    guest_ps(vm_name, &script).map(|_| ())
+}
+
+/// Parallels-level USB replug: suspend + resume the VM. On resume Parallels
+/// reattaches passthrough USB devices from scratch, which reliably triggers
+/// the official app's hot-plug detection (the app keeps running throughout).
+/// This is the scripted equivalent of detaching/reattaching the analyzer in
+/// the Parallels Devices ▸ USB menu.
+fn vm_replug_usb(vm_name: &str) -> R<()> {
+    sh("prlctl", &["suspend", vm_name])?;
+    std::thread::sleep(Duration::from_secs(2));
+    sh("prlctl", &["resume", vm_name]).map(|_| ())
+}
+
+/// Force Windows to re-enumerate the QA402. After the host releases the
+/// analyzer mid-session, the guest sees it but the official app cannot claim
+/// it until it goes through a fresh PnP cycle — the scripted equivalent of
+/// unplugging and replugging the cable (or toggling File ▸ Device in the app).
+fn guest_reenumerate_qa402(vm_name: &str) -> R<()> {
+    let script = r#"$d = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like "*VID_16C0*" };
+        if ($d) {
+            Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false;
+            Start-Sleep 3;
+            Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false;
+            Start-Sleep 5;
+        } else { Write-Output "no VID_16C0 device present" }"#;
+    guest_ps(vm_name, script).map(|_| ())
 }
 
 fn prompt(msg: &str, no_prompt: bool) -> R<()> {
@@ -641,13 +752,56 @@ async fn vm_wait_rest(client: &RestClient, cli: &Cli) -> R<()> {
     }
     Err(format!(
         "no REST server at {} after {} s.\n\
-         Hints: is the official QA40x app installed at {:?}?\n\
-         If its REST server only listens on localhost inside the guest, forward it once:\n\
-           prlctl exec {:?} netsh interface portproxy add v4tov4 listenport=9402 listenaddress=0.0.0.0 connectport=9402 connectaddress=127.0.0.1\n\
-           prlctl exec {:?} netsh advfirewall firewall add rule name=qa40x-rest dir=in action=allow protocol=TCP localport=9402\n\
-         Or pass --vm-url if the address differs.",
-        client.base, cli.vm_timeout_s, cli.qa40x_exe, cli.vm_name, cli.vm_name
+         Hints: is the official QA40x app installed at {:?}? Is a user logged\n\
+         into the guest console (needed to launch a GUI app)? Pass --vm-url if\n\
+         the address differs.",
+        client.base, cli.vm_timeout_s, cli.qa40x_exe
     ))
+}
+
+/// Wait until the official app reports the QA402 as connected. If it stays
+/// disconnected, force a guest-side USB re-enumeration and restart the app —
+/// after the host releases the device, the app cannot claim it again until
+/// the analyzer goes through a fresh PnP cycle.
+async fn vm_wait_device(client: &RestClient, cli: &Cli) -> R<bool> {
+    let mut replugged = false;
+    let mut reenumerated = false;
+    let mut consecutive = 0u32;
+    for i in 0..50 {
+        if let Ok(v) = client.get("/Status/Connection").await {
+            if truthy(&v, "Value").unwrap_or(false) {
+                // Right after boot the app can report a transient True and
+                // then drop the device; require it to hold for a few polls.
+                consecutive += 1;
+                if consecutive >= 3 {
+                    return Ok(true);
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        }
+        consecutive = 0;
+        if i >= 5 && !replugged {
+            replugged = true;
+            println!("[vm] app does not see the QA402 — Parallels-level USB replug (suspend/resume)");
+            if let Err(e) = vm_replug_usb(&cli.vm_name) {
+                println!("[vm] suspend/resume failed: {e}");
+            }
+        } else if i >= 20 && !reenumerated {
+            reenumerated = true;
+            println!("[vm] still not connected — guest PnP re-enumeration and app restart");
+            if let Err(e) = guest_reenumerate_qa402(&cli.vm_name) {
+                println!("[vm] re-enumeration failed: {e}");
+            }
+            guest_kill(&cli.vm_name, &cli.qa40x_exe);
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if let Err(e) = guest_launch(&cli.vm_name, &cli.qa40x_exe) {
+                println!("[vm] app relaunch failed: {e}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -939,7 +1093,9 @@ async fn run(cli: &Cli) -> R<()> {
         let host_res = if cli.skip_host {
             None
         } else {
-            // If a previous round left the QA402 assigned to the VM, take it back.
+            // If a previous round (or a previous bench run) left the QA402
+            // assigned to the VM, take it back — the device only returns to
+            // the host when the VM stops.
             if !cli.skip_vm && round > 1 {
                 vm_stop(&cli.vm_name)?;
                 usb_release(&cli.usb_name)?;
@@ -953,12 +1109,19 @@ async fn run(cli: &Cli) -> R<()> {
                     dev.connect_virtual()
                         .await
                         .map_err(|e| format!("virtual connect: {e}"))?;
-                } else {
-                    dev.connect().await.map_err(|e| {
-                        format!(
-                            "QA402 connect failed: {e} — is it attached to the Mac (not the VM)?"
-                        )
-                    })?;
+                } else if let Err(first) = dev.connect().await {
+                    if cli.skip_vm || vm_status(&cli.vm_name)? != "running" {
+                        return Err(format!(
+                            "QA402 connect failed: {first} — is it attached to the Mac (not the VM)?"
+                        ));
+                    }
+                    println!("[host] QA402 unavailable ({first}) — reclaiming it from the running VM");
+                    vm_stop(&cli.vm_name)?;
+                    usb_release(&cli.usb_name)?;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    dev.connect()
+                        .await
+                        .map_err(|e| format!("QA402 connect failed even after stopping the VM: {e}"))?;
                 }
                 if let Some(meta) = dev.device_meta().await {
                     println!(
@@ -999,33 +1162,46 @@ async fn run(cli: &Cli) -> R<()> {
                 Some(u) => u.clone(),
                 None => {
                     let ip = vm_wait_ip(&cli.vm_name, Duration::from_secs(180))?;
-                    format!("http://{ip}:9402")
+                    // 9403 is the in-guest portproxy in front of the app's
+                    // localhost-only 9402 (see guest_setup_rest_relay).
+                    format!("http://{ip}:9403")
                 }
             };
-            println!("[vm] VM up, targeting {base}");
-            let client = RestClient::new(&base);
+            println!("[vm] VM up, targeting {base} (relay to localhost:9402)");
+            if let Err(e) = guest_setup_rest_relay(&cli.vm_name) {
+                println!("[vm] REST relay setup failed ({e}) — continuing, it may already be in place");
+            }
+            let client = RestClient::with_host_header(&base, Some("localhost:9402".into()));
             vm_wait_rest(&client, cli).await?;
             // The app must also see the analyzer over USB.
-            let mut connected = false;
-            for _ in 0..30 {
-                if let Ok(v) = client.get("/Status/Connection").await {
-                    if truthy(&v, "Value").unwrap_or(false) {
-                        connected = true;
-                        break;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            if !connected {
+            if !vm_wait_device(&client, cli).await? {
                 prompt(
                     "The official app does not report the QA402 as connected.\n\
-                     Check the Parallels Devices ▸ USB menu and attach the analyzer to the VM.",
+                     Check the Parallels Devices ▸ USB menu and attach the analyzer to the VM,\n\
+                     or toggle File ▸ Device in the app.",
                     cli.no_prompt,
                 )?;
             }
             let spectrum = format!("{}/{}-vm-r{}-spectrum.json", cli.out_dir, ts, round);
-            let res =
-                run_battery(&client, "QA40x official", cli.vm_amp_dbv, cli, &spectrum).await?;
+            let res = match run_battery(&client, "QA40x official", cli.vm_amp_dbv, cli, &spectrum)
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    // Typical failure mode: the app dropped the analyzer
+                    // mid-battery (fresh-boot USB flakiness). One
+                    // Parallels-level replug, then a single retry.
+                    println!("[vm] battery failed ({e}) — USB replug (suspend/resume) and one retry");
+                    if let Err(e) = vm_replug_usb(&cli.vm_name) {
+                        println!("[vm] suspend/resume failed: {e}");
+                    }
+                    vm_wait_rest(&client, cli).await?;
+                    if !vm_wait_device(&client, cli).await? {
+                        return Err("official app still does not see the QA402 after replug".into());
+                    }
+                    run_battery(&client, "QA40x official", cli.vm_amp_dbv, cli, &spectrum).await?
+                }
+            };
             if !cli.keep_vm {
                 guest_kill(&cli.vm_name, &cli.qa40x_exe);
                 vm_stop(&cli.vm_name)?;
