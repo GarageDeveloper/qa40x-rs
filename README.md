@@ -120,8 +120,15 @@ Platform system dependencies:
   ```
   SUBSYSTEM=="usb", ATTR{idVendor}=="16c0", ATTR{idProduct}=="4e37", MODE="0666"
   SUBSYSTEM=="usb", ATTR{idVendor}=="16c0", ATTR{idProduct}=="4e39", MODE="0666"
+  # NXP bootloader (firmware flashing)
+  SUBSYSTEM=="usb", ATTR{idVendor}=="1fc9", ATTR{idProduct}=="0022", MODE="0666"
+  KERNEL=="hidraw*", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="0022", MODE="0666"
   ```
   then `sudo udevadm control --reload-rules && sudo udevadm trigger`.
+  Inside a VM (Parallels, UTM, VirtualBox…), also make sure USB auto-attach
+  covers the NXP bootloader (`1fc9:0022`) — during flashing the analyzer
+  re-enumerates as a different USB device, which some hypervisors do not
+  reconnect to the guest automatically.
 - **Windows** — [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
 
 Then:
