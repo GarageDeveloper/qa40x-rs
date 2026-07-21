@@ -1,0 +1,128 @@
+# A/B loopback bench — qa40x-rs vs the official QA40x application
+
+`cargo run --example bench_ab` runs the **same REST-driven measurement battery**
+against qa40x-rs (on the macOS host) and the official QuantAsylum QA40x
+application (in a Parallels Windows VM), with the same QA402 analyzer switched
+between the two. Both servers speak the QA40x REST scheme on port 9402, so one
+client exercises both and the report diffs every metric against an A/B
+tolerance.
+
+This is a high-level QA gate: it validates qa40x-rs's *measurement chain*
+(generator scaling, calibration, FFT/windowing, THD/THD+N/SNR math) against the
+vendor reference on real hardware, not just against unit-test fixtures.
+
+## Physical setup
+
+Passive loopback, the audiophile reference config:
+
+- **L+ OUT → L+ IN** and **R+ OUT → R+ IN** (BNC/RCA, unbalanced, shortest leads)
+- Nothing else on the connectors; let the analyzer warm up a few minutes for
+  stable distortion residuals.
+
+## Prerequisites
+
+- QA402 on USB, visible to Parallels as `QA402 Audio Analyzer`
+  (`prlsrvctl usb list`).
+- A Parallels VM (default name `Windows 11`) with **Parallels Tools** installed
+  and the official **QA40x** app at
+  `C:\Program Files\QuantAsylum\QA40x\QA40x.exe` (override with `--qa40x-exe`).
+- The official app's REST server reachable from the host on port 9402. If it
+  only listens on `localhost` inside the guest, forward it once (elevated guest
+  shell):
+
+  ```
+  netsh interface portproxy add v4tov4 listenport=9402 listenaddress=0.0.0.0 connectport=9402 connectaddress=127.0.0.1
+  netsh advfirewall firewall add rule name=qa40x-rest dir=in action=allow protocol=TCP localport=9402
+  ```
+
+- The qa40x-rs GUI must **not** be running (single USB claim, and the bench
+  binds the same 9402 port).
+
+## What it does
+
+Per round (`--rounds N` alternates N times, assessing repeatability):
+
+1. **Host phase** — claims the QA402 over native USB, starts the in-process
+   qa40x-rs REST server (same code path as the GUI), runs the battery against
+   `http://127.0.0.1:9402`, then releases the device.
+2. **VM phase** — `prlsrvctl usb set` assigns the QA402 to the VM,
+   `prlctl start` boots it, `prlctl exec` launches QA40x.exe, then the battery
+   runs against `http://<vm-ip>:9402`. Afterwards the app is closed, the VM is
+   shut down and the analyzer returns to the host (`--keep-vm` skips that).
+
+### The battery (per target)
+
+48 kHz, 32768-sample buffer (≈1.46 Hz bins), ±6 dBV input range, ~-10 dBV
+stimulus:
+
+| # | Measurement | Endpoint(s) |
+|---|---|---|
+| 1 | Noise floor 20 Hz–20 kHz, generator off | `RmsDbv` |
+| 2 | Absolute level & L/R balance @ 1 kHz | `RmsDbv` |
+| 3 | THD, THD+N, SNR @ 1 kHz | `ThdDb`, `ThdPct`, `ThdnDb`, `SnrDb` |
+| 4 | THD @ 100 Hz and 6 kHz | `ThdDb` |
+| 5 | Frequency response, 12 stepped tones 20 Hz–20 kHz, deviation re 1 kHz | `RmsDbv` (narrow band) |
+| 6 | Amplitude linearity, 1 kHz staircase in 10 dB steps | `RmsDbv` |
+| 7 | 1 kHz spectrum snapshot saved for offline diffing | `Data/Frequency/Input` |
+
+### A/B tolerances
+
+| Metric | Tolerance | Rationale |
+|---|---|---|
+| Level @ 1 kHz | 0.5 dB | absolute calibration agreement |
+| L−R balance | 0.2 dB | same analyzer, same cables |
+| FR deviation per point | 0.2 dB | flatness must match point by point |
+| Linearity step error | 0.1 dB | DAC/ADC tracking |
+| THD / SNR | 3 dB | windowing & integration choices differ |
+| THD+N | 2 dB | idem, slightly tighter |
+| Noise floor | 3 dB | bandwidth/weighting details |
+
+The process exits non-zero if any metric exceeds its tolerance, so the bench
+can gate a release checklist.
+
+## Known API divergences the bench compensates
+
+- **Generator amplitude unit**: dBFS in qa40x-rs vs **dBV** in the official
+  app. Defaults `--host-amp -18` (dBFS) and `--vm-amp -10` (dBV) are nominally
+  identical because the bench pins the host output range to +8 dBV full-scale
+  (the REST API has no output-range endpoint and the hardware powers up on
+  −12 dBV).
+- **HTTP verbs**: the client uses the official verbs (PUT settings, POST
+  acquisition, GET readouts); qa40x-rs routes on path only, so both accept them.
+- **Async acquisition**: qa40x-rs acquires synchronously and always reports
+  `AcquisitionBusy=False`; the client's poll loop works unchanged on both.
+- **Value shapes**: numbers arrive as JSON numbers (qa40x-rs) or strings
+  (official app); the client accepts both.
+
+## Usage
+
+```bash
+# Full A/B run, one round
+cargo run --example bench_ab
+
+# Three alternations for repeatability stats
+cargo run --example bench_ab -- --rounds 3
+
+# Harness self-test without hardware or VM (embedded virtual QA403)
+cargo run --example bench_ab -- --demo --skip-vm
+
+# Host-only / VM-only halves
+cargo run --example bench_ab -- --skip-vm
+cargo run --example bench_ab -- --skip-host --vm-url http://10.211.55.3:9402
+```
+
+Reports land in `target/bench-ab/`: a Markdown comparison table
+(`<ts>-bench.md`), the raw JSON (`<ts>-bench.json`) and the saved spectra
+(`<ts>-{host,vm}-r<N>-spectrum.json`). `--help` lists all options.
+
+## Caveats
+
+- USB switching relies on Parallels' permanent-assignment mechanism
+  (`prlsrvctl usb set/del`) plus a VM boot/shutdown per round — reliable but
+  slow (~1–2 min per alternation). If the guest misses the device, the bench
+  prompts you to attach it via the Parallels **Devices ▸ USB** menu.
+- `prlctl exec` needs Parallels Tools; if the app can't be launched that way,
+  start QA40x manually in the VM window — the bench keeps polling until
+  `--vm-timeout` expires.
+- Demo mode measures the embedded simulator, not hardware; it only validates
+  the harness itself.

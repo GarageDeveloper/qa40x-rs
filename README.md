@@ -54,7 +54,9 @@ application **v1** and the upcoming **v2** expected in 2026.
   be saved and restored as named workspaces.
 - **Automation** — a QA40x-compatible REST API (localhost by default,
   bearer-token protected when exposed to the network) and in-app scripting
-  (Rhai) for measurement sequences.
+  (Rhai) for measurement sequences. An A/B loopback bench diffs the whole
+  measurement chain against the official app on the same hardware
+  (see [doc/bench-ab.md](doc/bench-ab.md)).
 - **Device panel** — live telemetry (USB voltage/current, temperature),
   firmware version and serial at connect.
 - **Demo mode** — a **Demo** button next to Connect attaches a built-in
