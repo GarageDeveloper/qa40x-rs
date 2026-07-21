@@ -8,7 +8,10 @@
  * - the sine tone editor reaches the mix: an equal antiphase extra tone
  *   cancels the primary (phase reaches the render, not just the label);
  * - output-only mode hands the DAC over: stream loop → gap-free generator,
- *   edits rebuild the loop buffer, unchecking resumes capture + analysis.
+ *   edits rebuild the loop buffer, unchecking resumes capture + analysis;
+ * - a hidden multi-tone is never silent state: the collapsed row's Tones
+ *   button carries the enabled extra-tone count, and the editor's
+ *   open/closed state survives a reload (issue #17).
  */
 import { expect, test } from "./adapter/fixtures";
 
@@ -95,4 +98,57 @@ test("output-only hands the DAC over and back: generator on, capture off, then r
   await app.setOutputOnly(false);
   await expect.poll(() => app.generatorRunning(), { timeout: 10_000 }).toBe(false);
   await expect.poll(() => app.streaming(), { timeout: 10_000 }).toBe(true);
+});
+
+test("a hidden extra tone lights the collapsed row; the editor's open state survives a reload", async ({
+  app,
+}) => {
+  const id = await app.addSine();
+  const moreBtn = `[data-testid="src-more-${id}"]`;
+  const editorOpen = () =>
+    app.drv.eval(
+      (sel: string) =>
+        document
+          .querySelector(sel)!
+          .closest(".sources__detail")!
+          .classList.contains("sources__detail--open"),
+      `[data-testid="src-tones-${id}"]`
+    );
+
+  // No extra tones: a plain, unlit button.
+  expect(await app.drv.text(moreBtn)).toBe("Tones");
+
+  // An enabled extra tone must show on the collapsed row: count + lit style.
+  await app.drv.click(moreBtn);
+  await app.drv.click(`[data-testid="src-tone-add-${id}"]`);
+  await expect.poll(() => app.drv.text(moreBtn)).toBe("Tones ×1");
+  expect(
+    await app.drv.eval(
+      (sel: string) => document.querySelector(sel)!.classList.contains("btn--primary"),
+      moreBtn
+    )
+  ).toBe(true);
+
+  // The badge counts ENABLED tones, not rows: disabling clears it.
+  await app.drv.click(`[data-testid="src-tone-en-${id}-0"]`);
+  await expect.poll(() => app.drv.text(moreBtn)).toBe("Tones");
+  await app.drv.click(`[data-testid="src-tone-en-${id}-0"]`);
+  await expect.poll(() => app.drv.text(moreBtn)).toBe("Tones ×1");
+
+  // Left OPEN across a reload: comes back open, badge still lit — a restored
+  // multi-tone is never invisible (the bug this guards against).
+  await app.saveWorkspaceAs("tones bench");
+  await app.waitForAutoSave("tones bench");
+  await app.boot();
+  await app.waitConnected();
+  expect(await editorOpen()).toBe(true);
+  expect(await app.drv.text(moreBtn)).toBe("Tones ×1");
+
+  // Closed across a reload: stays closed, but the badge still betrays the
+  // active extra tone.
+  await app.drv.click(moreBtn);
+  await app.boot();
+  await app.waitConnected();
+  expect(await editorOpen()).toBe(false);
+  expect(await app.drv.text(moreBtn)).toBe("Tones ×1");
 });
