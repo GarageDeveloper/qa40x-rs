@@ -442,7 +442,6 @@ impl Session {
 
     async fn level_dbv(&self, req: Band, use_peak: bool) -> Result<LeftRight, String> {
         let cap = self.last_or_err()?;
-        let fund = rest::peak_freq(&cap.left_channel, cap.sample_rate, req.lo_hz, req.hi_hz);
         let (off_l, off_r) = {
             let dev = self.device.lock().await;
             (
@@ -450,13 +449,25 @@ impl Session {
                 dev.input_dbv_offset(Channel::Right).await.0,
             )
         };
-        let pick = |a: &AnalysisResult| if use_peak { a.peak } else { a.rms };
-        let l = rest::db(pick(&rest::analyze_channel(&cap.left_channel, cap.sample_rate, fund))
-            as f64)
-            + off_l as f64;
-        let r = rest::db(pick(&rest::analyze_channel(&cap.right_channel, cap.sample_rate, fund))
-            as f64)
-            + off_r as f64;
+        // RMS honors the requested band (spectral integral, ENBW-corrected —
+        // the same math as the REST `RmsDbv`); peak is the time-domain sample
+        // peak, to which a band doesn't apply.
+        let level = |sig: &[f32]| {
+            if use_peak {
+                AudioAnalyzer::calculate_peak(sig)
+            } else {
+                let r = rest::spectrum(sig, cap.sample_rate);
+                AudioAnalyzer::band_rms_from_spectrum(
+                    &r.magnitudes,
+                    &r.frequencies,
+                    req.lo_hz,
+                    req.hi_hz,
+                    r.enbw_bins,
+                )
+            }
+        };
+        let l = rest::db(level(&cap.left_channel) as f64) + off_l as f64;
+        let r = rest::db(level(&cap.right_channel) as f64) + off_r as f64;
         Ok(LeftRight { left: l, right: r })
     }
 
@@ -606,8 +617,8 @@ impl Session {
         };
         let band_vrms = |sig: &[f32], off_db: f32| -> f64 {
             let fund = rest::peak_freq(sig, cap.sample_rate, lo, hi);
-            let (mags, freqs) = rest::spectrum(sig, cap.sample_rate);
-            let frac = AudioAnalyzer::band_rms_fraction(&mags, &freqs, fund) as f64;
+            let r = rest::spectrum(sig, cap.sample_rate);
+            let frac = AudioAnalyzer::band_rms_fraction(&r.magnitudes, &r.frequencies, fund) as f64;
             let full = AudioAnalyzer::calculate_rms(sig) as f64;
             // dBFS → Vrms via the input-range calibration offset. Linear all
             // the way: a dead channel must come out 0.0 (→ "gain could not be

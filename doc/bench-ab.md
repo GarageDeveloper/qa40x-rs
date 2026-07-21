@@ -110,46 +110,48 @@ can gate a release checklist.
   designators get a 400); qa40x-rs ignores the segment, so the official form
   works on both. Band bounds must be integer Hz for the official parser.
 
-## Verified baseline (2026-07-21 — QA402 fw 60 vs official app 1.220)
+## Verified baseline (2026-07-22 — QA402 fw 60 vs official app 1.220)
 
-Latest reference run (id `1784669512`, 48 kHz, 32768-sample buffer, ±6 dBV
-input, −18 dBFS ≡ −10 dBV stimulus, passive loopback on both channels).
-**19/24 metrics within tolerance.** This table is the parity baseline the
+Latest reference run (id `1784673597`, 48 kHz, 32768-sample buffer, ±6 dBV
+input, −18 dBFS ≡ −10 dBV stimulus, passive loopback on both channels), after
+the issue #7 fix (coherent generator + ENBW-corrected band integration).
+**23/24 metrics within tolerance.** This table is the parity baseline the
 README links to; re-run the bench and replace it when the numbers move.
 
 | metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |
 |---|---:|---:|---:|---:|:--:|
-| Level @1 kHz L (dBV) | -9.673 | -10.037 | +0.364 | 0.50 | ✅ |
-| Level @1 kHz R (dBV) | -9.609 | -10.029 | +0.420 | 0.50 | ✅ |
+| Level @1 kHz L (dBV) | -9.658 | -10.036 | +0.378 | 0.50 | ✅ |
+| Level @1 kHz R (dBV) | -9.594 | -10.028 | +0.433 | 0.50 | ✅ |
 | Balance L−R @1 kHz (dB) | -0.064 | -0.008 | -0.056 | 0.20 | ✅ |
-| Noise floor L (dBV) | -75.762 | -107.948 | +32.186 | 3.00 | ❌ |
-| Noise floor R (dBV) | -77.142 | -107.847 | +30.705 | 3.00 | ❌ |
-| THD @1 kHz L (dB) | -109.823 | -110.727 | +0.905 | 3.00 | ✅ |
-| THD @1 kHz R (dB) | -107.637 | -108.233 | +0.595 | 3.00 | ✅ |
-| THD+N @1 kHz L (dB) | -85.973 | -97.619 | +11.646 | 2.00 | ❌ |
-| SNR @1 kHz L (dB) | 85.991 | 98.403 | -12.412 | 3.00 | ❌ |
-| THD @100 Hz L (dB) | -106.609 | -103.553 | -3.056 | 3.00 | ❌ |
-| THD @6 kHz L (dB) | -111.026 | -110.644 | -0.382 | 3.00 | ✅ |
-| FR dev @20 Hz L (dB) | -0.045 | -0.015 | -0.030 | 0.20 | ✅ |
-| FR dev @30 Hz L (dB) | 0.004 | -0.008 | +0.013 | 0.20 | ✅ |
-| FR dev @50 Hz L (dB) | -0.008 | -0.003 | -0.005 | 0.20 | ✅ |
-| FR dev @100 Hz L (dB) | -0.004 | -0.000 | -0.003 | 0.20 | ✅ |
-| FR dev @200 Hz L (dB) | -0.002 | 0.000 | -0.002 | 0.20 | ✅ |
-| FR dev @500 Hz L (dB) | 0.002 | 0.001 | +0.001 | 0.20 | ✅ |
+| Noise floor L (dBV) | -107.244 | -107.123 | -0.121 | 3.00 | ✅ |
+| Noise floor R (dBV) | -107.180 | -105.509 | -1.671 | 3.00 | ✅ |
+| THD @1 kHz L (dB) | -110.876 | -110.435 | -0.441 | 3.00 | ✅ |
+| THD @1 kHz R (dB) | -108.209 | -109.052 | +0.843 | 3.00 | ✅ |
+| THD+N @1 kHz L (dB) | -97.376 | -97.379 | +0.004 | 2.00 | ✅ |
+| SNR @1 kHz L (dB) | 97.574 | 98.103 | -0.529 | 3.00 | ✅ |
+| THD @100 Hz L (dB) | -107.343 | -103.960 | -3.383 | 3.00 | ❌ |
+| THD @6 kHz L (dB) | -110.811 | -111.263 | +0.452 | 3.00 | ✅ |
+| FR dev @20 Hz L (dB) | -0.014 | -0.015 | +0.001 | 0.20 | ✅ |
+| FR dev @30 Hz L (dB) | -0.008 | -0.008 | +0.000 | 0.20 | ✅ |
+| FR dev @50 Hz L (dB) | -0.003 | -0.003 | -0.000 | 0.20 | ✅ |
+| FR dev @100 Hz L (dB) | -0.001 | -0.001 | -0.000 | 0.20 | ✅ |
+| FR dev @200 Hz L (dB) | 0.000 | 0.000 | -0.000 | 0.20 | ✅ |
+| FR dev @500 Hz L (dB) | 0.001 | 0.001 | -0.000 | 0.20 | ✅ |
 | FR dev @1000 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
-| FR dev @2000 Hz L (dB) | -0.001 | -0.002 | +0.001 | 0.20 | ✅ |
-| FR dev @5000 Hz L (dB) | -0.014 | -0.016 | +0.002 | 0.20 | ✅ |
-| FR dev @10000 Hz L (dB) | -0.063 | -0.065 | +0.002 | 0.20 | ✅ |
-| FR dev @15000 Hz L (dB) | -0.145 | -0.146 | +0.001 | 0.20 | ✅ |
-| FR dev @20000 Hz L (dB) | -0.257 | -0.258 | +0.001 | 0.20 | ✅ |
-| Linearity worst 10 dB-step error (dB) | 0.001 | 0.001 | -0.000 | 0.10 | ✅ |
+| FR dev @2000 Hz L (dB) | -0.002 | -0.002 | +0.000 | 0.20 | ✅ |
+| FR dev @5000 Hz L (dB) | -0.016 | -0.016 | +0.000 | 0.20 | ✅ |
+| FR dev @10000 Hz L (dB) | -0.065 | -0.065 | +0.000 | 0.20 | ✅ |
+| FR dev @15000 Hz L (dB) | -0.146 | -0.146 | +0.000 | 0.20 | ✅ |
+| FR dev @20000 Hz L (dB) | -0.258 | -0.258 | -0.000 | 0.20 | ✅ |
+| Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.000 | 0.10 | ✅ |
 
-Reading: frequency response, linearity and THD are in near-perfect agreement
-(FR Δ ≤ 0.030 dB, ≤ 0.002 dB above 500 Hz — both apps see the same hardware
-roll-off at 20 kHz). The five failures share one root cause under
-investigation (integrated-noise readouts), plus THD @ 100 Hz overshooting its
-tolerance by 0.06 dB in the direction where qa40x-rs reads *lower* than the
-official app.
+Reading: every FR point now agrees to ≤ 0.001 dB, THD+N to 0.004 dB, and the
+noise floors to ≤ 1.7 dB. The one remaining failure, THD @ 100 Hz, is
+qa40x-rs reading *lower* (cleaner) than the official app by 3.38 dB for a
+3 dB tolerance: the official app measures through a 5-term flat-top window
+whose wide lobes integrate more of the near-floor energy around each low
+harmonic than our narrow Hann lobes. Offering the official app's analysis
+parameters (window, coherent generator toggle) is tracked as issue #14.
 
 ## Findings from the first hardware run (2026-07-21, QA402 fw 60 vs app 1.220)
 
@@ -162,10 +164,26 @@ remarkably well. Three real divergences surfaced:
    Gen1 drives both outputs. It now routes the stimulus with
    `route_stimulus(&tone, Route::Both)`; verified in loopback (R at
    −9.61 dBV, THD R −107.6 dB, FR R matching the official trace).
-2. **Integrated noise**: qa40x-rs `RmsDbv` with the generator off reads
-   ≈ −76 dBV (20 Hz–20 kHz) where the official app reads ≈ −108 dBV on the
-   same wiring; THD+N and SNR differ by ≈ 10 dB in the same direction. The
-   qa40x-rs REST measurement chain (windowing/integration) needs a look.
+2. **Integrated noise** *(fixed on this branch — issue #7)*: qa40x-rs
+   `RmsDbv` with the generator off read ≈ −76 dBV (20 Hz–20 kHz) where the
+   official app reads ≈ −108 dBV on the same wiring; THD+N and SNR differed
+   by ≈ 12 dB in the same direction. Bin-by-bin comparison of the two saved
+   spectra proved the acquisition itself was equally quiet (per-bin floors
+   within 0.4 dB) and isolated three causes, all in the readout math:
+   the official app snaps its generator onto the FFT bin grid (its 1 kHz
+   plays at 1000.4883 Hz = bin 683 — its lobe is perfectly symmetric, and a
+   simulated coherent flat-top tone reproduces it to 0.06 dB), so it has no
+   window-skirt leakage where our non-coherent tone's Hann skirts dominated
+   the THD+N residual; our `RmsDbv` returned the full-band time-domain RMS
+   (DC and out-of-band noise included) instead of integrating the spectrum
+   over the requested band; and broadband integrals of an
+   amplitude-corrected spectrum must be divided by the window's ENBW (the
+   official app does — its reported noise sits exactly 5.76 dB, the
+   flat-top ENBW, below the raw power sum of its own spectrum). Fixed by
+   snapping the REST generator (`snap_to_bin`), integrating `RmsDbv` over
+   [lo, hi] with the new ENBW-corrected `band_rms_from_spectrum`, and
+   exposing `enbw_bins` on `FftResult`. Verified: THD+N Δ 0.004 dB, noise
+   floor Δ ≤ 1.7 dB vs the official app on hardware.
 3. **Absolute level**: −9.67 dBV vs −10.04 dBV for the nominally identical
    stimulus (output-range mapping / calibration difference of ≈ 0.36 dB).
 

@@ -360,8 +360,8 @@ async fn dispatch(path: &str, state: &RestState) -> RestResult {
         ["SnrDb", f, _lo, _hi] => measure(state, num(f)?, |a| a.snr as f64).await,
 
         // Level readouts. dBV = dBFS + the input-range calibration offset.
-        ["RmsDbv", lo, hi] => level_dbv(state, num(lo)?, num(hi)?, |a| a.rms).await,
-        ["PeakDbv", lo, hi] => level_dbv(state, num(lo)?, num(hi)?, |a| a.peak).await,
+        ["RmsDbv", lo, hi] => band_rms_dbv(state, num(lo)?, num(hi)?).await,
+        ["PeakDbv", _lo, _hi] => peak_dbv(state).await,
         ["PeakHz", lo, hi] => peak_hz(state, num(lo)?, num(hi)?).await,
 
         // Raw data arrays (base64 float64 LE), like QA40x.
@@ -398,7 +398,13 @@ async fn acquisition(state: &RestState) -> RestResult {
     let sr = dev.get_config().await.sample_rate.as_hz();
     let tone = if g.on {
         let amp = 10f32.powf(g.amp_dbfs.clamp(-120.0, 0.0) / 20.0);
-        SignalGenerator::sine(g.freq, amp, sr, n)
+        // Snap the tone onto the FFT bin grid, like the official app does
+        // (its 1 kHz plays at 1000.4883 Hz = bin 683 at 48 kHz/32768 — seen
+        // in the A/B bench spectra). A coherent tone has NO window skirts, so
+        // none of its energy leaks into the THD+N/SNR noise residual; a tone
+        // asked between bins raised those readouts ~12 dB above the official
+        // app on identical hardware (issue #7).
+        SignalGenerator::sine(snap_to_bin(g.freq, sr, n), amp, sr, n)
     } else {
         vec![0.0f32; n]
     };
@@ -474,19 +480,32 @@ async fn measure(
     Ok(left_right(l, r))
 }
 
-/// Level (RMS/Peak) in dBV: dBFS + the current input-range calibration offset.
-async fn level_dbv(
-    state: &RestState,
-    lo: f32,
-    hi: f32,
-    pick: impl Fn(&crate::audio::AnalysisResult) -> f32,
-) -> RestResult {
+/// Band-limited RMS in dBV: the spectrum integrated over [lo, hi] Hz
+/// (ENBW-corrected) + the input-range calibration offset. Matches the
+/// official app's `RmsDbv` — which honors the band — where a full-band
+/// time-domain RMS also reads DC and out-of-band noise, ~31 dB above the
+/// official 20 Hz–20 kHz noise floor on real hardware (issue #7).
+async fn band_rms_dbv(state: &RestState, lo: f32, hi: f32) -> RestResult {
     let cap = last(state).await?;
-    let fund = peak_freq(&cap.left_channel, cap.sample_rate, lo, hi);
     let (off_l, _) = state.device.lock().await.input_dbv_offset(Channel::Left).await;
     let (off_r, _) = state.device.lock().await.input_dbv_offset(Channel::Right).await;
-    let l = db(pick(&analyze_channel(&cap.left_channel, cap.sample_rate, fund)) as f64) + off_l as f64;
-    let r = db(pick(&analyze_channel(&cap.right_channel, cap.sample_rate, fund)) as f64) + off_r as f64;
+    let band = |sig: &[f32]| {
+        let r = spectrum(sig, cap.sample_rate);
+        AudioAnalyzer::band_rms_from_spectrum(&r.magnitudes, &r.frequencies, lo, hi, r.enbw_bins)
+    };
+    let l = db(band(&cap.left_channel) as f64) + off_l as f64;
+    let r = db(band(&cap.right_channel) as f64) + off_r as f64;
+    Ok(left_right(l, r))
+}
+
+/// Peak level in dBV: the time-domain absolute peak + the input-range
+/// calibration offset (the band arguments don't apply to a sample peak).
+async fn peak_dbv(state: &RestState) -> RestResult {
+    let cap = last(state).await?;
+    let (off_l, _) = state.device.lock().await.input_dbv_offset(Channel::Left).await;
+    let (off_r, _) = state.device.lock().await.input_dbv_offset(Channel::Right).await;
+    let l = db(AudioAnalyzer::calculate_peak(&cap.left_channel) as f64) + off_l as f64;
+    let r = db(AudioAnalyzer::calculate_peak(&cap.right_channel) as f64) + off_r as f64;
     Ok(left_right(l, r))
 }
 
@@ -518,15 +537,16 @@ async fn data_frequency(state: &RestState, src: &str) -> RestResult {
         return Err((501, format!("Data/Frequency/{src} not supported (Input only)")));
     }
     let cap = last(state).await?;
-    let (ml, freqs) = spectrum(&cap.left_channel, cap.sample_rate);
-    let (mr, _) = spectrum(&cap.right_channel, cap.sample_rate);
-    let dx = if freqs.len() > 1 { (freqs[1] - freqs[0]) as f64 } else { 0.0 };
+    let l = spectrum(&cap.left_channel, cap.sample_rate);
+    let r = spectrum(&cap.right_channel, cap.sample_rate);
+    let f = &l.frequencies;
+    let dx = if f.len() > 1 { (f[1] - f[0]) as f64 } else { 0.0 };
     Ok(json!({
         "SessionId": SESSION_ID,
-        "Length": ml.len().to_string(),
+        "Length": l.magnitudes.len().to_string(),
         "Dx": fmt(dx),
-        "Left": b64_f64(&ml),
-        "Right": b64_f64(&mr),
+        "Left": b64_f64(&l.magnitudes),
+        "Right": b64_f64(&r.magnitudes),
     }))
 }
 
@@ -546,25 +566,36 @@ async fn last(state: &RestState) -> Result<AudioData, RestError> {
 /// Analyze one channel at a given fundamental. Shared with the Rhai scripting
 /// engine (`crate::script`) so both automation surfaces measure identically.
 pub(crate) fn analyze_channel(sig: &[f32], sr: u32, fund: f32) -> crate::audio::AnalysisResult {
-    let (mags, freqs) = spectrum(sig, sr);
-    AudioAnalyzer::analyze(sig, &mags, &freqs, fund)
+    let r = spectrum(sig, sr);
+    AudioAnalyzer::analyze(sig, &r.magnitudes, &r.frequencies, fund)
 }
 
-/// Hann-windowed magnitude spectrum. Shared with `crate::measurement` (the
-/// auto-level probe's band-RMS fraction).
-pub(crate) fn spectrum(sig: &[f32], sr: u32) -> (Vec<f32>, Vec<f32>) {
+/// Hann-windowed magnitude spectrum (with the window's ENBW for band
+/// integrals). Shared with `crate::measurement` (the auto-level probe's
+/// band-RMS fraction and the dashboard's band-RMS verb).
+pub(crate) fn spectrum(sig: &[f32], sr: u32) -> crate::audio::FftResult {
     let mut fft = FftProcessor::new();
-    let r = fft.process_real_windowed(sig, sr, WindowFunction::Hann);
-    (r.magnitudes, r.frequencies)
+    fft.process_real_windowed(sig, sr, WindowFunction::Hann)
+}
+
+/// Round `freq` to the nearest bin of an `n`-point FFT at `sr` Hz, so the
+/// generated tone is periodic in the capture buffer (coherent — zero spectral
+/// leakage under any window). Matches the official app's generator.
+pub(crate) fn snap_to_bin(freq: f32, sr: u32, n: usize) -> f32 {
+    if n == 0 || sr == 0 || !(freq > 0.0) {
+        return freq;
+    }
+    let bin = (freq as f64 * n as f64 / sr as f64).round();
+    (bin * sr as f64 / n as f64) as f32
 }
 
 /// Frequency of the strongest bin within [lo, hi] Hz. Shared with `crate::script`.
 pub(crate) fn peak_freq(sig: &[f32], sr: u32, lo: f32, hi: f32) -> f32 {
-    let (mags, freqs) = spectrum(sig, sr);
+    let r = spectrum(sig, sr);
     let mut best = 0.0f32;
     let mut best_f = 0.0f32;
-    for (i, &m) in mags.iter().enumerate() {
-        let f = freqs[i];
+    for (i, &m) in r.magnitudes.iter().enumerate() {
+        let f = r.frequencies[i];
         if f >= lo && f <= hi && m > best {
             best = m;
             best_f = f;
@@ -676,6 +707,65 @@ mod tests {
         let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
         // 0.5-peak sine → RMS 0.3536 → -9.03 dBFS; +0 offset (input 6 dBV default).
         assert!((left - (-9.03)).abs() < 0.3, "rms {left} dBV");
+    }
+
+    #[test]
+    fn snap_to_bin_matches_the_official_generator_grid() {
+        // 48 kHz / 32768 samples: 1 kHz snaps to bin 683 = 1000.4883 Hz — the
+        // exact frequency the official app plays (measured in the A/B bench
+        // spectra, where its fundamental sits dead-center on bin 683).
+        let f = snap_to_bin(1000.0, 48000, 32768);
+        assert!((f - 1000.4883).abs() < 1e-3, "snapped to {f}");
+        // Degenerate inputs pass through untouched.
+        assert_eq!(snap_to_bin(0.0, 48000, 32768), 0.0);
+        assert_eq!(snap_to_bin(1000.0, 0, 32768), 1000.0);
+    }
+
+    #[tokio::test]
+    async fn rms_dbv_rejects_dc_and_out_of_band_energy() {
+        // DC + a 22.5 kHz tone (both bin-centered, both outside 20 Hz–20 kHz):
+        // the band readout must stay at the numerical floor. The old
+        // time-domain RMS read their full energy (−33 dBFS here) — the same
+        // failure that put the hardware noise floor 31 dB above the official
+        // app's (issue #7).
+        let sr = 48000u32;
+        let n = 32768usize;
+        // f64-phase generation (like the acquisition path) — a naive f32
+        // unwrapped phase would add ~−80 dB of its own sideband noise.
+        let sig: Vec<f32> = SignalGenerator::sine(22500.0, 0.01, sr, n)
+            .into_iter()
+            .map(|s| s + 0.02)
+            .collect();
+        let st = Arc::new(RestState::new(Arc::new(Mutex::new(QA40xDevice::new()))));
+        *st.last.lock().await = Some(AudioData {
+            left_channel: sig.clone(),
+            right_channel: sig,
+            sample_rate: sr,
+        });
+        let v = dispatch("/RmsDbv/20/20000", &st).await.unwrap();
+        let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
+        assert!(left < -100.0, "in-band RMS {left} dBV — DC/out-of-band leaked in");
+    }
+
+    #[tokio::test]
+    async fn coherent_tone_has_no_thdn_leakage_floor() {
+        // A bin-centered (coherent) tone — what the snapped generator now
+        // plays — must not manufacture a THD+N floor out of window skirts:
+        // the non-coherent 1000.0 Hz equivalent reads ≈ −86 dB from Hann
+        // leakage alone (the A/B divergence), the coherent one is clean.
+        let sr = 48000u32;
+        let n = 32768usize;
+        let f = snap_to_bin(1000.0, sr, n);
+        let tone = SignalGenerator::sine(f, 0.5, sr, n);
+        let st = Arc::new(RestState::new(Arc::new(Mutex::new(QA40xDevice::new()))));
+        *st.last.lock().await = Some(AudioData {
+            left_channel: tone.clone(),
+            right_channel: tone,
+            sample_rate: sr,
+        });
+        let v = dispatch("/ThdnDb/1000/20/20000", &st).await.unwrap();
+        let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
+        assert!(left < -100.0, "THD+N of a pure coherent tone reads {left} dB");
     }
 
     #[tokio::test]
