@@ -50,6 +50,14 @@ struct Cli {
     amp_dbv: f64,
     sample_rate: u32,
     buffer_size: u32,
+    /// Analysis windows to force on BOTH targets (official designators), one
+    /// full battery per window — the issue #14 diagnostic matrix. The official
+    /// app cannot be asked what window it uses (no settings readback in its
+    /// REST API), but it CAN be told: /Settings/Windowing/{name}.
+    windows: Vec<String>,
+    /// Acquisitions averaged (in linear power) for the THD @100 Hz row, whose
+    /// official reading moves run-to-run (near-noise-floor harmonics).
+    thd_avg: u32,
     out_dir: String,
     demo: bool,
     skip_vm: bool,
@@ -57,6 +65,12 @@ struct Cli {
     keep_vm: bool,
     no_prompt: bool,
     vm_timeout_s: u64,
+    /// Offline mode: saved spectrum snapshots to run the inference + THD
+    /// probe on (no hardware, no VM). Repeatable.
+    probe_files: Vec<String>,
+    /// Asked tone frequency for --probe files (the inference searches ±25 %
+    /// around it).
+    probe_freq: f64,
 }
 
 impl Default for Cli {
@@ -70,6 +84,8 @@ impl Default for Cli {
             amp_dbv: -10.0,
             sample_rate: 48000,
             buffer_size: 32768,
+            windows: vec!["FlatTop".into(), "Hann".into(), "Rectangle".into()],
+            thd_avg: 4,
             out_dir: "target/bench-ab".into(),
             demo: false,
             skip_vm: false,
@@ -77,6 +93,8 @@ impl Default for Cli {
             keep_vm: false,
             no_prompt: false,
             vm_timeout_s: 240,
+            probe_files: Vec::new(),
+            probe_freq: 1000.0,
         }
     }
 }
@@ -113,11 +131,36 @@ fn parse_cli() -> R<Cli> {
                     .parse()
                     .map_err(|e| format!("--buffer-size: {e}"))?
             }
+            "--windows" => {
+                cli.windows = val("--windows")?
+                    .split(',')
+                    .map(|w| {
+                        canon_window(w.trim())
+                            .map(str::to_string)
+                            .ok_or_else(|| format!("--windows: unknown window {w:?}"))
+                    })
+                    .collect::<R<Vec<_>>>()?;
+                if cli.windows.is_empty() {
+                    return Err("--windows needs at least one window".into());
+                }
+            }
+            "--thd-avg" => {
+                cli.thd_avg = val("--thd-avg")?
+                    .parse::<u32>()
+                    .map_err(|e| format!("--thd-avg: {e}"))?
+                    .max(1)
+            }
             "--out" => cli.out_dir = val("--out")?,
             "--vm-timeout" => {
                 cli.vm_timeout_s = val("--vm-timeout")?
                     .parse()
                     .map_err(|e| format!("--vm-timeout: {e}"))?
+            }
+            "--probe" => cli.probe_files.push(val("--probe")?),
+            "--probe-freq" => {
+                cli.probe_freq = val("--probe-freq")?
+                    .parse()
+                    .map_err(|e| format!("--probe-freq: {e}"))?
             }
             "--demo" => cli.demo = true,
             "--skip-vm" => cli.skip_vm = true,
@@ -151,6 +194,13 @@ USAGE: cargo run --example bench_ab -- [OPTIONS]
   --amp DBV          generator amplitude for both targets, in dBV (default -10)
   --sample-rate HZ   sample rate for both targets (default 48000)
   --buffer-size N    acquisition buffer for both targets (default 32768)
+  --windows LIST     comma-separated analysis windows forced on BOTH targets via
+                     /Settings/Windowing, one battery per window
+                     (Rectangle|Bartlett|Hamming|Hann|FlatTop; default FlatTop,Hann,Rectangle)
+  --thd-avg N        acquisitions averaged for the THD @100 Hz row (default 4)
+  --probe FILE       offline: infer window/coherence + run the THD-method probe
+                     on a saved spectrum snapshot, then exit (repeatable)
+  --probe-freq HZ    asked tone frequency for --probe files (default 1000)
   --out DIR          report directory (default target/bench-ab)
   --vm-timeout S     seconds to wait for the VM REST server (default 240)
   --demo             host phase uses the embedded virtual QA403 (harness self-test only)
@@ -320,13 +370,23 @@ struct BatteryResult {
     version: String,
     /// Generator amplitude in dBV (the unit both targets take since #20).
     amp_dbv: f64,
+    /// Analysis window this battery asked for on /Settings/Windowing
+    /// (official designator), and whether the target accepted the PUT — an
+    /// older official app without the endpoint stays on its own default.
+    window: String,
+    windowing_applied: bool,
     noise_floor_dbv: (f64, f64),
     level_1k_dbv: (f64, f64),
     thd_1k_db: (f64, f64),
     thd_1k_pct: (f64, f64),
     thdn_1k_db: (f64, f64),
     snr_1k_db: (f64, f64),
+    /// Linear-power mean of `thd_100_runs` (the official value moves
+    /// run-to-run — near-noise-floor harmonics).
     thd_100_db: (f64, f64),
+    /// Every individual THD @100 Hz acquisition (dB), to make the jitter
+    /// visible instead of surprising.
+    thd_100_runs: Vec<(f64, f64)>,
     thd_6k_db: (f64, f64),
     fr: Vec<FrPoint>,
     linearity: Vec<LinPoint>,
@@ -362,6 +422,19 @@ impl BatteryResult {
     }
 }
 
+/// Canonical official designator for a window name, as `/Settings/Windowing`
+/// spells them (vendor client Qa402.cs), or None if unknown.
+fn canon_window(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "rectangle" | "rectangular" | "rect" => Some("Rectangle"),
+        "bartlett" => Some("Bartlett"),
+        "hamming" => Some("Hamming"),
+        "hann" => Some("Hann"),
+        "flattop" | "flat-top" => Some("FlatTop"),
+        _ => None,
+    }
+}
+
 fn gen_path(on: bool, freq: f64, amp: f64) -> String {
     // Gen1/Gen2 designators are honored identically on both targets; the
     // amplitude is dBV on both (issue #20).
@@ -373,11 +446,12 @@ async fn run_battery(
     client: &RestClient,
     target: &str,
     amp_dbv: f64,
+    window: &str,
     cli: &Cli,
-    spectrum_out: &str,
+    spectrum_prefix: &str,
 ) -> R<BatteryResult> {
     let t0 = std::time::Instant::now();
-    println!("[{target}] battery start ({})", client.base);
+    println!("[{target}] battery start ({}, window {window})", client.base);
 
     let version = client
         .get("/Status/Version")
@@ -395,6 +469,17 @@ async fn run_battery(
         .put(&format!("/Settings/BufferSize/{}", cli.buffer_size))
         .await?;
     client.put("/Settings/Input/Max/6").await?;
+    // Force the analysis window on this target too — the official app cannot
+    // be asked what it measures through (no settings readback), so equal
+    // situations are made, not assumed. Non-fatal: an official build without
+    // the endpoint keeps its own default, and the report says so.
+    let windowing_applied = match client.put(&format!("/Settings/Windowing/{window}")).await {
+        Ok(_) => true,
+        Err(e) => {
+            println!("[{target}] /Settings/Windowing/{window} not accepted ({e}) — target keeps its default window");
+            false
+        }
+    };
 
     // 1) Noise floor, generator off.
     client.put(&gen_path(false, 1000.0, amp_dbv)).await?;
@@ -419,22 +504,36 @@ async fn run_battery(
     );
 
     // Spectrum snapshot of the 1 kHz capture, saved verbatim for offline diff.
-    match client.get("/Data/Frequency/Input").await {
-        Ok(spec) => std::fs::write(spectrum_out, spec.to_string())
-            .map_err(|e| format!("write {spectrum_out}: {e}"))?,
-        Err(e) => println!("[{target}] spectrum snapshot unavailable: {e}"),
-    }
+    save_spectrum(client, target, &format!("{spectrum_prefix}-spectrum.json")).await;
 
     // 4) THD at the band edges: 100 Hz and 6 kHz (harmonics up to 20 kHz).
+    //    The 100 Hz row is averaged over --thd-avg acquisitions in linear
+    //    power: its official reading moves run-to-run (harmonics at the noise
+    //    floor), and the per-acquisition values quantify that jitter. The
+    //    first capture's spectrum is saved for the offline THD-method probe.
     client.put(&gen_path(true, 100.0, amp_dbv)).await?;
-    client.acquire().await?;
-    let thd_100_db = client.lr("/ThdDb/100/20000").await?;
+    let mut thd_100_runs = Vec::new();
+    for i in 0..cli.thd_avg {
+        client.acquire().await?;
+        if i == 0 {
+            save_spectrum(client, target, &format!("{spectrum_prefix}-spectrum-100.json")).await;
+        }
+        thd_100_runs.push(client.lr("/ThdDb/100/20000").await?);
+    }
+    let thd_100_db = (
+        mean_db_power(thd_100_runs.iter().map(|r| r.0)),
+        mean_db_power(thd_100_runs.iter().map(|r| r.1)),
+    );
     client.put(&gen_path(true, 6000.0, amp_dbv)).await?;
     client.acquire().await?;
     let thd_6k_db = client.lr("/ThdDb/6000/20000").await?;
+    let spread = thd_spread_db(&thd_100_runs);
     println!(
-        "[{target}] THD  100 Hz {:.1} dB   6 kHz {:.1} dB",
-        thd_100_db.0, thd_6k_db.0
+        "[{target}] THD  100 Hz {:.1} dB (n={}, spread {:.1} dB)   6 kHz {:.1} dB",
+        thd_100_db.0,
+        thd_100_runs.len(),
+        spread,
+        thd_6k_db.0
     );
 
     // 5) Stepped-tone frequency response. RMS is integrated over a narrow
@@ -494,6 +593,8 @@ async fn run_battery(
         base_url: client.base.clone(),
         version,
         amp_dbv,
+        window: window.into(),
+        windowing_applied,
         noise_floor_dbv,
         level_1k_dbv,
         thd_1k_db,
@@ -501,6 +602,7 @@ async fn run_battery(
         thdn_1k_db,
         snr_1k_db,
         thd_100_db,
+        thd_100_runs,
         thd_6k_db,
         fr,
         linearity,
@@ -512,6 +614,39 @@ async fn run_battery(
         res.lin_worst_step_err_db()
     );
     Ok(res)
+}
+
+/// Fetch and save a `/Data/Frequency/Input` snapshot; non-fatal on failure.
+async fn save_spectrum(client: &RestClient, target: &str, path: &str) {
+    match client.get("/Data/Frequency/Input").await {
+        Ok(spec) => {
+            if let Err(e) = std::fs::write(path, spec.to_string()) {
+                println!("[{target}] write {path}: {e}");
+            }
+        }
+        Err(e) => println!("[{target}] spectrum snapshot unavailable: {e}"),
+    }
+}
+
+/// Mean of dB values in the linear-POWER domain (THD dB is 10·log10 of a
+/// power ratio), back in dB.
+fn mean_db_power(vals: impl Iterator<Item = f64>) -> f64 {
+    let (mut sum, mut n) = (0.0f64, 0usize);
+    for v in vals {
+        sum += 10f64.powf(v / 10.0);
+        n += 1;
+    }
+    if n == 0 {
+        return f64::NAN;
+    }
+    10.0 * (sum / n as f64).log10()
+}
+
+/// Max−min of the left-channel THD acquisitions (dB).
+fn thd_spread_db(runs: &[(f64, f64)]) -> f64 {
+    let min = runs.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+    let max = runs.iter().map(|r| r.0).fold(f64::NEG_INFINITY, f64::max);
+    if runs.is_empty() { 0.0 } else { max - min }
 }
 
 fn field_str(v: &Value, key: &str) -> Option<String> {
@@ -801,8 +936,243 @@ async fn vm_wait_device(client: &RestClient, cli: &Cli) -> R<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// Official-parametrization inference & THD-method probe (issue #14)
+//
+// The official REST API has no settings readback, so the bench cannot ASK the
+// app what generator frequency or analysis window it used — but the saved
+// /Data/Frequency/Input snapshots show both: the peak bin is the actually-
+// played frequency, and the near-bin ratios of a coherent tone are the
+// window's own DFT coefficients. Recomputing THD from the same snapshot with
+// each candidate method then identifies how the official /ThdDb integrates.
+// ---------------------------------------------------------------------------
+
+/// A decoded `/Data/Frequency/Input` snapshot: bin width + linear magnitudes.
+struct SpectrumData {
+    dx: f64,
+    left: Vec<f64>,
+    right: Vec<f64>,
+}
+
+fn decode_spectrum_file(path: &str) -> R<SpectrumData> {
+    use base64::Engine as _;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("{path}: bad JSON: {e}"))?;
+    let dx = field_f64(&v, "Dx")?;
+    if !(dx > 0.0) {
+        return Err(format!("{path}: bad Dx {dx}"));
+    }
+    let dec = |key: &str| -> R<Vec<f64>> {
+        let s = v[key]
+            .as_str()
+            .ok_or_else(|| format!("{path}: field {key} missing"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(|e| format!("{path}: {key}: {e}"))?;
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect())
+    };
+    Ok(SpectrumData { dx, left: dec("Left")?, right: dec("Right")? })
+}
+
+/// Ratios below this are indistinguishable from the noise floor for signature
+/// matching (a −10 dBV tone sits ~90 dB above the loopback floor; the deepest
+/// ratio we trust is well inside that).
+const SIG_FLOOR_DB: f64 = -60.0;
+
+/// `|X[k0±m]|/|X[k0]|` (dB, m = 1..4) of a COHERENT tone under each window the
+/// official app offers — the cosine-sum coefficients `a_m/(2·a0)`, and
+/// `sinc²(m/2)` for the triangular Bartlett. Zero entries clamp to the floor.
+const WINDOW_SIGNATURES: [(&str, [f64; 4]); 5] = [
+    ("Rectangle", [SIG_FLOOR_DB, SIG_FLOOR_DB, SIG_FLOOR_DB, SIG_FLOOR_DB]),
+    ("Bartlett", [-7.84, SIG_FLOOR_DB, -13.47, SIG_FLOOR_DB]),
+    ("Hamming", [-7.41, SIG_FLOOR_DB, SIG_FLOOR_DB, SIG_FLOOR_DB]),
+    ("Hann", [-6.02, SIG_FLOOR_DB, SIG_FLOOR_DB, SIG_FLOOR_DB]),
+    ("FlatTop", [-0.30, -3.83, -14.25, -35.86]),
+];
+
+#[derive(Debug, Clone, Serialize)]
+struct WindowInference {
+    /// Peak-bin frequency near the asked tone — the actually-played frequency.
+    f0_hz: f64,
+    peak_bin: usize,
+    /// Bin-snapped frequency the asked tone lands on if the generator rounds
+    /// to the FFT grid ("Round to eliminate leakage" in the official app).
+    snapped_hz: f64,
+    /// |X[k−1]| vs |X[k+1]| imbalance (dB): ≈0 for a coherent tone.
+    asymmetry_db: f64,
+    coherent: bool,
+    /// Measured |X[k±m]|/|X[k]| (dB, two-side power mean), m = 1..4.
+    side_ratios_db: [f64; 4],
+    /// Best-matching window signature and its RMS error (dB).
+    window: String,
+    fit_err_db: f64,
+}
+
+fn infer_window(mags: &[f64], dx: f64, asked_hz: f64) -> Option<WindowInference> {
+    let n = mags.len();
+    let lo = (((asked_hz * 0.75) / dx).floor() as usize).max(5);
+    let hi = ((((asked_hz * 1.25) / dx).ceil() as usize).min(n.saturating_sub(5))).max(lo);
+    let k = (lo..=hi).max_by(|&a, &b| mags[a].partial_cmp(&mags[b]).unwrap())?;
+    let peak = mags[k];
+    if !(peak > 0.0) {
+        return None;
+    }
+    let db = |x: f64| {
+        if x > 0.0 {
+            (20.0 * x.log10()).max(-200.0)
+        } else {
+            -200.0
+        }
+    };
+    let asymmetry_db = (db(mags[k - 1]) - db(mags[k + 1])).abs();
+    let mut side_ratios_db = [0.0f64; 4];
+    for m in 1..=4usize {
+        let p = (mags[k - m].powi(2) + mags[k + m].powi(2)) / 2.0;
+        side_ratios_db[m - 1] = (10.0 * (p / peak.powi(2)).log10()).max(SIG_FLOOR_DB);
+    }
+    let (window, fit_err_db) = WINDOW_SIGNATURES
+        .iter()
+        .map(|(name, sig)| {
+            let err = (0..4)
+                .map(|i| (side_ratios_db[i] - sig[i]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+                / 2.0;
+            (name.to_string(), err)
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())?;
+    Some(WindowInference {
+        f0_hz: k as f64 * dx,
+        peak_bin: k,
+        snapped_hz: (asked_hz / dx).round() * dx,
+        asymmetry_db,
+        // A coherent tone has a symmetric lobe; under Rectangle its side bins
+        // are noise, so a deeply-buried first side bin also counts.
+        coherent: asymmetry_db < 1.0 || side_ratios_db[0] <= -40.0,
+        side_ratios_db,
+        window,
+        fit_err_db,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ThdProbe {
+    method: String,
+    left_db: f64,
+    right_db: f64,
+}
+
+/// Recompute THD from a saved spectrum with each candidate method — lobe
+/// integration vs peak-bin readout × 10-harmonics vs harmonics-to-20 kHz.
+/// The method whose value matches the target's reported /ThdDb identifies its
+/// implementation (qa40x-rs today: lobe±6 × 10 harmonics).
+fn thd_probe(spec: &SpectrumData, asked_hz: f64) -> Vec<ThdProbe> {
+    let mut out = Vec::new();
+    for (integrate, int_name) in [(true, "lobe±6"), (false, "peak-bin")] {
+        for (to20k, harm_name) in [(false, "10 harmonics"), (true, "harmonics→20 kHz")] {
+            out.push(ThdProbe {
+                method: format!("{int_name} × {harm_name}"),
+                left_db: thd_one(&spec.left, spec.dx, asked_hz, integrate, to20k),
+                right_db: thd_one(&spec.right, spec.dx, asked_hz, integrate, to20k),
+            });
+        }
+    }
+    out
+}
+
+fn thd_one(mags: &[f64], dx: f64, asked_hz: f64, integrate: bool, to20k: bool) -> f64 {
+    const LOBE: usize = 6;
+    let n = mags.len();
+    if n < 2 * LOBE + 2 {
+        return f64::NAN;
+    }
+    // Refine to the strongest bin within ±LOBE of a target, like the REST path.
+    let refine = |center_hz: f64| -> usize {
+        let c = ((center_hz / dx).round() as usize).clamp(1, n - 1);
+        let lo = c.saturating_sub(LOBE).max(1);
+        let hi = (c + LOBE).min(n - 1);
+        (lo..=hi)
+            .max_by(|&a, &b| mags[a].partial_cmp(&mags[b]).unwrap())
+            .unwrap()
+    };
+    let power_at = |center_hz: f64| -> f64 {
+        let k = refine(center_hz);
+        if integrate {
+            let plo = k.saturating_sub(LOBE).max(1);
+            let phi = (k + LOBE).min(n - 1);
+            mags[plo..=phi].iter().map(|&m| m * m).sum()
+        } else {
+            mags[k] * mags[k]
+        }
+    };
+    let f0 = refine(asked_hz) as f64 * dx;
+    let fund = power_at(f0);
+    if !(fund > 0.0) {
+        return f64::NAN;
+    }
+    let nyquist = (n as f64 - 1.0) * dx;
+    let max_h = if to20k { (20000.0 / f0).floor() as usize } else { 10 };
+    let mut harm = 0.0f64;
+    for h in 2..=max_h {
+        let fh = f0 * h as f64;
+        if fh >= nyquist || fh > 20000.0 {
+            break;
+        }
+        harm += power_at(fh);
+    }
+    10.0 * (harm / fund).log10()
+}
+
+/// Per-target diagnostic of one window pass, from its saved spectra.
+#[derive(Debug, Serialize)]
+struct PassDiag {
+    round: u32,
+    target: String,
+    /// Window the battery asked this target to use.
+    window_set: String,
+    inference_1k: Option<WindowInference>,
+    inference_100: Option<WindowInference>,
+    probe_100: Vec<ThdProbe>,
+    reported_thd_100_db: (f64, f64),
+}
+
+fn diagnose_pass(round: u32, prefix: &str, res: &BatteryResult) -> PassDiag {
+    let load = |suffix: &str, asked_hz: f64| -> (Option<WindowInference>, Option<SpectrumData>) {
+        match decode_spectrum_file(&format!("{prefix}{suffix}")) {
+            Ok(s) => (infer_window(&s.left, s.dx, asked_hz), Some(s)),
+            Err(e) => {
+                println!("[diag] {e}");
+                (None, None)
+            }
+        }
+    };
+    let (inference_1k, _) = load("-spectrum.json", 1000.0);
+    let (inference_100, spec_100) = load("-spectrum-100.json", 100.0);
+    PassDiag {
+        round,
+        target: res.target.clone(),
+        window_set: res.window.clone(),
+        inference_1k,
+        inference_100,
+        probe_100: spec_100.map(|s| thd_probe(&s, 100.0)).unwrap_or_default(),
+        reported_thd_100_db: res.thd_100_db,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Comparison & report
 // ---------------------------------------------------------------------------
+
+/// One window's A/B pair within a round (host and VM measured through the
+/// same forced analysis window).
+#[derive(Debug, Serialize)]
+struct WindowPass {
+    window: String,
+    host: Option<BatteryResult>,
+    vm: Option<BatteryResult>,
+}
 
 #[derive(Debug, Serialize)]
 struct CompareRow {
@@ -897,11 +1267,7 @@ fn compare(host: &BatteryResult, vm: &BatteryResult) -> Vec<CompareRow> {
     rows
 }
 
-fn render_markdown(
-    cli: &Cli,
-    rounds: &[(Option<BatteryResult>, Option<BatteryResult>)],
-    ts: u64,
-) -> String {
+fn render_markdown(cli: &Cli, rounds: &[Vec<WindowPass>], diags: &[PassDiag], ts: u64) -> String {
     let mut md = String::new();
     let _ = writeln!(
         md,
@@ -914,93 +1280,131 @@ fn render_markdown(
     );
     let _ = writeln!(
         md,
-        "- stimulus: {} dBV on both targets (auto-fitted output range)\n",
+        "- stimulus: {} dBV on both targets (auto-fitted output range)",
         cli.amp_dbv
     );
-    for (i, (host, vm)) in rounds.iter().enumerate() {
+    let _ = writeln!(
+        md,
+        "- analysis windows forced on both targets: {} (one battery each); THD @100 Hz averaged over {} acquisitions\n",
+        cli.windows.join(", "),
+        cli.thd_avg
+    );
+    for (i, passes) in rounds.iter().enumerate() {
         let _ = writeln!(md, "## Round {}\n", i + 1);
-        for r in [host, vm].into_iter().flatten() {
-            let _ = writeln!(
-                md,
-                "- **{}** ({}) — fw/app version {}, battery {:.0} s",
-                r.target, r.base_url, r.version, r.elapsed_s
-            );
-        }
-        let _ = writeln!(md);
-        if let (Some(h), Some(v)) = (host, vm) {
-            let rows = compare(h, v);
-            let _ = writeln!(
-                md,
-                "| metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |"
-            );
-            let _ = writeln!(md, "|---|---:|---:|---:|---:|:--:|");
-            for r in &rows {
+        for p in passes {
+            let _ = writeln!(md, "### Window {}\n", p.window);
+            for r in [&p.host, &p.vm].into_iter().flatten() {
                 let _ = writeln!(
                     md,
-                    "| {} | {:.3} | {:.3} | {:+.3} | {:.2} | {} |",
-                    r.metric,
-                    r.host,
-                    r.vm,
-                    r.delta,
-                    r.tolerance,
-                    if r.pass { "✅" } else { "❌" }
+                    "- **{}** ({}) — fw/app version {}, battery {:.0} s{}",
+                    r.target,
+                    r.base_url,
+                    r.version,
+                    r.elapsed_s,
+                    if r.windowing_applied {
+                        String::new()
+                    } else {
+                        format!(" — ⚠ /Settings/Windowing/{} NOT accepted, target kept its default window", r.window)
+                    }
                 );
+                if r.thd_100_runs.len() > 1 {
+                    let runs = r
+                        .thd_100_runs
+                        .iter()
+                        .map(|x| format!("{:.1}", x.0))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = writeln!(
+                        md,
+                        "  - THD @100 Hz acquisitions L (dB): [{runs}] — spread {:.1} dB",
+                        thd_spread_db(&r.thd_100_runs)
+                    );
+                }
             }
-            let fails = rows.iter().filter(|r| !r.pass).count();
-            let _ = writeln!(
-                md,
-                "\n**Round {}: {}/{} metrics within tolerance.**\n",
-                i + 1,
-                rows.len() - fails,
-                rows.len()
-            );
-        } else {
-            for (r, name) in [(host, "host"), (vm, "VM")] {
-                if let Some(r) = r {
-                    let _ = writeln!(md, "### {} ({name} only)\n", r.target);
-                    let _ = writeln!(md, "| metric | L | R |");
-                    let _ = writeln!(md, "|---|---:|---:|");
+            let _ = writeln!(md);
+            if let (Some(h), Some(v)) = (&p.host, &p.vm) {
+                let rows = compare(h, v);
+                let _ = writeln!(
+                    md,
+                    "| metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |"
+                );
+                let _ = writeln!(md, "|---|---:|---:|---:|---:|:--:|");
+                for r in &rows {
                     let _ = writeln!(
                         md,
-                        "| Noise floor (dBV) | {:.2} | {:.2} |",
-                        r.noise_floor_dbv.0, r.noise_floor_dbv.1
+                        "| {} | {:.3} | {:.3} | {:+.3} | {:.2} | {} |",
+                        r.metric,
+                        r.host,
+                        r.vm,
+                        r.delta,
+                        r.tolerance,
+                        if r.pass { "✅" } else { "❌" }
                     );
-                    let _ = writeln!(
-                        md,
-                        "| Level @1 kHz (dBV) | {:.2} | {:.2} |",
-                        r.level_1k_dbv.0, r.level_1k_dbv.1
-                    );
-                    let _ = writeln!(
-                        md,
-                        "| THD @1 kHz (dB) | {:.1} | {:.1} |",
-                        r.thd_1k_db.0, r.thd_1k_db.1
-                    );
-                    let _ = writeln!(
-                        md,
-                        "| THD+N @1 kHz (dB) | {:.1} | {:.1} |",
-                        r.thdn_1k_db.0, r.thdn_1k_db.1
-                    );
-                    let _ = writeln!(
-                        md,
-                        "| SNR @1 kHz (dB) | {:.1} | {:.1} |",
-                        r.snr_1k_db.0, r.snr_1k_db.1
-                    );
-                    let (wl, wr) = r.fr_worst_dev_db();
-                    let _ = writeln!(md, "| FR worst dev re 1 kHz (dB) | {:.3} | {:.3} |", wl, wr);
-                    let _ = writeln!(
-                        md,
-                        "| Linearity worst step err (dB) | {:.3} | — |",
-                        r.lin_worst_step_err_db()
-                    );
-                    let _ = writeln!(md);
+                }
+                let fails = rows.iter().filter(|r| !r.pass).count();
+                let _ = writeln!(
+                    md,
+                    "\n**Round {} / window {}: {}/{} metrics within tolerance.**\n",
+                    i + 1,
+                    p.window,
+                    rows.len() - fails,
+                    rows.len()
+                );
+            } else {
+                for (r, name) in [(&p.host, "host"), (&p.vm, "VM")] {
+                    if let Some(r) = r {
+                        let _ = writeln!(md, "#### {} ({name} only)\n", r.target);
+                        let _ = writeln!(md, "| metric | L | R |");
+                        let _ = writeln!(md, "|---|---:|---:|");
+                        let _ = writeln!(
+                            md,
+                            "| Noise floor (dBV) | {:.2} | {:.2} |",
+                            r.noise_floor_dbv.0, r.noise_floor_dbv.1
+                        );
+                        let _ = writeln!(
+                            md,
+                            "| Level @1 kHz (dBV) | {:.2} | {:.2} |",
+                            r.level_1k_dbv.0, r.level_1k_dbv.1
+                        );
+                        let _ = writeln!(
+                            md,
+                            "| THD @1 kHz (dB) | {:.1} | {:.1} |",
+                            r.thd_1k_db.0, r.thd_1k_db.1
+                        );
+                        let _ = writeln!(
+                            md,
+                            "| THD @100 Hz (dB) | {:.1} | {:.1} |",
+                            r.thd_100_db.0, r.thd_100_db.1
+                        );
+                        let _ = writeln!(
+                            md,
+                            "| THD+N @1 kHz (dB) | {:.1} | {:.1} |",
+                            r.thdn_1k_db.0, r.thdn_1k_db.1
+                        );
+                        let _ = writeln!(
+                            md,
+                            "| SNR @1 kHz (dB) | {:.1} | {:.1} |",
+                            r.snr_1k_db.0, r.snr_1k_db.1
+                        );
+                        let (wl, wr) = r.fr_worst_dev_db();
+                        let _ =
+                            writeln!(md, "| FR worst dev re 1 kHz (dB) | {:.3} | {:.3} |", wl, wr);
+                        let _ = writeln!(
+                            md,
+                            "| Linearity worst step err (dB) | {:.3} | — |",
+                            r.lin_worst_step_err_db()
+                        );
+                        let _ = writeln!(md);
+                    }
                 }
             }
         }
     }
-    // Repeatability across rounds (host side), if we have more than one.
+    render_diagnostics(&mut md, diags);
+    // Repeatability across rounds (host side, first window), if more than one.
     let host_levels: Vec<f64> = rounds
         .iter()
-        .filter_map(|(h, _)| h.as_ref().map(|h| h.level_1k_dbv.0))
+        .filter_map(|passes| passes.first()?.host.as_ref().map(|h| h.level_1k_dbv.0))
         .collect();
     if host_levels.len() > 1 {
         let min = host_levels.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1016,6 +1420,76 @@ fn render_markdown(
         );
     }
     md
+}
+
+/// The issue #14 diagnostic section: what each target's saved spectra say
+/// about its ACTUAL parametrization (played frequency, coherence, window),
+/// and which THD method reproduces its reported /ThdDb/100/20000.
+fn render_diagnostics(md: &mut String, diags: &[PassDiag]) {
+    if diags.is_empty() {
+        return;
+    }
+    let _ = writeln!(md, "## Inferred parametrization & THD-method probe\n");
+    let _ = writeln!(
+        md,
+        "The official REST API has no settings readback: each target's effective\n\
+         parametrization is inferred from its own saved spectra (peak bin = played\n\
+         frequency; near-bin ratios of a coherent tone = the window's DFT\n\
+         coefficients), and its THD @100 Hz is recomputed from the same snapshot\n\
+         with each candidate method — the matching one identifies the implementation.\n"
+    );
+    for d in diags {
+        let _ = writeln!(
+            md,
+            "### r{} · {} · window set: {}\n",
+            d.round, d.target, d.window_set
+        );
+        for (inf, label) in [(&d.inference_1k, "1 kHz"), (&d.inference_100, "100 Hz")] {
+            match inf {
+                Some(i) => {
+                    let matches_set = i.window.eq_ignore_ascii_case(&d.window_set);
+                    let _ = writeln!(
+                        md,
+                        "- {label}: plays {:.4} Hz (bin {}, snap-to-grid predicts {:.4} Hz), {}, window reads **{}** (fit err {:.1} dB){}",
+                        i.f0_hz,
+                        i.peak_bin,
+                        i.snapped_hz,
+                        if i.coherent {
+                            format!("coherent (lobe asymmetry {:.2} dB)", i.asymmetry_db)
+                        } else {
+                            format!("NOT coherent (lobe asymmetry {:.2} dB)", i.asymmetry_db)
+                        },
+                        i.window,
+                        i.fit_err_db,
+                        if matches_set {
+                            ""
+                        } else {
+                            " — ⚠ DIFFERS from the window this battery set: equivalence unverified"
+                        }
+                    );
+                }
+                None => {
+                    let _ = writeln!(md, "- {label}: no spectrum snapshot — inference skipped");
+                }
+            }
+        }
+        if !d.probe_100.is_empty() {
+            let _ = writeln!(
+                md,
+                "\n| THD @100 Hz method (recomputed from this target's spectrum) | L (dB) | R (dB) |"
+            );
+            let _ = writeln!(md, "|---|---:|---:|");
+            for p in &d.probe_100 {
+                let _ = writeln!(md, "| {} | {:.2} | {:.2} |", p.method, p.left_db, p.right_db);
+            }
+            let _ = writeln!(
+                md,
+                "| **reported by /ThdDb/100/20000 (averaged)** | **{:.2}** | **{:.2}** |",
+                d.reported_thd_100_db.0, d.reported_thd_100_db.1
+            );
+            let _ = writeln!(md);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1512,39 @@ async fn main() {
     }
 }
 
+/// Offline diagnostic on saved spectrum files: window/coherence inference and
+/// the THD-method probe, no hardware involved.
+fn run_probe(cli: &Cli) -> R<()> {
+    for path in &cli.probe_files {
+        println!("== {path} (asked tone {} Hz) ==", cli.probe_freq);
+        let spec = decode_spectrum_file(path)?;
+        match infer_window(&spec.left, spec.dx, cli.probe_freq) {
+            Some(i) => println!(
+                "  plays {:.4} Hz (bin {}, snap-to-grid predicts {:.4} Hz)\n  \
+                 {} (lobe asymmetry {:.2} dB)\n  \
+                 window reads {} (fit err {:.1} dB; side ratios {:?} dB)",
+                i.f0_hz,
+                i.peak_bin,
+                i.snapped_hz,
+                if i.coherent { "coherent" } else { "NOT coherent" },
+                i.asymmetry_db,
+                i.window,
+                i.fit_err_db,
+                i.side_ratios_db.map(|r| (r * 100.0).round() / 100.0),
+            ),
+            None => println!("  no tone found near {} Hz", cli.probe_freq),
+        }
+        for p in thd_probe(&spec, cli.probe_freq) {
+            println!("  THD[{}]  L {:.2} dB  R {:.2} dB", p.method, p.left_db, p.right_db);
+        }
+    }
+    Ok(())
+}
+
 async fn run(cli: &Cli) -> R<()> {
+    if !cli.probe_files.is_empty() {
+        return run_probe(cli);
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -1080,7 +1586,12 @@ async fn run(cli: &Cli) -> R<()> {
         info["uuid"].as_str().ok_or("VM uuid missing")?.to_string()
     };
 
-    let mut rounds: Vec<(Option<BatteryResult>, Option<BatteryResult>)> = Vec::new();
+    let mut rounds: Vec<Vec<WindowPass>> = Vec::new();
+    let mut diags: Vec<PassDiag> = Vec::new();
+    let host_prefix =
+        |round: u32, w: &str| format!("{}/{}-host-r{}-{}", cli.out_dir, ts, round, w.to_lowercase());
+    let vm_prefix =
+        |round: u32, w: &str| format!("{}/{}-vm-r{}-{}", cli.out_dir, ts, round, w.to_lowercase());
 
     for round in 1..=cli.rounds {
         println!("\n=== Round {round}/{} ===", cli.rounds);
@@ -1127,15 +1638,18 @@ async fn run(cli: &Cli) -> R<()> {
                 }
             }
             let client = RestClient::new(&host_url);
-            let spectrum = format!("{}/{}-host-r{}-spectrum.json", cli.out_dir, ts, round);
-            let res = run_battery(&client, "qa40x-rs", cli.amp_dbv, cli, &spectrum).await?;
+            let mut batteries = Vec::new();
+            for w in &cli.windows {
+                batteries
+                    .push(run_battery(&client, "qa40x-rs", cli.amp_dbv, w, cli, &host_prefix(round, w)).await?);
+            }
             device
                 .lock()
                 .await
                 .disconnect()
                 .await
                 .map_err(|e| format!("disconnect: {e}"))?;
-            Some(res)
+            Some(batteries)
         };
 
         // -- VM phase -------------------------------------------------------
@@ -1172,26 +1686,36 @@ async fn run(cli: &Cli) -> R<()> {
                     cli.no_prompt,
                 )?;
             }
-            let spectrum = format!("{}/{}-vm-r{}-spectrum.json", cli.out_dir, ts, round);
-            let res = match run_battery(&client, "QA40x official", cli.amp_dbv, cli, &spectrum)
-                .await
-            {
-                Ok(res) => res,
-                Err(e) => {
-                    // Typical failure mode: the app dropped the analyzer
-                    // mid-battery (fresh-boot USB flakiness). One
-                    // Parallels-level replug, then a single retry.
-                    println!("[vm] battery failed ({e}) — USB replug (suspend/resume) and one retry");
-                    if let Err(e) = vm_replug_usb(&cli.vm_name) {
-                        println!("[vm] suspend/resume failed: {e}");
+            let mut batteries = Vec::new();
+            let mut retried = false;
+            let mut win_iter = cli.windows.iter();
+            let mut current = win_iter.next();
+            while let Some(w) = current {
+                match run_battery(&client, "QA40x official", cli.amp_dbv, w, cli, &vm_prefix(round, w))
+                    .await
+                {
+                    Ok(res) => {
+                        batteries.push(res);
+                        current = win_iter.next();
                     }
-                    vm_wait_rest(&client, cli).await?;
-                    if !vm_wait_device(&client, cli).await? {
-                        return Err("official app still does not see the QA402 after replug".into());
+                    Err(e) if !retried => {
+                        // Typical failure mode: the app dropped the analyzer
+                        // mid-battery (fresh-boot USB flakiness). One
+                        // Parallels-level replug, then a single retry.
+                        retried = true;
+                        println!("[vm] battery failed ({e}) — USB replug (suspend/resume) and one retry");
+                        if let Err(e) = vm_replug_usb(&cli.vm_name) {
+                            println!("[vm] suspend/resume failed: {e}");
+                        }
+                        vm_wait_rest(&client, cli).await?;
+                        if !vm_wait_device(&client, cli).await? {
+                            return Err("official app still does not see the QA402 after replug".into());
+                        }
                     }
-                    run_battery(&client, "QA40x official", cli.amp_dbv, cli, &spectrum).await?
+                    Err(e) => return Err(e),
                 }
-            };
+            }
+            let res = batteries;
             if !cli.keep_vm {
                 guest_kill(&cli.vm_name, &cli.qa40x_exe);
                 vm_stop(&cli.vm_name)?;
@@ -1201,7 +1725,22 @@ async fn run(cli: &Cli) -> R<()> {
             Some(res)
         };
 
-        rounds.push((host_res, vm_res));
+        // Zip both phases into per-window passes, and run the offline
+        // diagnostic (window inference + THD-method probe) on the spectra
+        // each battery saved.
+        let mut passes = Vec::new();
+        for (i, w) in cli.windows.iter().enumerate() {
+            let host = host_res.as_ref().and_then(|v| v.get(i).cloned());
+            let vm = vm_res.as_ref().and_then(|v| v.get(i).cloned());
+            if let Some(r) = &host {
+                diags.push(diagnose_pass(round, &host_prefix(round, w), r));
+            }
+            if let Some(r) = &vm {
+                diags.push(diagnose_pass(round, &vm_prefix(round, w), r));
+            }
+            passes.push(WindowPass { window: w.clone(), host, vm });
+        }
+        rounds.push(passes);
     }
 
     // -- Report -------------------------------------------------------------
@@ -1212,19 +1751,29 @@ async fn run(cli: &Cli) -> R<()> {
         "sample_rate": cli.sample_rate,
         "buffer_size": cli.buffer_size,
         "amp_dbv": cli.amp_dbv,
+        "windows": cli.windows,
+        "thd_avg": cli.thd_avg,
         "demo": cli.demo,
-        "rounds": rounds
-            .iter()
-            .map(|(h, v)| json!({ "host": h, "vm": v }))
-            .collect::<Vec<_>>(),
+        "rounds": rounds,
         "comparison": rounds
             .iter()
-            .filter_map(|(h, v)| Some(compare(h.as_ref()?, v.as_ref()?)))
+            .map(|passes| {
+                passes
+                    .iter()
+                    .filter_map(|p| {
+                        Some(json!({
+                            "window": p.window,
+                            "rows": compare(p.host.as_ref()?, p.vm.as_ref()?),
+                        }))
+                    })
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>(),
+        "diagnostics": diags,
     });
     std::fs::write(&json_path, serde_json::to_string_pretty(&payload).unwrap())
         .map_err(|e| format!("write {json_path}: {e}"))?;
-    let md = render_markdown(cli, &rounds, ts);
+    let md = render_markdown(cli, &rounds, &diags, ts);
     std::fs::write(&md_path, &md).map_err(|e| format!("write {md_path}: {e}"))?;
 
     println!("\n{md}");
@@ -1233,7 +1782,8 @@ async fn run(cli: &Cli) -> R<()> {
     // Overall exit code reflects the A/B verdict so CI-ish callers can gate on it.
     let any_fail = rounds
         .iter()
-        .filter_map(|(h, v)| Some(compare(h.as_ref()?, v.as_ref()?)))
+        .flatten()
+        .filter_map(|p| Some(compare(p.host.as_ref()?, p.vm.as_ref()?)))
         .flatten()
         .any(|r| !r.pass);
     if any_fail {
@@ -1252,6 +1802,8 @@ mod tests {
             base_url: "http://test".into(),
             version: "1.0".into(),
             amp_dbv: -10.0,
+            window: "FlatTop".into(),
+            windowing_applied: true,
             noise_floor_dbv: (-110.0, -110.5),
             level_1k_dbv: (level, level - 0.05),
             thd_1k_db: (-105.0, -104.0),
@@ -1259,6 +1811,7 @@ mod tests {
             thdn_1k_db: (-98.0, -97.5),
             snr_1k_db: (100.0, 99.5),
             thd_100_db: (-100.0, -99.0),
+            thd_100_runs: vec![(-100.0, -99.0)],
             thd_6k_db: (-95.0, -94.0),
             fr: FR_FREQS
                 .iter()

@@ -69,10 +69,42 @@ stimulus (`--amp`, dBV on both targets):
 | 1 | Noise floor 20 Hz–20 kHz, generator off | `RmsDbv` |
 | 2 | Absolute level & L/R balance @ 1 kHz | `RmsDbv` |
 | 3 | THD, THD+N, SNR @ 1 kHz | `ThdDb`, `ThdPct`, `ThdnDb`, `SnrDb` |
-| 4 | THD @ 100 Hz and 6 kHz | `ThdDb` |
+| 4 | THD @ 100 Hz (averaged over `--thd-avg` acquisitions, spread reported) and 6 kHz | `ThdDb` |
 | 5 | Frequency response, 12 stepped tones 20 Hz–20 kHz, deviation re 1 kHz | `RmsDbv` (narrow band) |
 | 6 | Amplitude linearity, 1 kHz staircase in 10 dB steps | `RmsDbv` |
-| 7 | 1 kHz spectrum snapshot saved for offline diffing | `Data/Frequency/Input` |
+| 7 | 1 kHz and 100 Hz spectrum snapshots saved for offline diffing & the probe below | `Data/Frequency/Input` |
+
+### Window matrix & parametrization probe (issue #14)
+
+The official REST API has **no settings readback**, so the bench can never ask
+the official app what analysis window it measures through — but it can *tell*
+it: `/Settings/Windowing/{Rectangle|Bartlett|Hamming|Hann|FlatTop}` exists in
+the official API (visible in the vendor's `QA402_REST_TEST` client, absent
+from the wiki), and qa40x-rs implements the same endpoint (flat-top default,
+like the official app at startup). The bench therefore runs the whole battery
+once per window in `--windows` (default `FlatTop,Hann,Rectangle`), forcing
+the **same window on both targets** for each pass — equal situations are
+made, not assumed.
+
+Each battery's saved spectra then feed an offline diagnostic, reported under
+*Inferred parametrization & THD-method probe*:
+
+- **window inference** — the near-bin ratios of a coherent tone are the
+  window's own DFT coefficients (flat-top: −0.3/−3.8/−14.3/−35.9 dB at
+  ±1..4 bins; Hann: −6.02 dB at ±1), so each spectrum names the window the
+  target *actually* applied; a mismatch with the window the battery set is
+  flagged loudly;
+- **generator inference** — the peak bin is the actually-played frequency
+  (bin-snapped or not), and lobe symmetry says whether the tone was coherent;
+- **THD-method probe** — THD @100 Hz is recomputed from the target's own
+  spectrum four ways ({lobe±6 integration, peak-bin} × {10 harmonics,
+  harmonics→20 kHz}); the method matching the target's reported
+  `/ThdDb/100/20000` identifies its implementation (qa40x-rs today:
+  lobe±6 × 10 harmonics — the second `/ThdDb` parameter is currently
+  ignored, one of the issue #14 candidate mechanisms).
+
+`--probe FILE [--probe-freq HZ]` runs the same inference + probe offline on
+any saved snapshot, without hardware.
 
 ### A/B tolerances
 
