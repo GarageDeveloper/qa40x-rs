@@ -78,8 +78,16 @@ pub struct RestState {
     /// official app's; every enabled one plays (summed) on `/Acquisition`.
     gens: Mutex<[GenConfig; 2]>,
     buffer_size: Mutex<usize>,
+    /// Analysis window every REST readout measures through, settable via the
+    /// official `/Settings/Windowing/{name}` endpoint. Defaults to the 5-term
+    /// flat-top — what the official app opens with (issue #14), so a drop-in
+    /// official client gets official-like readouts without doing anything.
+    window: Mutex<WindowFunction>,
     last: Mutex<Option<AudioData>>,
 }
+
+/// The REST measurement window at boot and after `/Settings/Default`.
+const DEFAULT_WINDOW: WindowFunction = WindowFunction::FlatTop;
 
 /// Both slots' defaults: Gen1 as [`GenConfig::default`], Gen2 off.
 fn default_gens() -> [GenConfig; 2] {
@@ -92,6 +100,7 @@ impl RestState {
             device,
             gens: Mutex::new(default_gens()),
             buffer_size: Mutex::new(32768),
+            window: Mutex::new(DEFAULT_WINDOW),
             last: Mutex::new(None),
         }
     }
@@ -382,8 +391,14 @@ async fn dispatch(path: &str, state: &RestState) -> RestResult {
         ["Settings", rest @ ..] => settings(rest, state).await,
 
         // Tone measurements (Left/Right) over the last acquisition.
-        ["ThdDb", f, _m] => measure(state, num(f)?, |a| db(a.thd as f64 / 100.0)).await,
-        ["ThdPct", f, _m] => measure(state, num(f)?, |a| a.thd as f64).await,
+        ["ThdDb", f, m] => {
+            let (l, r) = thd_ratio(state, num(f)?, num(m)?).await?;
+            Ok(left_right(db(l), db(r)))
+        }
+        ["ThdPct", f, m] => {
+            let (l, r) = thd_ratio(state, num(f)?, num(m)?).await?;
+            Ok(left_right(l * 100.0, r * 100.0))
+        }
         ["ThdnDb", f, _lo, _hi] => measure(state, num(f)?, |a| db(a.thd_n as f64 / 100.0)).await,
         ["ThdnPct", f, _lo, _hi] => measure(state, num(f)?, |a| a.thd_n as f64).await,
         ["SnrDb", f, _lo, _hi] => measure(state, num(f)?, |a| a.snr as f64).await,
@@ -482,11 +497,34 @@ async fn acquisition(state: &RestState) -> RestResult {
             *s = (*s * trim).clamp(-1.0, 1.0);
         }
     }
-    let cap = dev
-        .generate_and_capture(&left, &right)
+    // Coherent wrap (issue #14): the capture comes back shifted by the USB
+    // round-trip latency, so an N-sample one-shot burst yields L zeros at the
+    // head and a tone truncated to N−L samples — a gate whose sinc skirts
+    // read as junk around the carrier (invisible under Hann at 1 kHz, +11 dB
+    // on THD @100 Hz under flat-top, catastrophic under Rectangle in the A/B
+    // window matrix). Every REST stimulus is bin-snapped, hence periodic over
+    // N: prepending the buffer's own TAIL makes the played stream a periodic
+    // continuation, so the latency-shifted window is pure steady-state — any
+    // contiguous N samples of a periodic signal stay exactly coherent. The
+    // wrap must exceed the latency; 4096 matches generate_and_capture's own
+    // lead-in budget (buffers below that get a best-effort full-buffer wrap).
+    const WRAP_SAMPLES: usize = 4096;
+    let wrap = WRAP_SAMPLES.min(n);
+    let wrapped = |chan: &[f32]| {
+        let mut w = Vec::with_capacity(wrap + chan.len());
+        w.extend_from_slice(&chan[chan.len() - wrap..]);
+        w.extend_from_slice(chan);
+        w
+    };
+    let mut cap = dev
+        .generate_and_capture(&wrapped(&left), &wrapped(&right))
         .await
         .map_err(|e| (500, format!("acquisition failed: {e}")))?;
     drop(dev);
+    for chan in [&mut cap.left_channel, &mut cap.right_channel] {
+        chan.drain(0..wrap.min(chan.len()));
+        chan.truncate(n);
+    }
     *state.last.lock().await = Some(cap);
     Ok(json!({ "SessionId": SESSION_ID, "Value": "True" }))
 }
@@ -496,6 +534,17 @@ async fn settings(rest: &[&str], state: &RestState) -> RestResult {
         ["Default"] => {
             *state.gens.lock().await = default_gens();
             *state.buffer_size.lock().await = 32768;
+            *state.window.lock().await = DEFAULT_WINDOW;
+            Ok(value("True"))
+        }
+        // Analysis window: /Settings/Windowing/{Rectangle|Bartlett|Hamming|
+        // Hann|FlatTop} — the official endpoint (vendor client Qa402.cs's
+        // `SetWindowing`; absent from the wiki). Every readout over the last
+        // acquisition measures through it.
+        ["Windowing", name] => {
+            let w = parse_windowing(name)
+                .ok_or((400, format!("bad window: {name} (Rectangle|Bartlett|Hamming|Hann|FlatTop)")))?;
+            *state.window.lock().await = w;
             Ok(value("True"))
         }
         ["SampleRate", sr] => {
@@ -562,6 +611,27 @@ async fn settings(rest: &[&str], state: &RestState) -> RestResult {
     }
 }
 
+/// THD as a linear ratio per channel, with harmonics up to `max_hz` — the
+/// official `/ThdDb/{fund}/{max}` semantics. We used to ignore the ceiling
+/// and hardcode 10 harmonics; the issue #14 window-matrix diagnostic showed
+/// the official app integrates EVERY harmonic up to the ceiling, which at
+/// 100 Hz (~190 extra near-floor harmonics to 20 kHz) was most of the A/B
+/// THD gap.
+async fn thd_ratio(state: &RestState, fund: f32, max_hz: f32) -> Result<(f64, f64), RestError> {
+    let cap = last(state).await?;
+    let w = *state.window.lock().await;
+    let n = if fund > 0.0 && max_hz.is_finite() {
+        ((max_hz / fund).floor() as usize).max(2)
+    } else {
+        2
+    };
+    let one = |sig: &[f32]| {
+        let r = spectrum_with(sig, cap.sample_rate, w);
+        AudioAnalyzer::calculate_thd(&r.magnitudes, &r.frequencies, fund, n) as f64 / 100.0
+    };
+    Ok((one(&cap.left_channel), one(&cap.right_channel)))
+}
+
 /// Run `pick` on the analysis of each channel at `fund`, returning {Left,Right}.
 async fn measure(
     state: &RestState,
@@ -569,8 +639,9 @@ async fn measure(
     pick: impl Fn(&crate::audio::AnalysisResult) -> f64,
 ) -> RestResult {
     let cap = last(state).await?;
-    let l = pick(&analyze_channel(&cap.left_channel, cap.sample_rate, fund));
-    let r = pick(&analyze_channel(&cap.right_channel, cap.sample_rate, fund));
+    let w = *state.window.lock().await;
+    let l = pick(&analyze_channel_with(&cap.left_channel, cap.sample_rate, fund, w));
+    let r = pick(&analyze_channel_with(&cap.right_channel, cap.sample_rate, fund, w));
     Ok(left_right(l, r))
 }
 
@@ -581,10 +652,11 @@ async fn measure(
 /// official 20 Hz–20 kHz noise floor on real hardware (issue #7).
 async fn band_rms_dbv(state: &RestState, lo: f32, hi: f32) -> RestResult {
     let cap = last(state).await?;
+    let w = *state.window.lock().await;
     let (off_l, _) = state.device.lock().await.input_dbv_offset(Channel::Left).await;
     let (off_r, _) = state.device.lock().await.input_dbv_offset(Channel::Right).await;
     let band = |sig: &[f32]| {
-        let r = spectrum(sig, cap.sample_rate);
+        let r = spectrum_with(sig, cap.sample_rate, w);
         AudioAnalyzer::band_rms_from_spectrum(&r.magnitudes, &r.frequencies, lo, hi, r.enbw_bins)
     };
     let l = db(band(&cap.left_channel) as f64) + off_l as f64;
@@ -605,8 +677,9 @@ async fn peak_dbv(state: &RestState) -> RestResult {
 
 async fn peak_hz(state: &RestState, lo: f32, hi: f32) -> RestResult {
     let cap = last(state).await?;
-    let l = peak_freq(&cap.left_channel, cap.sample_rate, lo, hi);
-    let r = peak_freq(&cap.right_channel, cap.sample_rate, lo, hi);
+    let w = *state.window.lock().await;
+    let l = peak_freq_with(&cap.left_channel, cap.sample_rate, lo, hi, w);
+    let r = peak_freq_with(&cap.right_channel, cap.sample_rate, lo, hi, w);
     Ok(left_right(l as f64, r as f64))
 }
 
@@ -631,8 +704,9 @@ async fn data_frequency(state: &RestState, src: &str) -> RestResult {
         return Err((501, format!("Data/Frequency/{src} not supported (Input only)")));
     }
     let cap = last(state).await?;
-    let l = spectrum(&cap.left_channel, cap.sample_rate);
-    let r = spectrum(&cap.right_channel, cap.sample_rate);
+    let w = *state.window.lock().await;
+    let l = spectrum_with(&cap.left_channel, cap.sample_rate, w);
+    let r = spectrum_with(&cap.right_channel, cap.sample_rate, w);
     let f = &l.frequencies;
     let dx = if f.len() > 1 { (f[1] - f[0]) as f64 } else { 0.0 };
     Ok(json!({
@@ -657,10 +731,22 @@ async fn last(state: &RestState) -> Result<AudioData, RestError> {
         .ok_or((409, "no acquisition yet — call /Acquisition first".into()))
 }
 
-/// Analyze one channel at a given fundamental. Shared with the Rhai scripting
-/// engine (`crate::script`) so both automation surfaces measure identically.
+/// Analyze one channel at a given fundamental (Hann, the historical default).
+/// Shared with the Rhai scripting engine (`crate::script`) so both automation
+/// surfaces measure identically.
 pub(crate) fn analyze_channel(sig: &[f32], sr: u32, fund: f32) -> crate::audio::AnalysisResult {
-    let r = spectrum(sig, sr);
+    analyze_channel_with(sig, sr, fund, WindowFunction::Hann)
+}
+
+/// Analyze one channel through a caller-chosen analysis window — the REST
+/// handlers pass the `/Settings/Windowing` state here.
+pub(crate) fn analyze_channel_with(
+    sig: &[f32],
+    sr: u32,
+    fund: f32,
+    window: WindowFunction,
+) -> crate::audio::AnalysisResult {
+    let r = spectrum_with(sig, sr, window);
     AudioAnalyzer::analyze(sig, &r.magnitudes, &r.frequencies, fund)
 }
 
@@ -668,8 +754,27 @@ pub(crate) fn analyze_channel(sig: &[f32], sr: u32, fund: f32) -> crate::audio::
 /// integrals). Shared with `crate::measurement` (the auto-level probe's
 /// band-RMS fraction and the dashboard's band-RMS verb).
 pub(crate) fn spectrum(sig: &[f32], sr: u32) -> crate::audio::FftResult {
+    spectrum_with(sig, sr, WindowFunction::Hann)
+}
+
+/// Magnitude spectrum through a caller-chosen analysis window.
+pub(crate) fn spectrum_with(sig: &[f32], sr: u32, window: WindowFunction) -> crate::audio::FftResult {
     let mut fft = FftProcessor::new();
-    fft.process_real_windowed(sig, sr, WindowFunction::Hann)
+    fft.process_real_windowed(sig, sr, window)
+}
+
+/// The official `/Settings/Windowing/{name}` designators (vendor client
+/// `Qa402.cs`: Rectangle, Bartlett, Hamming, Hann, FlatTop), case-insensitive,
+/// plus our own spellings with the same meaning (Rect/Rectangular, Flat-Top).
+fn parse_windowing(name: &str) -> Option<WindowFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "rectangle" | "rectangular" | "rect" => Some(WindowFunction::Rectangular),
+        "bartlett" => Some(WindowFunction::Bartlett),
+        "hamming" => Some(WindowFunction::Hamming),
+        "hann" => Some(WindowFunction::Hann),
+        "flattop" | "flat-top" => Some(WindowFunction::FlatTop),
+        _ => None,
+    }
 }
 
 /// Digital peak amplitude (full-scale = 1.0) of a sine whose RMS at the
@@ -693,7 +798,12 @@ pub(crate) fn snap_to_bin(freq: f32, sr: u32, n: usize) -> f32 {
 
 /// Frequency of the strongest bin within [lo, hi] Hz. Shared with `crate::script`.
 pub(crate) fn peak_freq(sig: &[f32], sr: u32, lo: f32, hi: f32) -> f32 {
-    let r = spectrum(sig, sr);
+    peak_freq_with(sig, sr, lo, hi, WindowFunction::Hann)
+}
+
+/// [`peak_freq`] through a caller-chosen analysis window.
+fn peak_freq_with(sig: &[f32], sr: u32, lo: f32, hi: f32, window: WindowFunction) -> f32 {
+    let r = spectrum_with(sig, sr, window);
     let mut best = 0.0f32;
     let mut best_f = 0.0f32;
     for (i, &m) in r.magnitudes.iter().enumerate() {
@@ -868,6 +978,93 @@ mod tests {
         let v = dispatch("/ThdnDb/1000/20/20000", &st).await.unwrap();
         let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
         assert!(left < -100.0, "THD+N of a pure coherent tone reads {left} dB");
+    }
+
+    #[tokio::test]
+    async fn windowing_endpoint_sets_and_resets() {
+        let st = state_with_tone().await;
+        // The five official designators (any case) are accepted…
+        for w in ["FlatTop", "hann", "Rectangle", "Bartlett", "HAMMING"] {
+            dispatch(&format!("/Settings/Windowing/{w}"), &st)
+                .await
+                .unwrap_or_else(|e| panic!("{w}: {e:?}"));
+        }
+        // …an unknown one gets the official 400.
+        let (code, _) = dispatch("/Settings/Windowing/Kaiser", &st).await.unwrap_err();
+        assert_eq!(code, 400);
+        // /Settings/Default returns to the flat-top the official app opens with.
+        dispatch("/Settings/Windowing/Hann", &st).await.unwrap();
+        dispatch("/Settings/Default", &st).await.unwrap();
+        assert_eq!(*st.window.lock().await, DEFAULT_WINDOW);
+    }
+
+    #[tokio::test]
+    async fn thd_by_lobe_integration_is_window_insensitive_for_a_coherent_tone() {
+        // The REST THD integrates whole lobes, so the window's ENBW cancels
+        // between the harmonic and the fundamental: switching windows must NOT
+        // move the readout of a clean coherent tone + one known harmonic.
+        // (This is why the THD @100 Hz A/B gap cannot be explained by the
+        // official app's flat-top alone — issue #14 diagnostic.)
+        let sr = 48000u32;
+        let n = 32768usize;
+        let f0 = snap_to_bin(1000.0, sr, n);
+        // 3rd harmonic of a bin-centered tone is itself bin-centered.
+        let mut sig = SignalGenerator::sine(f0, 0.5, sr, n);
+        for (s, h) in sig
+            .iter_mut()
+            .zip(SignalGenerator::sine(3.0 * f0, 0.5e-4, sr, n))
+        {
+            *s += h;
+        }
+        let st = Arc::new(RestState::new(Arc::new(Mutex::new(QA40xDevice::new()))));
+        *st.last.lock().await = Some(AudioData {
+            left_channel: sig.clone(),
+            right_channel: sig,
+            sample_rate: sr,
+        });
+        let read = |st: Arc<RestState>| async move {
+            let v = dispatch("/ThdDb/1000/20000", &st).await.unwrap();
+            v["Left"].as_str().unwrap().parse::<f64>().unwrap()
+        };
+        let flattop = read(st.clone()).await; // boot default
+        dispatch("/Settings/Windowing/Hann", &st).await.unwrap();
+        let hann = read(st.clone()).await;
+        assert!((flattop - (-80.0)).abs() < 0.5, "flat-top THD {flattop} dB, want −80");
+        assert!(
+            (flattop - hann).abs() < 0.3,
+            "THD moved with the window: flat-top {flattop} vs Hann {hann} dB"
+        );
+    }
+
+    #[tokio::test]
+    async fn thd_honors_the_max_harmonic_ceiling() {
+        // A −80 dB 15th harmonic (15 kHz): /ThdDb/1000/20000 must see it,
+        // /ThdDb/1000/10000 must not — the official ceiling semantics we used
+        // to ignore (10 harmonics hardcoded), issue #14.
+        let sr = 48000u32;
+        let n = 32768usize;
+        let f0 = snap_to_bin(1000.0, sr, n);
+        let mut sig = SignalGenerator::sine(f0, 0.5, sr, n);
+        for (s, h) in sig
+            .iter_mut()
+            .zip(SignalGenerator::sine(15.0 * f0, 0.5e-4, sr, n))
+        {
+            *s += h;
+        }
+        let st = Arc::new(RestState::new(Arc::new(Mutex::new(QA40xDevice::new()))));
+        *st.last.lock().await = Some(AudioData {
+            left_channel: sig.clone(),
+            right_channel: sig,
+            sample_rate: sr,
+        });
+        let read = |st: Arc<RestState>, path: &'static str| async move {
+            let v = dispatch(path, &st).await.unwrap();
+            v["Left"].as_str().unwrap().parse::<f64>().unwrap()
+        };
+        let to_20k = read(st.clone(), "/ThdDb/1000/20000").await;
+        let to_10k = read(st.clone(), "/ThdDb/1000/10000").await;
+        assert!((to_20k - (-80.0)).abs() < 0.5, "→20 kHz THD {to_20k} dB, want −80");
+        assert!(to_10k < -100.0, "→10 kHz THD {to_10k} dB — the 15 kHz harmonic leaked past the ceiling");
     }
 
     #[tokio::test]

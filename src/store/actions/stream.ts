@@ -91,13 +91,21 @@ export function slotFromSource(
   return { id: src.id, source, route: src.route, enabled: true };
 }
 
+/** The frequency the mixer actually plays for an asked `hz`: clamped to
+ * [1 Hz, 0.98·Nyquist], then bin-snapped unless the coherent-generator
+ * toggle is off (issue #14 — "Round to eliminate leakage" in the official
+ * app). The sources panel shows this value next to the ask when it differs. */
+export function playedFrequencyHz(s: AppState, hz: number): number {
+  const sampleRate = s.device.config?.sample_rate ?? 48000;
+  const clamped = Math.min(Math.max(hz, 1), (sampleRate / 2) * 0.98);
+  return s.acquisition.coherentGen
+    ? snapToBin(clamped, s.acquisition.fftSize, sampleRate)
+    : clamped;
+}
+
 /** The slot declarations for the currently playing sources. */
 export function slotsFromSources(s: AppState): MixerSlotDesc[] {
-  const sampleRate = s.device.config?.sample_rate ?? 48000;
-  const n = s.acquisition.fftSize;
-  const nyquist = sampleRate / 2;
-  const snap = (hz: number): number =>
-    snapToBin(Math.min(Math.max(hz, 1), nyquist * 0.98), n, sampleRate);
+  const snap = (hz: number): number => playedFrequencyHz(s, hz);
   return s.sources.order
     .map((id) => s.sources.byId[id])
     .filter((src): src is SourceMeta => !!src && src.playing)

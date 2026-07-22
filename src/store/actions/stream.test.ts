@@ -11,7 +11,9 @@ import { HW_TRACE_IDS } from "../state";
 import {
   buildStreamConfig,
   levelToAmplitude,
+  playedFrequencyHz,
   slotFromSource,
+  slotsFromSources,
   snapToBin,
 } from "./stream";
 
@@ -40,6 +42,45 @@ describe("snapToBin", () => {
 
   it("never snaps below bin 1 (DC is not a tone)", () => {
     expect(snapToBin(0.01, 4096, 48000)).toBeCloseTo(48000 / 4096, 9);
+  });
+});
+
+describe("playedFrequencyHz (the coherent-generator toggle, issue #14)", () => {
+  it("snaps by default (official 'Round to eliminate leakage' behavior)", () => {
+    const s = initialState();
+    // 48 kHz / 32768 → bin 683 = 1000.4883 Hz, the frequency the official
+    // app's rounded generator plays.
+    expect(playedFrequencyHz(s, 1000)).toBeCloseTo((683 * 48000) / 32768, 4);
+  });
+
+  it("off plays the asked frequency verbatim (clamp aside)", () => {
+    const s = initialState();
+    s.acquisition.coherentGen = false;
+    expect(playedFrequencyHz(s, 1000)).toBe(1000);
+    // The safety clamp survives the toggle.
+    expect(playedFrequencyHz(s, 0)).toBe(1);
+  });
+
+  it("slots follow the toggle for the primary tone and the extras", () => {
+    const s = initialState();
+    s.sources.order = ["a"];
+    s.sources.byId["a"] = sineSource("a", {
+      extraTones: [{ frequencyHz: 2000, levelDbv: -20, phaseDeg: 0, enabled: true }],
+    });
+    const freqOf = (st: typeof s): number[] => {
+      const src = slotsFromSources(st)[0].source;
+      return src.kind === "tones"
+        ? src.tones.map((t) => t.frequency_hz)
+        : src.kind === "waveform"
+          ? [src.frequency_hz]
+          : [];
+    };
+    expect(freqOf(s)).toEqual([
+      expect.closeTo((683 * 48000) / 32768, 3),
+      expect.closeTo((1365 * 48000) / 32768, 3),
+    ]);
+    s.acquisition.coherentGen = false;
+    expect(freqOf(s)).toEqual([1000, 2000]);
   });
 });
 
