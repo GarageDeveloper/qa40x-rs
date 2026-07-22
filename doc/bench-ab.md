@@ -164,52 +164,85 @@ Remaining divergences are all of the *accepting-more-than-official* kind
 
 ## Verified baseline (2026-07-22 — QA402 fw 60 vs official app 1.220)
 
-Latest reference run (id `1784710709`, 48 kHz, 32768-sample buffer, ±6 dBV
+Latest reference run (id `1784724835`, 48 kHz, 32768-sample buffer, ±6 dBV
 input, single −10 dBV stimulus on both targets, passive loopback on both
-channels), after the issue #20 fix (dBV amplitudes with auto-fitted output
-range) and the issue #8 fix (the factory DAC trims applied to dBV
-generation — the Level rows now measure the calibrated output directly).
-**23/24 metrics within tolerance.** This table is the parity baseline the
-README links to; re-run the bench and replace it when the numbers move.
+channels), after the issue #20 fix (dBV amplitudes), the issue #8 fix
+(factory DAC trims applied to generation) and the issue #14 fixes (the
+`/ThdDb` harmonic ceiling honored, the one-shot capture un-gated by the
+coherent wrap). Both targets forced to the same analysis window:
+**24/24 metrics within tolerance under FlatTop** (the window both apps
+default to) **and 24/24 under Hann** — the first fully green A/B. This
+table (the FlatTop pass) is the parity baseline the README links to;
+re-run the bench and replace it when the numbers move.
 
 | metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |
 |---|---:|---:|---:|---:|:--:|
-| Level @1 kHz L (dBV) | -10.020 | -10.034 | +0.014 | 0.50 | ✅ |
-| Level @1 kHz R (dBV) | -10.013 | -10.026 | +0.014 | 0.50 | ✅ |
-| Balance L−R @1 kHz (dB) | -0.008 | -0.008 | +0.000 | 0.20 | ✅ |
-| Noise floor L (dBV) | -107.325 | -108.293 | +0.968 | 3.00 | ✅ |
-| Noise floor R (dBV) | -107.372 | -108.497 | +1.124 | 3.00 | ✅ |
-| THD @1 kHz L (dB) | -111.741 | -110.476 | -1.265 | 3.00 | ✅ |
-| THD @1 kHz R (dB) | -108.867 | -108.204 | -0.663 | 3.00 | ✅ |
-| THD+N @1 kHz L (dB) | -97.139 | -97.752 | +0.613 | 2.00 | ✅ |
-| SNR @1 kHz L (dB) | 97.292 | 98.513 | -1.221 | 3.00 | ✅ |
-| THD @100 Hz L (dB) | -108.494 | -103.329 | -5.166 | 3.00 | ❌ |
-| THD @6 kHz L (dB) | -111.465 | -109.579 | -1.887 | 3.00 | ✅ |
-| FR dev @20 Hz L (dB) | -0.014 | -0.015 | +0.001 | 0.20 | ✅ |
+| Level @1 kHz L (dBV) | -10.022 | -10.036 | +0.014 | 0.50 | ✅ |
+| Level @1 kHz R (dBV) | -10.013 | -10.027 | +0.014 | 0.50 | ✅ |
+| Balance L−R @1 kHz (dB) | -0.009 | -0.009 | +0.000 | 0.20 | ✅ |
+| Noise floor L (dBV) | -107.282 | -108.360 | +1.078 | 3.00 | ✅ |
+| Noise floor R (dBV) | -107.036 | -108.435 | +1.399 | 3.00 | ✅ |
+| THD @1 kHz L (dB) | -110.037 | -110.758 | +0.721 | 3.00 | ✅ |
+| THD @1 kHz R (dB) | -107.669 | -108.220 | +0.550 | 3.00 | ✅ |
+| THD+N @1 kHz L (dB) | -97.330 | -97.656 | +0.325 | 2.00 | ✅ |
+| SNR @1 kHz L (dB) | 97.509 | 98.465 | -0.957 | 3.00 | ✅ |
+| THD @100 Hz L (dB) | -102.848 | -103.703 | +0.855 | 3.00 | ✅ |
+| THD @6 kHz L (dB) | -111.744 | -110.562 | -1.182 | 3.00 | ✅ |
+| FR dev @20 Hz L (dB) | -0.015 | -0.015 | +0.000 | 0.20 | ✅ |
 | FR dev @30 Hz L (dB) | -0.008 | -0.008 | -0.000 | 0.20 | ✅ |
 | FR dev @50 Hz L (dB) | -0.003 | -0.003 | -0.000 | 0.20 | ✅ |
-| FR dev @100 Hz L (dB) | -0.001 | -0.001 | -0.000 | 0.20 | ✅ |
+| FR dev @100 Hz L (dB) | -0.001 | -0.000 | -0.000 | 0.20 | ✅ |
 | FR dev @200 Hz L (dB) | 0.000 | 0.000 | -0.000 | 0.20 | ✅ |
-| FR dev @500 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
+| FR dev @500 Hz L (dB) | 0.000 | 0.001 | -0.000 | 0.20 | ✅ |
 | FR dev @1000 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
 | FR dev @2000 Hz L (dB) | -0.002 | -0.002 | +0.000 | 0.20 | ✅ |
 | FR dev @5000 Hz L (dB) | -0.016 | -0.016 | +0.000 | 0.20 | ✅ |
 | FR dev @10000 Hz L (dB) | -0.065 | -0.065 | +0.000 | 0.20 | ✅ |
-| FR dev @15000 Hz L (dB) | -0.146 | -0.146 | -0.000 | 0.20 | ✅ |
+| FR dev @15000 Hz L (dB) | -0.146 | -0.146 | +0.000 | 0.20 | ✅ |
 | FR dev @20000 Hz L (dB) | -0.258 | -0.258 | -0.000 | 0.20 | ✅ |
 | Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.000 | 0.10 | ✅ |
 
-Reading: absolute level now agrees to **0.014 dB** on both channels (it was
-+0.38/+0.43 before the issue #8 fix — exactly the unit's +8 dBV-range DAC
-trims), which also brings the interchannel balance to a dead 0.000 dB Δ;
-every FR point agrees to ≤ 0.001 dB and the noise floors to ≤ 1.13 dB. The
-one remaining failure, THD @ 100 Hz, is qa40x-rs reading *lower* (cleaner)
-than the official app (−5.17 dB this run, −3.61 on the previous baseline —
-the official value itself moves run-to-run): the official app measures
-through a 5-term flat-top window whose wide lobes integrate more of the
-near-floor energy around each low harmonic than our narrow Hann lobes.
-Offering the official app's analysis parameters (window, coherent generator
-toggle) is tracked as issue #14.
+Reading: absolute level agrees to **0.014 dB** on both channels, every FR
+point to ≤ 0.001 dB, the noise floors to ≤ 1.4 dB — and THD @ 100 Hz, the
+last historical failure, now agrees to **+0.86 dB** (with a 0.3–0.4 dB
+per-acquisition spread on each side, quantified by the 4-acquisition
+averaging).
+
+### How the THD @ 100 Hz gap was actually closed (issue #14 post-mortem)
+
+The earlier baselines blamed the official flat-top window's wide lobes; the
+window-matrix run (id `1784723144`, same window forced on both targets, THD
+recomputed from each target's own spectra with four candidate methods)
+disproved that and identified two real mechanisms, both on our side:
+
+1. **The `/ThdDb` harmonic ceiling was ignored** — qa40x-rs hardcoded
+   10 harmonics where the official app integrates every harmonic up to the
+   endpoint's max parameter (the probe matches its reported values with the
+   harmonics→20 kHz family, sharpest under Rectangle where its reading
+   equals the peak-bin×→20 kHz recomputation to 0.3 dB). At 100 Hz the
+   ceiling admits ~190 extra near-floor harmonics: this was the historical
+   −3.6…−5.2 dB "we read cleaner" bias, and the near-floor sum is also why
+   the official value moved run-to-run.
+2. **The one-shot capture was gated** — the capture returns shifted by the
+   USB round-trip latency, so the analyzed window held L zeros plus a
+   truncated tone; the gate's sinc skirts read as junk around the carrier.
+   Hann at 1 kHz hid it (which is why the old Hann-only baselines looked
+   clean); flat-top at 100 Hz exposed it (+11 dB), Rectangle
+   catastrophically (−36 dB THD). Since every REST stimulus is bin-snapped
+   (periodic over the buffer), prepending the buffer's own tail turns the
+   played stream into a periodic continuation and the analyzed window into
+   pure steady state.
+
+Residual, deliberate divergence: our THD integrates each harmonic's whole
+±6-bin lobe where the official app reads a narrow peak — equivalent for
+tones and quiet floors (both 24/24 passes above), but divergent under
+**Rectangle**, which leaks every unsnapped spur (mains hum is not on the
+FFT grid) into an elevated near-carrier floor that 200 integrated lobes
+amplify (Δ ≈ +19 dB @100 Hz on otherwise near-identical spectra). Rectangle
+is therefore excluded from the default matrix — a leakage diagnostic, not a
+comparable measurement — and the official app itself occasionally glitches
+an acquisition under it (seen: −38.6 dB outliers), which the per-acquisition
+spread now makes visible instead of surprising.
 
 ## Findings from the first hardware run (2026-07-21, QA402 fw 60 vs app 1.220)
 

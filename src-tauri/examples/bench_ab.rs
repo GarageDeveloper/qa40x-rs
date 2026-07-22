@@ -84,7 +84,13 @@ impl Default for Cli {
             amp_dbv: -10.0,
             sample_rate: 48000,
             buffer_size: 32768,
-            windows: vec!["FlatTop".into(), "Hann".into(), "Rectangle".into()],
+            // Rectangle is deliberately NOT in the default matrix: with real
+            // signals it magnifies unsnapped spurious lines (mains hum) into
+            // an elevated near-carrier floor, where the two apps' readout
+            // styles (our ±6-bin lobe integration vs the official peak-bin)
+            // diverge by design — a leakage diagnostic, not a comparable
+            // measurement. Ask for it explicitly via --windows.
+            windows: vec!["FlatTop".into(), "Hann".into()],
             thd_avg: 4,
             out_dir: "target/bench-ab".into(),
             demo: false,
@@ -196,7 +202,9 @@ USAGE: cargo run --example bench_ab -- [OPTIONS]
   --buffer-size N    acquisition buffer for both targets (default 32768)
   --windows LIST     comma-separated analysis windows forced on BOTH targets via
                      /Settings/Windowing, one battery per window
-                     (Rectangle|Bartlett|Hamming|Hann|FlatTop; default FlatTop,Hann,Rectangle)
+                     (Rectangle|Bartlett|Hamming|Hann|FlatTop; default FlatTop,Hann —
+                     Rectangle magnifies unsnapped spurs into readout-style divergence,
+                     diagnostic only)
   --thd-avg N        acquisitions averaged for the THD @100 Hz row (default 4)
   --probe FILE       offline: infer window/coherence + run the THD-method probe
                      on a saved spectrum snapshot, then exit (repeatable)
