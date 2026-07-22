@@ -391,8 +391,14 @@ async fn dispatch(path: &str, state: &RestState) -> RestResult {
         ["Settings", rest @ ..] => settings(rest, state).await,
 
         // Tone measurements (Left/Right) over the last acquisition.
-        ["ThdDb", f, _m] => measure(state, num(f)?, |a| db(a.thd as f64 / 100.0)).await,
-        ["ThdPct", f, _m] => measure(state, num(f)?, |a| a.thd as f64).await,
+        ["ThdDb", f, m] => {
+            let (l, r) = thd_ratio(state, num(f)?, num(m)?).await?;
+            Ok(left_right(db(l), db(r)))
+        }
+        ["ThdPct", f, m] => {
+            let (l, r) = thd_ratio(state, num(f)?, num(m)?).await?;
+            Ok(left_right(l * 100.0, r * 100.0))
+        }
         ["ThdnDb", f, _lo, _hi] => measure(state, num(f)?, |a| db(a.thd_n as f64 / 100.0)).await,
         ["ThdnPct", f, _lo, _hi] => measure(state, num(f)?, |a| a.thd_n as f64).await,
         ["SnrDb", f, _lo, _hi] => measure(state, num(f)?, |a| a.snr as f64).await,
@@ -491,11 +497,34 @@ async fn acquisition(state: &RestState) -> RestResult {
             *s = (*s * trim).clamp(-1.0, 1.0);
         }
     }
-    let cap = dev
-        .generate_and_capture(&left, &right)
+    // Coherent wrap (issue #14): the capture comes back shifted by the USB
+    // round-trip latency, so an N-sample one-shot burst yields L zeros at the
+    // head and a tone truncated to N−L samples — a gate whose sinc skirts
+    // read as junk around the carrier (invisible under Hann at 1 kHz, +11 dB
+    // on THD @100 Hz under flat-top, catastrophic under Rectangle in the A/B
+    // window matrix). Every REST stimulus is bin-snapped, hence periodic over
+    // N: prepending the buffer's own TAIL makes the played stream a periodic
+    // continuation, so the latency-shifted window is pure steady-state — any
+    // contiguous N samples of a periodic signal stay exactly coherent. The
+    // wrap must exceed the latency; 4096 matches generate_and_capture's own
+    // lead-in budget (buffers below that get a best-effort full-buffer wrap).
+    const WRAP_SAMPLES: usize = 4096;
+    let wrap = WRAP_SAMPLES.min(n);
+    let wrapped = |chan: &[f32]| {
+        let mut w = Vec::with_capacity(wrap + chan.len());
+        w.extend_from_slice(&chan[chan.len() - wrap..]);
+        w.extend_from_slice(chan);
+        w
+    };
+    let mut cap = dev
+        .generate_and_capture(&wrapped(&left), &wrapped(&right))
         .await
         .map_err(|e| (500, format!("acquisition failed: {e}")))?;
     drop(dev);
+    for chan in [&mut cap.left_channel, &mut cap.right_channel] {
+        chan.drain(0..wrap.min(chan.len()));
+        chan.truncate(n);
+    }
     *state.last.lock().await = Some(cap);
     Ok(json!({ "SessionId": SESSION_ID, "Value": "True" }))
 }
@@ -580,6 +609,27 @@ async fn settings(rest: &[&str], state: &RestState) -> RestResult {
         }
         _ => Err((404, format!("unknown /Settings/{}", rest.join("/")))),
     }
+}
+
+/// THD as a linear ratio per channel, with harmonics up to `max_hz` — the
+/// official `/ThdDb/{fund}/{max}` semantics. We used to ignore the ceiling
+/// and hardcode 10 harmonics; the issue #14 window-matrix diagnostic showed
+/// the official app integrates EVERY harmonic up to the ceiling, which at
+/// 100 Hz (~190 extra near-floor harmonics to 20 kHz) was most of the A/B
+/// THD gap.
+async fn thd_ratio(state: &RestState, fund: f32, max_hz: f32) -> Result<(f64, f64), RestError> {
+    let cap = last(state).await?;
+    let w = *state.window.lock().await;
+    let n = if fund > 0.0 && max_hz.is_finite() {
+        ((max_hz / fund).floor() as usize).max(2)
+    } else {
+        2
+    };
+    let one = |sig: &[f32]| {
+        let r = spectrum_with(sig, cap.sample_rate, w);
+        AudioAnalyzer::calculate_thd(&r.magnitudes, &r.frequencies, fund, n) as f64 / 100.0
+    };
+    Ok((one(&cap.left_channel), one(&cap.right_channel)))
 }
 
 /// Run `pick` on the analysis of each channel at `fund`, returning {Left,Right}.
@@ -984,6 +1034,37 @@ mod tests {
             (flattop - hann).abs() < 0.3,
             "THD moved with the window: flat-top {flattop} vs Hann {hann} dB"
         );
+    }
+
+    #[tokio::test]
+    async fn thd_honors_the_max_harmonic_ceiling() {
+        // A −80 dB 15th harmonic (15 kHz): /ThdDb/1000/20000 must see it,
+        // /ThdDb/1000/10000 must not — the official ceiling semantics we used
+        // to ignore (10 harmonics hardcoded), issue #14.
+        let sr = 48000u32;
+        let n = 32768usize;
+        let f0 = snap_to_bin(1000.0, sr, n);
+        let mut sig = SignalGenerator::sine(f0, 0.5, sr, n);
+        for (s, h) in sig
+            .iter_mut()
+            .zip(SignalGenerator::sine(15.0 * f0, 0.5e-4, sr, n))
+        {
+            *s += h;
+        }
+        let st = Arc::new(RestState::new(Arc::new(Mutex::new(QA40xDevice::new()))));
+        *st.last.lock().await = Some(AudioData {
+            left_channel: sig.clone(),
+            right_channel: sig,
+            sample_rate: sr,
+        });
+        let read = |st: Arc<RestState>, path: &'static str| async move {
+            let v = dispatch(path, &st).await.unwrap();
+            v["Left"].as_str().unwrap().parse::<f64>().unwrap()
+        };
+        let to_20k = read(st.clone(), "/ThdDb/1000/20000").await;
+        let to_10k = read(st.clone(), "/ThdDb/1000/10000").await;
+        assert!((to_20k - (-80.0)).abs() < 0.5, "→20 kHz THD {to_20k} dB, want −80");
+        assert!(to_10k < -100.0, "→10 kHz THD {to_10k} dB — the 15 kHz harmonic leaked past the ceiling");
     }
 
     #[tokio::test]
