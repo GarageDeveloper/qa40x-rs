@@ -594,7 +594,11 @@ fn vm_stop(vm_name: &str) -> R<()> {
 }
 
 /// Wait for a routable IPv4 on the guest. Parallels often reports the
-/// link-local IPv6 first, which is useless for reaching the REST relay.
+/// link-local IPv6 first — and sometimes an APIPA 169.254.x.x IPv4 before the
+/// DHCP lease lands (seen live: the bench locked onto the dead link-local
+/// address and polled it until timeout while the real 10.211.55.x came up
+/// seconds later). Neither can reach the REST relay: keep waiting for a
+/// routable address.
 fn vm_wait_ip(vm_name: &str, timeout: Duration) -> R<String> {
     let t0 = std::time::Instant::now();
     while t0.elapsed() < timeout {
@@ -602,12 +606,12 @@ fn vm_wait_ip(vm_name: &str, timeout: Duration) -> R<String> {
             .as_str()
             .unwrap_or("-")
             .to_string();
-        if ip.contains('.') && !ip.contains(':') {
+        if ip.contains('.') && !ip.contains(':') && !ip.starts_with("169.254.") {
             return Ok(ip);
         }
         std::thread::sleep(Duration::from_secs(3));
     }
-    Err(format!("VM {vm_name:?} got no IPv4 within {timeout:?}"))
+    Err(format!("VM {vm_name:?} got no routable IPv4 within {timeout:?}"))
 }
 
 /// Run a PowerShell script in the guest through `prlctl exec`, base64-encoded
