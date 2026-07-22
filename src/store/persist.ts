@@ -631,6 +631,9 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   // in-version hook — bump WS_VERSION for shape CHANGES, not additions).
   if (!Array.isArray(doc.collapsed)) doc.collapsed = [];
   if (!doc.refFrames || typeof doc.refFrames !== "object") doc.refFrames = {};
+  if (doc.acquisition && typeof doc.acquisition.coherentGen !== "boolean") {
+    doc.acquisition.coherentGen = true;
+  }
   for (const tile of Object.values(doc.layout.tiles)) {
     if (typeof tile.showPhase !== "boolean") tile.showPhase = false;
     if (typeof tile.showHarmonics !== "boolean") tile.showHarmonics = false;

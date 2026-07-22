@@ -39,6 +39,8 @@ import {
   SOURCE_KINDS,
 } from "../../store/actions/sources";
 import { setOutputOnly } from "../../store/actions/outputonly";
+import { setCoherentGen } from "../../store/actions/acquisition";
+import { playedFrequencyHz } from "../../store/actions/stream";
 import { programLockReason } from "../../store/actions/programs";
 import { routeChecks, routeFromChecks } from "../../core/routing";
 import { toneListStats } from "../../core/tonestats";
@@ -52,6 +54,11 @@ interface RowVM {
   src: SourceMeta;
   error: string | null;
   lock: string | null;
+  /** The frequency the mixer actually plays (bin-snapped when the coherent
+   * toggle is on), or null for kinds without a frequency. Computed in the
+   * selector so a change of FFT size, sample rate or the toggle re-renders
+   * the rows (issue #14). */
+  played: number | null;
 }
 
 /** The phased tone list a sine source plays (primary tone at phase 0 + the
@@ -155,6 +162,8 @@ export function mountSourcesPanel(
   const rangeReadout = el("span.sources__range", { "data-testid": "out-range-readout" });
   const outOnly = el("input", { type: "checkbox", "data-testid": "output-only" });
   outOnly.addEventListener("change", () => setOutputOnly(store, ipc, outOnly.checked));
+  const coherent = el("input", { type: "checkbox", "data-testid": "coherent-gen" });
+  coherent.addEventListener("change", () => setCoherentGen(store, ipc, coherent.checked));
 
   const head = el(
     "div.sources__head",
@@ -175,6 +184,18 @@ export function mountSourcesPanel(
         clipDot,
         rangeReadout,
         el("span.sources__spacer"),
+        el(
+          "label.sources__outonly",
+          {
+            title:
+              "Round every periodic tone onto the FFT bin grid (the official " +
+              "app's default): a coherent tone has no window-skirt leakage, " +
+              "so THD+N/SNR read the true residual. Off plays the asked " +
+              "frequency verbatim (~12 dB pessimistic tiles at 1 kHz/32768).",
+          },
+          coherent,
+          "Round to bin"
+        ),
         el(
           "label.sources__outonly",
           {
@@ -280,7 +301,11 @@ export function mountSourcesPanel(
       params.push(
         numberField(`src-freq-${id}`, "Hz", (v) => setSourceFrequency(store, ipc, id, v), {
           min: "1",
-        }).wrap
+        }).wrap,
+        // The actually-played frequency (issue #14) — the ask stays the
+        // user's, only the mix snaps. Always rendered so toggling the
+        // rounding never shifts the layout.
+        el("span.sources__snapped", { "data-testid": `src-snapped-${id}` })
       );
     }
     if (src.kind !== "script") {
@@ -370,6 +395,18 @@ export function mountSourcesPanel(
         : src.label;
     if ("frequencyHz" in src) syncField(node, `src-freq-${id}`, String(src.frequencyHz));
     if (src.kind !== "script") syncField(node, `src-level-${id}`, String(src.levelDbv));
+
+    const snapped = node.querySelector<HTMLElement>(`[data-testid="src-snapped-${id}"]`);
+    if (snapped && vm.played !== null && "frequencyHz" in src) {
+      // Always shown, both toggle states: an appearing/disappearing hint
+      // would shift the whole params line on every toggle flip.
+      const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
+      snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
+      snapped.title = moved
+        ? "Actually-played frequency: the tone is rounded onto the FFT bin " +
+          "grid (Round to eliminate leakage)"
+        : "Actually-played frequency (the ask, played verbatim)";
+    }
 
     const checks = routeChecks(src.route);
     node.querySelector<HTMLInputElement>(`[data-testid="src-route-l-${id}"]`)!.checked =
@@ -482,7 +519,15 @@ export function mountSourcesPanel(
       return s.sources.order
         .map((id) => s.sources.byId[id])
         .filter((src): src is SourceMeta => !!src)
-        .map((src) => ({ src, error: errors.get(src.id) ?? null, lock }));
+        .map((src) => ({
+          src,
+          error: errors.get(src.id) ?? null,
+          lock,
+          played:
+            src.kind !== "script" && "frequencyHz" in src
+              ? playedFrequencyHz(s, src.frequencyHz)
+              : null,
+        }));
     },
     (rows) => {
       lastRows = rows;
@@ -520,5 +565,12 @@ export function mountSourcesPanel(
       outOnly.disabled = !connected;
     },
     shallowEq
+  );
+
+  store.select(
+    (s) => s.acquisition.coherentGen,
+    (on) => {
+      coherent.checked = on;
+    }
   );
 }

@@ -202,6 +202,13 @@
   width: 62px;
 }
 
+/* The actually-played (bin-rounded) frequency next to the ask (issue #14). */
+.sources__snapped {
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
 .sources__route {
   display: flex;
   align-items: center;

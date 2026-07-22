@@ -152,3 +152,31 @@ test("a hidden extra tone lights the collapsed row; the editor's open state surv
   expect(await editorOpen()).toBe(false);
   expect(await app.drv.text(moreBtn)).toBe("Tones ×1");
 });
+
+test("the coherent toggle: snapped frequency shown by default, verbatim when off (#14)", async ({
+  app,
+}) => {
+  const id = await app.addSine(); // 1 kHz ask
+  // Default = the official app's "Round to eliminate leakage": the row shows
+  // the actually-played bin-rounded frequency next to the ask.
+  const hint = `[data-testid="src-snapped-${id}"]`;
+  await expect.poll(() => app.drv.text(hint)).toContain("1000.4883 Hz");
+
+  // Off: the ask plays verbatim — the readout STAYS (a vanishing hint would
+  // shift the params line on every flip) and shows the verbatim frequency.
+  await app.drv.click('[data-testid="coherent-gen"]');
+  await expect.poll(() => app.drv.text(hint)).toContain("1000.0000 Hz");
+
+  // The toggle is a workspace setting: off survives a reload.
+  await app.saveWorkspaceAs("coherent bench");
+  await app.waitForAutoSave("coherent bench");
+  await app.boot();
+  await app.waitConnected();
+  expect(
+    await app.drv.eval(
+      (sel: string) => document.querySelector<HTMLInputElement>(sel)!.checked,
+      '[data-testid="coherent-gen"]'
+    )
+  ).toBe(false);
+  expect(await app.drv.text(hint)).toContain("1000.0000 Hz");
+});

@@ -60,6 +60,12 @@ export interface AcquisitionState {
   averaging: { mode: AveragingMode; count: number };
   window: WindowKind;
   peakHold: boolean;
+  /** Snap every periodic source onto the FFT bin grid — the official app's
+   * "Round to eliminate leakage", on by default there too (issue #14). Off
+   * plays the asked frequency verbatim (a legitimate precision mode; the
+   * live THD+N/SNR tiles then integrate the window skirts of a
+   * non-coherent tone, ~12 dB pessimistic at 1 kHz / 32768). */
+  coherentGen: boolean;
 }
 
 export interface RunState {
@@ -558,6 +564,7 @@ export function initialState(): AppState {
       averaging: { mode: "off", count: 1 },
       window: "hann",
       peakHold: false,
+      coherentGen: true,
     },
     run: {
       streaming: false,
