@@ -37,7 +37,7 @@ application **v1** and the upcoming **v2** expected in 2026.
 > That cross-check is itself automated: an A/B loopback bench runs the same
 > measurement battery against this app and the official one on the same
 > QA402. Frequency response, linearity, THD+N, SNR and the noise floor
-> currently agree within 0.001 dB / 0.001 dB / 0.01 dB / 0.6 dB / 1.7 dB;
+> currently agree within 0.001 dB / 0.001 dB / 0.05 dB / 0.6 dB / 1.15 dB;
 > the known divergences (THD at 100 Hz, ≈ 0.4 dB absolute level) are
 > tracked in [doc/bench-ab.md](doc/bench-ab.md).
 

@@ -43,7 +43,7 @@
 //! | `set_input_range(dbv)`           | `apply_config` / `/Settings/Input/Max` |
 //! | `set_output_range(dbv)`          | `apply_config`                         |
 //! | `set_buffer_size(n)`             | `apply_config` / `/Settings/BufferSize`|
-//! | `set_gen(on, hz, dbfs)`          | `apply_config` / `/Settings/AudioGen`  |
+//! | `set_gen(on, hz, dbfs)`          | `apply_config` / `/Settings/AudioGen` (REST takes dBV) |
 //! | `set_waveform(name)`             | `apply_config` (sine/square/tri/saw)   |
 //! | `set_gen_output(ch)`             | `apply_config` (left/right/both)       |
 //! | `acquire()`                      | `Session::acquire` / `/Acquisition`    |
