@@ -247,6 +247,10 @@ pub enum WindowFunction {
     Blackman,
     FlatTop,
     Rectangular,
+    /// Triangular (periodic form, like the other windows here). One of the
+    /// five windows the official QA40x app offers over REST
+    /// (`/Settings/Windowing/Bartlett`).
+    Bartlett,
 }
 
 impl WindowFunction {
@@ -293,6 +297,12 @@ impl WindowFunction {
             }
             WindowFunction::Rectangular => {
                 // No windowing
+            }
+            WindowFunction::Bartlett => {
+                for (i, sample) in signal.iter_mut().enumerate() {
+                    let w = 1.0 - (2.0 * i as f32 / n as f32 - 1.0).abs();
+                    *sample *= w;
+                }
             }
         }
     }
@@ -347,6 +357,7 @@ mod tests {
             (WindowFunction::Hann, 1.5, 1e-3),
             (WindowFunction::Hamming, 1.363, 2e-3),
             (WindowFunction::FlatTop, 3.77, 0.01),
+            (WindowFunction::Bartlett, 4.0 / 3.0, 2e-3),
         ] {
             let enbw = p.process_real_windowed(&signal, 48000, window).enbw_bins;
             assert!(
@@ -385,6 +396,7 @@ mod tests {
             WindowFunction::Hamming,
             WindowFunction::Blackman,
             WindowFunction::FlatTop,
+            WindowFunction::Bartlett,
         ] {
             let result = processor.process_real_windowed(&signal, sample_rate, window);
             // The tone's energy sits in the mainlobe around `bin`; the
