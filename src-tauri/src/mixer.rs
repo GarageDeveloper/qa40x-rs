@@ -389,14 +389,24 @@ pub fn fit_range_with_hysteresis(
 }
 
 /// Scale a summed mix (level-volts) to DAC full scale for the selected output
-/// range, in place. Samples beyond full scale are clamped to ±1 — the DAC
-/// would clip there anyway — and reported: the mix is NEVER silently rescaled
+/// range, in place. `dac_trims` are the per-channel `(left, right)` factory
+/// trim multipliers ([`crate::qa40x::QA40xDevice::dac_trims`]) that
+/// pre-compensate the unit's DAC gain error so the voltage at the connectors
+/// matches the commanded level (issue #8); pass `(1.0, 1.0)` for the ideal
+/// range model. Samples beyond full scale are clamped to ±1 — the DAC would
+/// clip there anyway — and reported: the mix is NEVER silently rescaled
 /// (relative source levels are the user's choice; report the clip and let
 /// them decide). Returns whether any sample clipped.
-pub fn scale_mix_to_range(left: &mut [f32], right: &mut [f32], range_dbv: i32) -> bool {
-    let scale = 10.0f32.powf(-(range_dbv as f32) / 20.0);
+pub fn scale_mix_to_range(
+    left: &mut [f32],
+    right: &mut [f32],
+    range_dbv: i32,
+    dac_trims: (f32, f32),
+) -> bool {
+    let range_scale = 10.0f32.powf(-(range_dbv as f32) / 20.0);
     let mut clipped = false;
-    for chan in [left, right] {
+    for (chan, trim) in [(left, dac_trims.0), (right, dac_trims.1)] {
+        let scale = range_scale * trim;
         for v in chan.iter_mut() {
             let scaled = *v * scale;
             *v = scaled.clamp(-1.0, 1.0);
@@ -837,7 +847,7 @@ mod range_tests {
         // A 0 dBV peak on the +8 dBV range is −8 dBFS.
         let mut left = vec![1.0f32, -1.0];
         let mut right = vec![0.0f32, 0.5];
-        let clipped = scale_mix_to_range(&mut left, &mut right, 8);
+        let clipped = scale_mix_to_range(&mut left, &mut right, 8, (1.0, 1.0));
         assert!(!clipped);
         let fs = 10.0f32.powf(-8.0 / 20.0);
         assert!((left[0] - fs).abs() < 1e-7);
@@ -846,12 +856,39 @@ mod range_tests {
     }
 
     #[test]
+    fn dac_trims_precompensate_each_channel_independently() {
+        // A unit whose left DAC runs 0.36 dB hot (trim −0.36 dB → ×0.959) and
+        // right 0.42 dB hot — the issue #8 numbers. The digital samples must
+        // shrink by exactly the per-channel trim.
+        let (tl, tr) = (10.0f32.powf(-0.36 / 20.0), 10.0f32.powf(-0.42 / 20.0));
+        let mut left = vec![1.0f32];
+        let mut right = vec![1.0f32];
+        let clipped = scale_mix_to_range(&mut left, &mut right, 8, (tl, tr));
+        assert!(!clipped);
+        let fs = 10.0f32.powf(-8.0 / 20.0);
+        assert!((left[0] - fs * tl).abs() < 1e-7);
+        assert!((right[0] - fs * tr).abs() < 1e-7);
+    }
+
+    #[test]
+    fn a_hot_trim_that_pushes_past_full_scale_clips_and_reports() {
+        // Trim > 1 (a unit whose DAC runs quiet): a full-tilt sample no longer
+        // fits — clamp to 1.0 and report, never rescale.
+        let over = level_to_amplitude(8.0); // exactly full scale on +8 dBV
+        let mut left = vec![over];
+        let mut right = vec![0.0f32];
+        let clipped = scale_mix_to_range(&mut left, &mut right, 8, (1.05, 1.0));
+        assert!(clipped);
+        assert_eq!(left[0], 1.0);
+    }
+
+    #[test]
     fn clamps_and_reports_a_clipping_sum_never_rescales_the_mix() {
         // A +10 dBV peak does not fit the +8 dBV range.
         let over = level_to_amplitude(10.0);
         let mut left = vec![over, over / 2.0, -over];
         let mut right = vec![0.0f32, 0.0, 0.0];
-        let clipped = scale_mix_to_range(&mut left, &mut right, 8);
+        let clipped = scale_mix_to_range(&mut left, &mut right, 8, (1.0, 1.0));
         assert!(clipped);
         assert_eq!(left[0], 1.0); // clamped, not rescaled
         assert_eq!(left[2], -1.0);

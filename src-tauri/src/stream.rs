@@ -703,7 +703,13 @@ async fn run_stream_loop(
 
         // ---- Scale to DAC full scale + output clip latch ----
         let clipped_out = if tone {
-            scale_mix_to_range(&mut left, &mut right, desired_range)
+            // Per-unit DAC trims (issue #8) — read AFTER the range write
+            // above: the trim record follows the active output range. The
+            // stimulus trace stays consistent: `output_dbv_offset` divides
+            // the same trim back out, so the dBV axis shows the commanded
+            // (= actual) level.
+            let (dac_trims, _) = ctl.device.lock().await.dac_trims().await;
+            scale_mix_to_range(&mut left, &mut right, desired_range, dac_trims)
         } else {
             false
         };

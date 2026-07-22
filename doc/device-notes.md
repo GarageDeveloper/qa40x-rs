@@ -235,6 +235,22 @@ for ~100 ms. And the policy behind it: **never silently rescale the user's
 mix** — report the clip and keep generating what was asked; auto-ducking would
 make the on-screen levels a lie.
 
+### The factory DAC trim is part of the dBV→digital conversion
+
+The ideal range model ("+8 dBV full scale = digital 1.0") is only as true as
+the unit's analog gain. The factory calibration page (§7) stores a per-range,
+per-channel DAC trim, and it works in the volts→digital direction: the actual
+output is `volts = digital · √2 · 10^((outFS − trim_dB)/20)` peak. Interpreting
+levels (placing a stimulus trace on a dBV axis, the FR offset) *divides* the
+trim back out — but **producing** a dBV-denominated stimulus must *multiply*
+the ideal digital amplitude by `10^(trim_dB/20)` per channel, or the connector
+level sits a constant few tenths of a dB off (issue #8: +0.36 dB L / +0.42 dB R
+on the bench unit — exactly its +8 dBV-range trims, which the official app
+applies and we did not). All three dBV-denominated generation paths apply the
+trims (`QA40xDevice::dac_trims`): the REST acquisition, the output-only
+generator, and the live stream loop. dBFS-denominated stimuli (the dashboard
+generator, internal probes) stay untrimmed — dBFS is a digital-domain unit.
+
 ### Probe before you drive
 
 Some tests specify the level at the **DUT's output** ("THD at 1 W into 8 Ω"),

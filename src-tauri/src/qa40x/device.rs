@@ -1722,19 +1722,44 @@ impl QA40xDevice {
         let cfg = self.config.lock().await.clone();
         let base = dac_volts_per_digital_rms(cfg.output_gain.as_dbv() as f32);
 
-        if let Some(page) = self.cal_page.lock().await.as_ref() {
-            let base_off = CalibrationData::dac_offset(cfg.output_gain.as_dbv());
-            let off = base_off.map(|o| if output_ch == Channel::Right { o + 6 } else { o });
-            if let Some(o) = off {
-                if o + 6 <= page.len() {
-                    let db = f32::from_le_bytes([page[o + 2], page[o + 3], page[o + 4], page[o + 5]]);
-                    if db.is_finite() && db.abs() < 40.0 {
-                        return (base / 10.0f32.powf(db / 20.0), true);
-                    }
-                }
-            }
+        match self.dac_cal_db(output_ch).await {
+            Some(db) => (base / 10.0f32.powf(db / 20.0), true),
+            None => (base, false),
         }
-        (base, false)
+    }
+
+    /// Factory DAC trim (dB) for `output_ch` on the CURRENT output range, from
+    /// the calibration page; `None` when the page is unavailable or the record
+    /// does not decode.
+    async fn dac_cal_db(&self, output_ch: Channel) -> Option<f32> {
+        let out_dbv = self.config.lock().await.output_gain.as_dbv();
+        let page_guard = self.cal_page.lock().await;
+        let page = page_guard.as_ref()?;
+        let base_off = CalibrationData::dac_offset(out_dbv)?;
+        let o = if output_ch == Channel::Right { base_off + 6 } else { base_off };
+        if o + 6 > page.len() {
+            return None;
+        }
+        let db = f32::from_le_bytes([page[o + 2], page[o + 3], page[o + 4], page[o + 5]]);
+        (db.is_finite() && db.abs() < 40.0).then_some(db)
+    }
+
+    /// Per-channel linear DIGITAL multipliers `(left, right)` that
+    /// pre-compensate the factory DAC trim of the CURRENT output range, so a
+    /// dBV-denominated stimulus lands at the requested voltage at the
+    /// connectors (issue #8: without them the output sits a constant few
+    /// tenths of a dB off — the per-unit trim).
+    ///
+    /// Direction: `output_volts_factor` establishes `volts = digital · base /
+    /// 10^(trim_dB/20)`, so hitting a target voltage takes `digital = ideal ·
+    /// 10^(trim_dB/20)` — the trim MULTIPLIES in the volts→digital direction.
+    /// Returns `((1.0, 1.0), false)` when the calibration page is unavailable
+    /// (the ideal range model, today's behavior).
+    pub async fn dac_trims(&self) -> ((f32, f32), bool) {
+        let l = self.dac_cal_db(Channel::Left).await;
+        let r = self.dac_cal_db(Channel::Right).await;
+        let lin = |db: Option<f32>| db.map_or(1.0, |d| 10.0f32.powf(d / 20.0));
+        ((lin(l), lin(r)), l.is_some() && r.is_some())
     }
 
     /// dB to ADD to a dBFS reading of the generated stimulus on `output_ch` to
