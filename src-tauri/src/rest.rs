@@ -461,11 +461,6 @@ async fn acquisition(state: &RestState) -> RestResult {
                 *s += v;
             }
         }
-        // Two full-tilt tones can exceed DAC full scale: clamp, never rescale
-        // (the mixer policy — relative levels are the caller's choice).
-        for s in &mut sum {
-            *s = s.clamp(-1.0, 1.0);
-        }
         sum
     } else {
         // Generators off: silence (the range fit above still applies).
@@ -473,7 +468,20 @@ async fn acquisition(state: &RestState) -> RestResult {
     };
     // The official app drives Gen1 on both outputs; match it (the A/B bench
     // caught this driving the left channel only).
-    let (left, right) = route_stimulus(&tone, Route::Both);
+    let (mut left, mut right) = route_stimulus(&tone, Route::Both);
+    // Pre-compensate the per-unit DAC factory trim so the requested dBV lands
+    // at the connectors, like the official app (issue #8: the ideal range
+    // model alone left the output a constant ~0.4 dB hot — this unit's trim).
+    // Per channel — the two DACs carry distinct trims. Then clamp: two
+    // full-tilt tones (or a trim > 1) can exceed DAC full scale — clamp,
+    // never rescale (the mixer policy; relative levels are the caller's
+    // choice).
+    let (trims, _calibrated) = dev.dac_trims().await;
+    for (chan, trim) in [(&mut left, trims.0), (&mut right, trims.1)] {
+        for s in chan.iter_mut() {
+            *s = (*s * trim).clamp(-1.0, 1.0);
+        }
+    }
     let cap = dev
         .generate_and_capture(&left, &right)
         .await
@@ -933,7 +941,11 @@ mod tests {
         );
         let v = dispatch("/RmsDbv/900/1100", &st).await.unwrap();
         let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
-        assert!((left - (-10.0)).abs() < 0.5, "read {left} dBV for a -10 dBV request");
+        // 0.15 dB: tight enough to catch a dropped DAC trim (issue #8 was a
+        // +0.36 dB miss), loose enough for the sim's latency lead-in bias.
+        assert!((left - (-10.0)).abs() < 0.15, "read {left} dBV for a -10 dBV request");
+        let right: f64 = v["Right"].as_str().unwrap().parse().unwrap();
+        assert!((right - (-10.0)).abs() < 0.15, "read {right} dBV for a -10 dBV request");
 
         // The range fit follows the CONFIGURED level even with the generator
         // off (On/Off only gates the tone) — a gen-off noise floor on the

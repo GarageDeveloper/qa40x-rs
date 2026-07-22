@@ -3,11 +3,16 @@
 //! simulated loopback, then detach/reattach. No hardware, no USB — this is
 //! the same path the app's "Demo" button drives.
 
-use tauri_app_lib::qa40x::{InputGain, OutputGain, QA40xDevice};
+use tauri_app_lib::qa40x::{Channel, InputGain, OutputGain, QA40xDevice};
 use tauri_app_lib::utils::SignalGenerator;
+
+/// The embedded simulator is one per process (the single-attach guard): tests
+/// in this binary must not attach concurrently.
+static SIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread")]
 async fn virtual_demo_device_connect_capture_reconnect() {
+    let _sim = SIM_LOCK.lock().await;
     let device = QA40xDevice::new();
     device.connect_virtual().await.expect("virtual connect");
 
@@ -56,4 +61,52 @@ async fn virtual_demo_device_connect_capture_reconnect() {
     device.connect_virtual().await.expect("virtual reconnect");
     assert!(device.is_connected().await);
     device.disconnect().await.expect("second disconnect");
+}
+
+/// Issue #8 closure: a dBV-denominated stimulus pre-compensated by the
+/// per-unit DAC trims must come back — through the sim's calibrated
+/// DAC→loopback→ADC chain and the ADC-calibrated readout — at exactly the
+/// commanded level. Without the trims the +8 dBV range reads ~0.36 dB (L) /
+/// ~0.42 dB (R) hot (the trims of the sim's real factory page — the same
+/// offsets the A/B bench measured on hardware), so the 0.1 dB bound fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn dbv_stimulus_lands_at_the_commanded_level_once_trimmed() {
+    let _sim = SIM_LOCK.lock().await;
+    let device = QA40xDevice::new();
+    device.connect_virtual().await.expect("virtual connect");
+    device.set_input_gain(InputGain::Gain6dBV).await.unwrap();
+    device.set_output_gain(OutputGain::Gain8dBV).await.unwrap();
+
+    let (trims, calibrated) = device.dac_trims().await;
+    assert!(calibrated, "the sim serves a real factory calibration page");
+
+    // −10 dBV on the +8 dBV range: ideal digital amplitude 10^(−18/20),
+    // then the per-channel trim (the REST acquisition path's math).
+    let sr = 48_000u32;
+    let n = 4_800usize;
+    let ideal = 10f32.powf((-10.0 - 8.0) / 20.0);
+    let left = SignalGenerator::sine(1000.0, ideal * trims.0, sr, n);
+    let right = SignalGenerator::sine(1000.0, ideal * trims.1, sr, n);
+    let captured = device
+        .generate_and_capture(&left, &right)
+        .await
+        .expect("loopback capture");
+
+    // RMS over the LAST 70 % — an integer 70 cycles of 1 kHz, clear of the
+    // sim's loopback latency (1200 zero samples lead the returned window) —
+    // converted to dBV through the ADC calibration.
+    let level_dbv = |sig: &[f32], offset_db: f32| -> f32 {
+        let tail = &sig[3 * n / 10..];
+        let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32).sqrt();
+        20.0 * rms.log10() + offset_db
+    };
+    let (off_l, cal_l) = device.input_dbv_offset(Channel::Left).await;
+    let (off_r, _) = device.input_dbv_offset(Channel::Right).await;
+    assert!(cal_l, "ADC side reads the same calibration page");
+    let l = level_dbv(&captured.left_channel, off_l);
+    let r = level_dbv(&captured.right_channel, off_r);
+    assert!((l + 10.0).abs() < 0.1, "left loopback level {l} dBV, commanded -10");
+    assert!((r + 10.0).abs() < 0.1, "right loopback level {r} dBV, commanded -10");
+
+    device.disconnect().await.expect("disconnect");
 }

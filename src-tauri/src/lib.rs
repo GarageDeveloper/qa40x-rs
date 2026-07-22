@@ -635,7 +635,10 @@ async fn output_only_start(
             .await
             .map_err(|e| format!("output-only: set output range: {e}"))?;
     }
-    let clipped = mixer::scale_mix_to_range(&mut frame.left, &mut frame.right, range);
+    // Per-unit DAC trims (issue #8) — read AFTER the range write above: the
+    // trim record follows the active output range.
+    let (dac_trims, _) = device.lock().await.dac_trims().await;
+    let clipped = mixer::scale_mix_to_range(&mut frame.left, &mut frame.right, range, dac_trims);
 
     spawn_generator_loop(device, running, stop, frame.left, frame.right);
     Ok(mixer::OutputOnlyStatus {

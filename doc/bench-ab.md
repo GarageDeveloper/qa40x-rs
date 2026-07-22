@@ -132,48 +132,52 @@ Remaining divergences are all of the *accepting-more-than-official* kind
 
 ## Verified baseline (2026-07-22 — QA402 fw 60 vs official app 1.220)
 
-Latest reference run (id `1784707944`, 48 kHz, 32768-sample buffer, ±6 dBV
+Latest reference run (id `1784710709`, 48 kHz, 32768-sample buffer, ±6 dBV
 input, single −10 dBV stimulus on both targets, passive loopback on both
 channels), after the issue #20 fix (dBV amplitudes with auto-fitted output
-range — the bench no longer compensates anything, so this run also validates
-the `AudioGen` endpoint semantics on hardware).
+range) and the issue #8 fix (the factory DAC trims applied to dBV
+generation — the Level rows now measure the calibrated output directly).
 **23/24 metrics within tolerance.** This table is the parity baseline the
 README links to; re-run the bench and replace it when the numbers move.
 
 | metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |
 |---|---:|---:|---:|---:|:--:|
-| Level @1 kHz L (dBV) | -9.657 | -10.034 | +0.378 | 0.50 | ✅ |
-| Level @1 kHz R (dBV) | -9.593 | -10.026 | +0.433 | 0.50 | ✅ |
-| Balance L−R @1 kHz (dB) | -0.063 | -0.008 | -0.056 | 0.20 | ✅ |
-| Noise floor L (dBV) | -107.280 | -107.644 | +0.364 | 3.00 | ✅ |
-| Noise floor R (dBV) | -107.563 | -106.414 | -1.149 | 3.00 | ✅ |
-| THD @1 kHz L (dB) | -110.750 | -110.674 | -0.076 | 3.00 | ✅ |
-| THD @1 kHz R (dB) | -108.542 | -108.299 | -0.243 | 3.00 | ✅ |
-| THD+N @1 kHz L (dB) | -97.549 | -97.594 | +0.045 | 2.00 | ✅ |
-| SNR @1 kHz L (dB) | 97.762 | 98.364 | -0.602 | 3.00 | ✅ |
-| THD @100 Hz L (dB) | -107.074 | -103.464 | -3.610 | 3.00 | ❌ |
-| THD @6 kHz L (dB) | -111.261 | -111.274 | +0.013 | 3.00 | ✅ |
+| Level @1 kHz L (dBV) | -10.020 | -10.034 | +0.014 | 0.50 | ✅ |
+| Level @1 kHz R (dBV) | -10.013 | -10.026 | +0.014 | 0.50 | ✅ |
+| Balance L−R @1 kHz (dB) | -0.008 | -0.008 | +0.000 | 0.20 | ✅ |
+| Noise floor L (dBV) | -107.325 | -108.293 | +0.968 | 3.00 | ✅ |
+| Noise floor R (dBV) | -107.372 | -108.497 | +1.124 | 3.00 | ✅ |
+| THD @1 kHz L (dB) | -111.741 | -110.476 | -1.265 | 3.00 | ✅ |
+| THD @1 kHz R (dB) | -108.867 | -108.204 | -0.663 | 3.00 | ✅ |
+| THD+N @1 kHz L (dB) | -97.139 | -97.752 | +0.613 | 2.00 | ✅ |
+| SNR @1 kHz L (dB) | 97.292 | 98.513 | -1.221 | 3.00 | ✅ |
+| THD @100 Hz L (dB) | -108.494 | -103.329 | -5.166 | 3.00 | ❌ |
+| THD @6 kHz L (dB) | -111.465 | -109.579 | -1.887 | 3.00 | ✅ |
 | FR dev @20 Hz L (dB) | -0.014 | -0.015 | +0.001 | 0.20 | ✅ |
-| FR dev @30 Hz L (dB) | -0.007 | -0.008 | +0.001 | 0.20 | ✅ |
-| FR dev @50 Hz L (dB) | -0.003 | -0.003 | +0.000 | 0.20 | ✅ |
-| FR dev @100 Hz L (dB) | -0.000 | -0.001 | +0.000 | 0.20 | ✅ |
-| FR dev @200 Hz L (dB) | 0.001 | -0.000 | +0.001 | 0.20 | ✅ |
-| FR dev @500 Hz L (dB) | 0.001 | 0.000 | +0.000 | 0.20 | ✅ |
+| FR dev @30 Hz L (dB) | -0.008 | -0.008 | -0.000 | 0.20 | ✅ |
+| FR dev @50 Hz L (dB) | -0.003 | -0.003 | -0.000 | 0.20 | ✅ |
+| FR dev @100 Hz L (dB) | -0.001 | -0.001 | -0.000 | 0.20 | ✅ |
+| FR dev @200 Hz L (dB) | 0.000 | 0.000 | -0.000 | 0.20 | ✅ |
+| FR dev @500 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
 | FR dev @1000 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
 | FR dev @2000 Hz L (dB) | -0.002 | -0.002 | +0.000 | 0.20 | ✅ |
 | FR dev @5000 Hz L (dB) | -0.016 | -0.016 | +0.000 | 0.20 | ✅ |
 | FR dev @10000 Hz L (dB) | -0.065 | -0.065 | +0.000 | 0.20 | ✅ |
-| FR dev @15000 Hz L (dB) | -0.146 | -0.146 | +0.000 | 0.20 | ✅ |
-| FR dev @20000 Hz L (dB) | -0.258 | -0.258 | +0.000 | 0.20 | ✅ |
-| Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.001 | 0.10 | ✅ |
+| FR dev @15000 Hz L (dB) | -0.146 | -0.146 | -0.000 | 0.20 | ✅ |
+| FR dev @20000 Hz L (dB) | -0.258 | -0.258 | -0.000 | 0.20 | ✅ |
+| Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.000 | 0.10 | ✅ |
 
-Reading: every FR point agrees to ≤ 0.001 dB, THD+N to 0.045 dB, and the
-noise floors to ≤ 1.15 dB. The one remaining failure, THD @ 100 Hz, is
-qa40x-rs reading *lower* (cleaner) than the official app by 3.61 dB for a
-3 dB tolerance: the official app measures through a 5-term flat-top window
-whose wide lobes integrate more of the near-floor energy around each low
-harmonic than our narrow Hann lobes. Offering the official app's analysis
-parameters (window, coherent generator toggle) is tracked as issue #14.
+Reading: absolute level now agrees to **0.014 dB** on both channels (it was
++0.38/+0.43 before the issue #8 fix — exactly the unit's +8 dBV-range DAC
+trims), which also brings the interchannel balance to a dead 0.000 dB Δ;
+every FR point agrees to ≤ 0.001 dB and the noise floors to ≤ 1.13 dB. The
+one remaining failure, THD @ 100 Hz, is qa40x-rs reading *lower* (cleaner)
+than the official app (−5.17 dB this run, −3.61 on the previous baseline —
+the official value itself moves run-to-run): the official app measures
+through a 5-term flat-top window whose wide lobes integrate more of the
+near-floor energy around each low harmonic than our narrow Hann lobes.
+Offering the official app's analysis parameters (window, coherent generator
+toggle) is tracked as issue #14.
 
 ## Findings from the first hardware run (2026-07-21, QA402 fw 60 vs app 1.220)
 
@@ -208,6 +212,11 @@ remarkably well. Three real divergences surfaced:
    floor Δ ≤ 1.7 dB vs the official app on hardware.
 3. **Absolute level**: −9.67 dBV vs −10.04 dBV for the nominally identical
    stimulus (output-range mapping / calibration difference of ≈ 0.36 dB).
+   Root-caused as issue #8 and fixed: the factory DAC trims (−0.363 dB L /
+   −0.419 dB R on this unit's +8 dBV range — exactly the measured Δs) were
+   applied when interpreting levels but not when generating them; the dBV
+   generation paths now pre-compensate the per-channel trim, and the Δ
+   dropped to +0.014 dB (run `1784710709`).
 
 ## Usage
 
