@@ -16,9 +16,9 @@
 //! frequency response 20 Hz–20 kHz, amplitude linearity in 10 dB steps, plus
 //! a saved 1 kHz spectrum snapshot for offline diffing.
 //!
-//! Known API divergence handled here: the generator amplitude is dBFS in
-//! qa40x-rs but dBV in the official app, so each target gets its own
-//! amplitude (defaults: -18 dBFS ≡ -10 dBV with the +8 dBV output range).
+//! Both targets take the generator amplitude in dBV with an auto-fitted
+//! output range (issue #20 aligned qa40x-rs on the official semantics), so a
+//! single --amp drives both — which also A/B-validates that endpoint.
 //!
 //! Run (hardware + VM):  cargo run --example bench_ab
 //! Harness self-test:    cargo run --example bench_ab -- --demo --skip-vm
@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri_app_lib::qa40x::{OutputGain, QA40xDevice};
+use tauri_app_lib::qa40x::QA40xDevice;
 use tauri_app_lib::rest::RestControl;
 use tokio::sync::Mutex;
 
@@ -47,8 +47,7 @@ struct Cli {
     usb_name: String,
     qa40x_exe: String,
     vm_url: Option<String>,
-    host_amp_dbfs: f64,
-    vm_amp_dbv: f64,
+    amp_dbv: f64,
     sample_rate: u32,
     buffer_size: u32,
     out_dir: String,
@@ -68,8 +67,7 @@ impl Default for Cli {
             usb_name: "QA402 Audio Analyzer".into(),
             qa40x_exe: r"C:\Program Files (x86)\QuantAsylum\QA40x\QA40x.exe".into(),
             vm_url: None,
-            host_amp_dbfs: -18.0,
-            vm_amp_dbv: -10.0,
+            amp_dbv: -10.0,
             sample_rate: 48000,
             buffer_size: 32768,
             out_dir: "target/bench-ab".into(),
@@ -100,15 +98,10 @@ fn parse_cli() -> R<Cli> {
             "--usb-name" => cli.usb_name = val("--usb-name")?,
             "--qa40x-exe" => cli.qa40x_exe = val("--qa40x-exe")?,
             "--vm-url" => cli.vm_url = Some(val("--vm-url")?),
-            "--host-amp" => {
-                cli.host_amp_dbfs = val("--host-amp")?
+            "--amp" => {
+                cli.amp_dbv = val("--amp")?
                     .parse()
-                    .map_err(|e| format!("--host-amp: {e}"))?
-            }
-            "--vm-amp" => {
-                cli.vm_amp_dbv = val("--vm-amp")?
-                    .parse()
-                    .map_err(|e| format!("--vm-amp: {e}"))?
+                    .map_err(|e| format!("--amp: {e}"))?
             }
             "--sample-rate" => {
                 cli.sample_rate = val("--sample-rate")?
@@ -155,8 +148,7 @@ USAGE: cargo run --example bench_ab -- [OPTIONS]
   --usb-name NAME    Parallels USB device name (default \"QA402 Audio Analyzer\")
   --qa40x-exe PATH   QA40x.exe path in the guest (default C:\\Program Files (x86)\\QuantAsylum\\QA40x\\QA40x.exe)
   --vm-url URL       override the VM REST base URL (default http://<vm-ip>:9402)
-  --host-amp DBFS    generator amplitude for qa40x-rs, in dBFS (default -18)
-  --vm-amp DBV       generator amplitude for the official app, in dBV (default -10)
+  --amp DBV          generator amplitude for both targets, in dBV (default -10)
   --sample-rate HZ   sample rate for both targets (default 48000)
   --buffer-size N    acquisition buffer for both targets (default 32768)
   --out DIR          report directory (default target/bench-ab)
@@ -326,8 +318,8 @@ struct BatteryResult {
     target: String,
     base_url: String,
     version: String,
-    /// Generator amplitude in the target's native unit (dBFS or dBV).
-    amp_native: f64,
+    /// Generator amplitude in dBV (the unit both targets take since #20).
+    amp_dbv: f64,
     noise_floor_dbv: (f64, f64),
     level_1k_dbv: (f64, f64),
     thd_1k_db: (f64, f64),
@@ -371,8 +363,8 @@ impl BatteryResult {
 }
 
 fn gen_path(on: bool, freq: f64, amp: f64) -> String {
-    // The official app addresses generators as Gen1/Gen2; qa40x-rs ignores
-    // the designator segment, so the official form works on both targets.
+    // Gen1/Gen2 designators are honored identically on both targets; the
+    // amplitude is dBV on both (issue #20).
     let state = if on { "On" } else { "Off" };
     format!("/Settings/AudioGen/Gen1/{state}/{freq}/{amp}")
 }
@@ -380,7 +372,7 @@ fn gen_path(on: bool, freq: f64, amp: f64) -> String {
 async fn run_battery(
     client: &RestClient,
     target: &str,
-    amp_native: f64,
+    amp_dbv: f64,
     cli: &Cli,
     spectrum_out: &str,
 ) -> R<BatteryResult> {
@@ -405,7 +397,7 @@ async fn run_battery(
     client.put("/Settings/Input/Max/6").await?;
 
     // 1) Noise floor, generator off.
-    client.put(&gen_path(false, 1000.0, amp_native)).await?;
+    client.put(&gen_path(false, 1000.0, amp_dbv)).await?;
     client.acquire().await?;
     let noise_floor_dbv = client.lr("/RmsDbv/20/20000").await?;
     println!(
@@ -414,7 +406,7 @@ async fn run_battery(
     );
 
     // 2+3) 1 kHz tone: absolute level, balance, THD, THD+N, SNR — one capture.
-    client.put(&gen_path(true, 1000.0, amp_native)).await?;
+    client.put(&gen_path(true, 1000.0, amp_dbv)).await?;
     client.acquire().await?;
     let level_1k_dbv = client.lr("/RmsDbv/20/20000").await?;
     let thd_1k_db = client.lr("/ThdDb/1000/20000").await?;
@@ -434,10 +426,10 @@ async fn run_battery(
     }
 
     // 4) THD at the band edges: 100 Hz and 6 kHz (harmonics up to 20 kHz).
-    client.put(&gen_path(true, 100.0, amp_native)).await?;
+    client.put(&gen_path(true, 100.0, amp_dbv)).await?;
     client.acquire().await?;
     let thd_100_db = client.lr("/ThdDb/100/20000").await?;
-    client.put(&gen_path(true, 6000.0, amp_native)).await?;
+    client.put(&gen_path(true, 6000.0, amp_dbv)).await?;
     client.acquire().await?;
     let thd_6k_db = client.lr("/ThdDb/6000/20000").await?;
     println!(
@@ -450,7 +442,7 @@ async fn run_battery(
     //    the wideband noise.
     let mut fr_raw = Vec::new();
     for f in FR_FREQS {
-        client.put(&gen_path(true, f, amp_native)).await?;
+        client.put(&gen_path(true, f, amp_dbv)).await?;
         client.acquire().await?;
         // Integer band bounds: the official parser rejects fractional Hz.
         let lo = (f * 0.8).max(10.0).round() as i64;
@@ -483,7 +475,7 @@ async fn run_battery(
     // 6) Amplitude linearity: 1 kHz staircase in 10 dB steps.
     let mut linearity = Vec::new();
     for off in LIN_OFFSETS {
-        let amp = amp_native + off;
+        let amp = amp_dbv + off;
         client.put(&gen_path(true, 1000.0, amp)).await?;
         client.acquire().await?;
         let (l, r) = client.lr("/RmsDbv/900/1100").await?;
@@ -495,13 +487,13 @@ async fn run_battery(
     }
 
     // Leave the generator off so nothing keeps playing between phases.
-    client.put(&gen_path(false, 1000.0, amp_native)).await?;
+    client.put(&gen_path(false, 1000.0, amp_dbv)).await?;
 
     let res = BatteryResult {
         target: target.into(),
         base_url: client.base.clone(),
         version,
-        amp_native,
+        amp_dbv,
         noise_floor_dbv,
         level_1k_dbv,
         thd_1k_db,
@@ -918,8 +910,8 @@ fn render_markdown(
     );
     let _ = writeln!(
         md,
-        "- stimulus: {} dBFS (qa40x-rs, +8 dBV full-scale) vs {} dBV (official) — nominally identical\n",
-        cli.host_amp_dbfs, cli.vm_amp_dbv
+        "- stimulus: {} dBV on both targets (auto-fitted output range)\n",
+        cli.amp_dbv
     );
     for (i, (host, vm)) in rounds.iter().enumerate() {
         let _ = writeln!(md, "## Round {}\n", i + 1);
@@ -1129,16 +1121,10 @@ async fn run(cli: &Cli) -> R<()> {
                         meta.product, meta.serial, meta.firmware_version
                     );
                 }
-                // The REST API has no output-range endpoint and the hardware
-                // powers up on the -12 dBV range; pin +8 dBV full-scale so
-                // --host-amp dBFS maps to dBV as documented (-18 dBFS ≡ -10 dBV).
-                dev.set_output_gain(OutputGain::Gain8dBV)
-                    .await
-                    .map_err(|e| format!("set output gain: {e}"))?;
             }
             let client = RestClient::new(&host_url);
             let spectrum = format!("{}/{}-host-r{}-spectrum.json", cli.out_dir, ts, round);
-            let res = run_battery(&client, "qa40x-rs", cli.host_amp_dbfs, cli, &spectrum).await?;
+            let res = run_battery(&client, "qa40x-rs", cli.amp_dbv, cli, &spectrum).await?;
             device
                 .lock()
                 .await
@@ -1183,7 +1169,7 @@ async fn run(cli: &Cli) -> R<()> {
                 )?;
             }
             let spectrum = format!("{}/{}-vm-r{}-spectrum.json", cli.out_dir, ts, round);
-            let res = match run_battery(&client, "QA40x official", cli.vm_amp_dbv, cli, &spectrum)
+            let res = match run_battery(&client, "QA40x official", cli.amp_dbv, cli, &spectrum)
                 .await
             {
                 Ok(res) => res,
@@ -1199,7 +1185,7 @@ async fn run(cli: &Cli) -> R<()> {
                     if !vm_wait_device(&client, cli).await? {
                         return Err("official app still does not see the QA402 after replug".into());
                     }
-                    run_battery(&client, "QA40x official", cli.vm_amp_dbv, cli, &spectrum).await?
+                    run_battery(&client, "QA40x official", cli.amp_dbv, cli, &spectrum).await?
                 }
             };
             if !cli.keep_vm {
@@ -1221,8 +1207,7 @@ async fn run(cli: &Cli) -> R<()> {
         "run_id": ts,
         "sample_rate": cli.sample_rate,
         "buffer_size": cli.buffer_size,
-        "host_amp_dbfs": cli.host_amp_dbfs,
-        "vm_amp_dbv": cli.vm_amp_dbv,
+        "amp_dbv": cli.amp_dbv,
         "demo": cli.demo,
         "rounds": rounds
             .iter()
@@ -1262,7 +1247,7 @@ mod tests {
             target: target.into(),
             base_url: "http://test".into(),
             version: "1.0".into(),
-            amp_native: -18.0,
+            amp_dbv: -10.0,
             noise_floor_dbv: (-110.0, -110.5),
             level_1k_dbv: (level, level - 0.05),
             thd_1k_db: (-105.0, -104.0),
@@ -1283,22 +1268,22 @@ mod tests {
                 .collect(),
             linearity: vec![
                 LinPoint {
-                    amp: -48.0,
+                    amp: -40.0,
                     left_dbv: level - 30.0,
                     right_dbv: level - 30.0,
                 },
                 LinPoint {
-                    amp: -38.0,
+                    amp: -30.0,
                     left_dbv: level - 20.0,
                     right_dbv: level - 20.0,
                 },
                 LinPoint {
-                    amp: -28.0,
+                    amp: -20.0,
                     left_dbv: level - 10.02,
                     right_dbv: level - 10.0,
                 },
                 LinPoint {
-                    amp: -18.0,
+                    amp: -10.0,
                     left_dbv: level,
                     right_dbv: level,
                 },

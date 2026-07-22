@@ -61,8 +61,8 @@ Per round (`--rounds N` alternates N times, assessing repeatability):
 
 ### The battery (per target)
 
-48 kHz, 32768-sample buffer (≈1.46 Hz bins), ±6 dBV input range, ~-10 dBV
-stimulus:
+48 kHz, 32768-sample buffer (≈1.46 Hz bins), ±6 dBV input range, −10 dBV
+stimulus (`--amp`, dBV on both targets):
 
 | # | Measurement | Endpoint(s) |
 |---|---|---|
@@ -89,65 +89,87 @@ stimulus:
 The process exits non-zero if any metric exceeds its tolerance, so the bench
 can gate a release checklist.
 
-## Known API divergences the bench compensates
+## Known API divergences
 
-- **Generator amplitude unit**: dBFS in qa40x-rs vs **dBV** in the official
-  app. Defaults `--host-amp -18` (dBFS) and `--vm-amp -10` (dBV) are nominally
-  identical because the bench pins the host output range to +8 dBV full-scale
-  (the REST API has no output-range endpoint and the hardware powers up on
-  −12 dBV).
+Since issue #20 the `AudioGen` surface is drop-in compatible: the amplitude
+is **dBV** on both targets, honored by auto-fitting the output range to the
+requested level exactly like the official app (which has no output-range
+endpoint — probed on app 1.22: levels 0…+18 dBV read back within 0.03 dB,
+amplitudes outside **[−120, +18] dBV** get a 400 on both). The range follows
+the *configured* level even with the generator off — On/Off only gates the
+tone; measured on hardware, a gen-off noise floor on the power-up −12 dBV
+range reads ~4 dB above the official app's. The
+`Gen1`/`Gen2` designators address two independent generator slots on both.
+A single `--amp` (dBV) therefore drives both targets — which A/B-validates
+this endpoint's semantics for free.
+
+> **Breaking change for pre-#20 qa40x-rs REST scripts**: through v0.2.2 the
+> qa40x-rs amplitude was interpreted as dBFS relative to the *current* output
+> range's full scale; such scripts must now send dBV (on the +8 dBV range,
+> old dBFS + 8). The Gen designator segment was also ignored back then;
+> unknown designators or states now get a 400 like the official parser.
+
+Remaining divergences are all of the *accepting-more-than-official* kind
+(identical meaning for everything the official parser accepts):
+
 - **HTTP verbs**: the client uses the official verbs (PUT settings, POST
   acquisition, GET readouts); qa40x-rs routes on path only, so both accept them.
 - **Async acquisition**: qa40x-rs acquires synchronously and always reports
   `AcquisitionBusy=False`; the client's poll loop works unchanged on both.
-- **Value shapes**: numbers arrive as JSON numbers (qa40x-rs) or strings
-  (official app); the client accepts both — including comma decimal
-  separators when the guest runs a French (or similar) locale.
+- **Value shapes**: both serialize values as JSON strings, but the official
+  app uses the host locale's decimal separator (comma on a French guest)
+  where qa40x-rs always emits `.`; the client parses both.
 - **HTTP.sys quirks**: body-less PUT/POST get an explicit `Content-Length: 0`
   (411 otherwise), and the Host header is pinned to `localhost:9402` through
   the relay (see above).
-- **Generator designators**: `Gen1`/`Gen2` in the official API (numeric
-  designators get a 400); qa40x-rs ignores the segment, so the official form
-  works on both. Band bounds must be integer Hz for the official parser.
+- **Numeric strictness**: the official parser takes integer Hz and integer dB
+  only (fractional values get a 400) and `Gen1`/`Gen2`/`On`/`Off` exactly;
+  qa40x-rs additionally accepts fractional values, case variants and bare
+  `1`/`2` designators, with the same meaning.
+- **Generator default**: after `/Settings/Default` the official app leaves
+  the generator off; qa40x-rs keeps its historical Gen1-on default (1 kHz,
+  −10 dBV). Scripts should set `AudioGen` explicitly (the bench does).
 
 ## Verified baseline (2026-07-22 — QA402 fw 60 vs official app 1.220)
 
-Latest reference run (id `1784673597`, 48 kHz, 32768-sample buffer, ±6 dBV
-input, −18 dBFS ≡ −10 dBV stimulus, passive loopback on both channels), after
-the issue #7 fix (coherent generator + ENBW-corrected band integration).
+Latest reference run (id `1784707944`, 48 kHz, 32768-sample buffer, ±6 dBV
+input, single −10 dBV stimulus on both targets, passive loopback on both
+channels), after the issue #20 fix (dBV amplitudes with auto-fitted output
+range — the bench no longer compensates anything, so this run also validates
+the `AudioGen` endpoint semantics on hardware).
 **23/24 metrics within tolerance.** This table is the parity baseline the
 README links to; re-run the bench and replace it when the numbers move.
 
 | metric | qa40x-rs (host) | official (VM) | Δ | tol | verdict |
 |---|---:|---:|---:|---:|:--:|
-| Level @1 kHz L (dBV) | -9.658 | -10.036 | +0.378 | 0.50 | ✅ |
-| Level @1 kHz R (dBV) | -9.594 | -10.028 | +0.433 | 0.50 | ✅ |
-| Balance L−R @1 kHz (dB) | -0.064 | -0.008 | -0.056 | 0.20 | ✅ |
-| Noise floor L (dBV) | -107.244 | -107.123 | -0.121 | 3.00 | ✅ |
-| Noise floor R (dBV) | -107.180 | -105.509 | -1.671 | 3.00 | ✅ |
-| THD @1 kHz L (dB) | -110.876 | -110.435 | -0.441 | 3.00 | ✅ |
-| THD @1 kHz R (dB) | -108.209 | -109.052 | +0.843 | 3.00 | ✅ |
-| THD+N @1 kHz L (dB) | -97.376 | -97.379 | +0.004 | 2.00 | ✅ |
-| SNR @1 kHz L (dB) | 97.574 | 98.103 | -0.529 | 3.00 | ✅ |
-| THD @100 Hz L (dB) | -107.343 | -103.960 | -3.383 | 3.00 | ❌ |
-| THD @6 kHz L (dB) | -110.811 | -111.263 | +0.452 | 3.00 | ✅ |
+| Level @1 kHz L (dBV) | -9.657 | -10.034 | +0.378 | 0.50 | ✅ |
+| Level @1 kHz R (dBV) | -9.593 | -10.026 | +0.433 | 0.50 | ✅ |
+| Balance L−R @1 kHz (dB) | -0.063 | -0.008 | -0.056 | 0.20 | ✅ |
+| Noise floor L (dBV) | -107.280 | -107.644 | +0.364 | 3.00 | ✅ |
+| Noise floor R (dBV) | -107.563 | -106.414 | -1.149 | 3.00 | ✅ |
+| THD @1 kHz L (dB) | -110.750 | -110.674 | -0.076 | 3.00 | ✅ |
+| THD @1 kHz R (dB) | -108.542 | -108.299 | -0.243 | 3.00 | ✅ |
+| THD+N @1 kHz L (dB) | -97.549 | -97.594 | +0.045 | 2.00 | ✅ |
+| SNR @1 kHz L (dB) | 97.762 | 98.364 | -0.602 | 3.00 | ✅ |
+| THD @100 Hz L (dB) | -107.074 | -103.464 | -3.610 | 3.00 | ❌ |
+| THD @6 kHz L (dB) | -111.261 | -111.274 | +0.013 | 3.00 | ✅ |
 | FR dev @20 Hz L (dB) | -0.014 | -0.015 | +0.001 | 0.20 | ✅ |
-| FR dev @30 Hz L (dB) | -0.008 | -0.008 | +0.000 | 0.20 | ✅ |
-| FR dev @50 Hz L (dB) | -0.003 | -0.003 | -0.000 | 0.20 | ✅ |
-| FR dev @100 Hz L (dB) | -0.001 | -0.001 | -0.000 | 0.20 | ✅ |
-| FR dev @200 Hz L (dB) | 0.000 | 0.000 | -0.000 | 0.20 | ✅ |
-| FR dev @500 Hz L (dB) | 0.001 | 0.001 | -0.000 | 0.20 | ✅ |
+| FR dev @30 Hz L (dB) | -0.007 | -0.008 | +0.001 | 0.20 | ✅ |
+| FR dev @50 Hz L (dB) | -0.003 | -0.003 | +0.000 | 0.20 | ✅ |
+| FR dev @100 Hz L (dB) | -0.000 | -0.001 | +0.000 | 0.20 | ✅ |
+| FR dev @200 Hz L (dB) | 0.001 | -0.000 | +0.001 | 0.20 | ✅ |
+| FR dev @500 Hz L (dB) | 0.001 | 0.000 | +0.000 | 0.20 | ✅ |
 | FR dev @1000 Hz L (dB) | 0.000 | 0.000 | +0.000 | 0.20 | ✅ |
 | FR dev @2000 Hz L (dB) | -0.002 | -0.002 | +0.000 | 0.20 | ✅ |
 | FR dev @5000 Hz L (dB) | -0.016 | -0.016 | +0.000 | 0.20 | ✅ |
 | FR dev @10000 Hz L (dB) | -0.065 | -0.065 | +0.000 | 0.20 | ✅ |
 | FR dev @15000 Hz L (dB) | -0.146 | -0.146 | +0.000 | 0.20 | ✅ |
-| FR dev @20000 Hz L (dB) | -0.258 | -0.258 | -0.000 | 0.20 | ✅ |
-| Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.000 | 0.10 | ✅ |
+| FR dev @20000 Hz L (dB) | -0.258 | -0.258 | +0.000 | 0.20 | ✅ |
+| Linearity worst 10 dB-step error (dB) | 0.000 | 0.001 | -0.001 | 0.10 | ✅ |
 
-Reading: every FR point now agrees to ≤ 0.001 dB, THD+N to 0.004 dB, and the
-noise floors to ≤ 1.7 dB. The one remaining failure, THD @ 100 Hz, is
-qa40x-rs reading *lower* (cleaner) than the official app by 3.38 dB for a
+Reading: every FR point agrees to ≤ 0.001 dB, THD+N to 0.045 dB, and the
+noise floors to ≤ 1.15 dB. The one remaining failure, THD @ 100 Hz, is
+qa40x-rs reading *lower* (cleaner) than the official app by 3.61 dB for a
 3 dB tolerance: the official app measures through a 5-term flat-top window
 whose wide lobes integrate more of the near-floor energy around each low
 harmonic than our narrow Hann lobes. Offering the official app's analysis

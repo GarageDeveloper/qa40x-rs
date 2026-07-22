@@ -5,6 +5,14 @@
 //! written for the QA40x work against us. Measurements reuse the
 //! already-validated DSP in [`crate::audio`].
 //!
+//! Call signatures, units and value shapes mirror the official API — in
+//! particular `/Settings/AudioGen` amplitudes are **dBV**, honored through an
+//! automatic output-range fit like the official app (issue #20; they were
+//! dBFS through v0.2.2 — a breaking change for scripts that relied on it).
+//! Where the official parser is stricter (integer-only Hz/dB, exact
+//! designators) we accept more forms with the same meaning, never forms that
+//! mean something else.
+//!
 //! Differences from the official app (intentional): we bind `127.0.0.1` by
 //! default and can optionally bind `0.0.0.0` (an explicit opt-in — see
 //! [`bind_ip`]) so it's reachable from another host; network clients must then
@@ -34,34 +42,55 @@ const SESSION_ID: &str = "qa40x-rs";
 type RestError = (u16, String);
 type RestResult = Result<Value, RestError>;
 
-/// The generator settings the REST client configures (via `/Settings/AudioGen`)
-/// and that `/Acquisition` plays.
+/// One generator slot configured via `/Settings/AudioGen/{Gen1|Gen2}` and
+/// played by `/Acquisition`. Amplitude is in **dBV** (RMS), like the official
+/// app — the official API has no output-range endpoint, so the acquisition
+/// auto-fits the output range to the requested level and converts to DAC
+/// full scale there (issue #20; REST amplitudes were dBFS through v0.2.2).
 #[derive(Clone)]
 struct GenConfig {
     on: bool,
-    freq: f32,     // Hz
-    amp_dbfs: f32, // dBFS (relative to DAC full scale)
+    freq: f32,    // Hz
+    amp_dbv: f32, // dBV RMS at the output connectors
 }
 impl Default for GenConfig {
     fn default() -> Self {
-        Self { on: true, freq: 1000.0, amp_dbfs: -6.0 }
+        // The official app's /Settings/Default leaves the generator OFF
+        // (measured on app 1.22, 2026-07-22: an untouched acquisition reads
+        // the loopback noise floor). We keep Gen1 on — the historical
+        // qa40x-rs behavior — as a deliberate divergence; flip it to off if
+        // drop-in scripts ever rely on the official default.
+        Self { on: true, freq: 1000.0, amp_dbv: -10.0 }
     }
 }
+
+/// Amplitude bounds accepted by the official app's AudioGen parser (probed on
+/// app 1.22: −121 and +19 dBV get a 400). Matching them keeps a level request
+/// from ever being silently shifted — the failure mode issue #20 fixed.
+const AMP_DBV_MIN: f32 = -120.0;
+const AMP_DBV_MAX: f32 = 18.0;
 
 /// Shared state for the REST server: the device, the generator config, the
 /// capture size, and the last acquired buffer that measurements read from.
 pub struct RestState {
     device: Arc<Mutex<QA40xDevice>>,
-    gen: Mutex<GenConfig>,
+    /// The two generator slots, `Gen1` and `Gen2` — independent, like the
+    /// official app's; every enabled one plays (summed) on `/Acquisition`.
+    gens: Mutex<[GenConfig; 2]>,
     buffer_size: Mutex<usize>,
     last: Mutex<Option<AudioData>>,
+}
+
+/// Both slots' defaults: Gen1 as [`GenConfig::default`], Gen2 off.
+fn default_gens() -> [GenConfig; 2] {
+    [GenConfig::default(), GenConfig { on: false, ..GenConfig::default() }]
 }
 
 impl RestState {
     pub fn new(device: Arc<Mutex<QA40xDevice>>) -> Self {
         Self {
             device,
-            gen: Mutex::new(GenConfig::default()),
+            gens: Mutex::new(default_gens()),
             buffer_size: Mutex::new(32768),
             last: Mutex::new(None),
         }
@@ -392,20 +421,54 @@ async fn status_connection(state: &RestState) -> RestResult {
 }
 
 async fn acquisition(state: &RestState) -> RestResult {
-    let g = state.gen.lock().await.clone();
+    let gens = state.gens.lock().await.clone();
     let n = (*state.buffer_size.lock().await).max(1024);
     let dev = state.device.lock().await;
-    let sr = dev.get_config().await.sample_rate.as_hz();
-    let tone = if g.on {
-        let amp = 10f32.powf(g.amp_dbfs.clamp(-120.0, 0.0) / 20.0);
-        // Snap the tone onto the FFT bin grid, like the official app does
-        // (its 1 kHz plays at 1000.4883 Hz = bin 683 at 48 kHz/32768 — seen
-        // in the A/B bench spectra). A coherent tone has NO window skirts, so
-        // none of its energy leaks into the THD+N/SNR noise residual; a tone
-        // asked between bins raised those readouts ~12 dB above the official
-        // app on identical hardware (issue #7).
-        SignalGenerator::sine(snap_to_bin(g.freq, sr, n), amp, sr, n)
+    let cfg = dev.get_config().await;
+    let sr = cfg.sample_rate.as_hz();
+    // Official-app semantics (issue #20): the requested dBV is honored by
+    // auto-fitting the output range to the summed peak — the API has no
+    // output-range endpoint, and the hardware powers up on the −12 dBV range
+    // where even the −10 dBV default would not fit. Same {+8, +18} policy as
+    // the GUI mixer (the low ranges have relay-click issues). The fit uses
+    // the CONFIGURED levels of both slots whether on or off — On/Off only
+    // gates the tone: a generator-off noise floor measured on the power-up
+    // −12 dBV range reads ~4 dB above the official app on hardware (its
+    // attenuator follows the set level too), and pinning the range to the
+    // configured level restores the A/B baseline.
+    let peak_volts: f32 = gens.iter().map(|g| 10f32.powf(g.amp_dbv / 20.0)).sum();
+    let range = crate::mixer::auto_output_range(20.0 * peak_volts.log10());
+    if range != cfg.output_gain.as_dbv() {
+        let gain = crate::qa40x::OutputGain::from_dbv(range)
+            .ok_or((500, format!("no output range for {range} dBV")))?;
+        dev.set_output_gain(gain)
+            .await
+            .map_err(|e| (500, format!("set output range: {e}")))?;
+    }
+    let active: Vec<&GenConfig> = gens.iter().filter(|g| g.on).collect();
+    let tone = if !active.is_empty() {
+        let mut sum = vec![0.0f32; n];
+        for g in &active {
+            let amp = dbv_to_dac_amp(g.amp_dbv, range);
+            // Snap each tone onto the FFT bin grid, like the official app
+            // (its 1 kHz plays at 1000.4883 Hz = bin 683 at 48 kHz/32768 —
+            // seen in the A/B bench spectra). A coherent tone has NO window
+            // skirts, so none of its energy leaks into the THD+N/SNR noise
+            // residual; a tone asked between bins raised those readouts
+            // ~12 dB above the official app on identical hardware (issue #7).
+            let t = SignalGenerator::sine(snap_to_bin(g.freq, sr, n), amp, sr, n);
+            for (s, v) in sum.iter_mut().zip(t) {
+                *s += v;
+            }
+        }
+        // Two full-tilt tones can exceed DAC full scale: clamp, never rescale
+        // (the mixer policy — relative levels are the caller's choice).
+        for s in &mut sum {
+            *s = s.clamp(-1.0, 1.0);
+        }
+        sum
     } else {
+        // Generators off: silence (the range fit above still applies).
         vec![0.0f32; n]
     };
     // The official app drives Gen1 on both outputs; match it (the A/B bench
@@ -423,7 +486,7 @@ async fn acquisition(state: &RestState) -> RestResult {
 async fn settings(rest: &[&str], state: &RestState) -> RestResult {
     match rest {
         ["Default"] => {
-            *state.gen.lock().await = GenConfig::default();
+            *state.gens.lock().await = default_gens();
             *state.buffer_size.lock().await = 32768;
             Ok(value("True"))
         }
@@ -456,12 +519,35 @@ async fn settings(rest: &[&str], state: &RestState) -> RestResult {
                 .map_err(|e| (500, e.to_string()))?;
             Ok(value("True"))
         }
-        // Generator: /Settings/AudioGen/{Gen}/{On|Off}/{Hz}/{Amplitude(dBFS)}
-        ["AudioGen", _gen, on, hz, amp] => {
-            let mut g = state.gen.lock().await;
-            g.on = on.eq_ignore_ascii_case("on") || *on == "1";
-            g.freq = num(hz)?;
-            g.amp_dbfs = num(amp)?;
+        // Generator: /Settings/AudioGen/{Gen1|Gen2}/{On|Off}/{Hz}/{Amplitude(dBV)}
+        // — the official call signature and units. Where the official parser
+        // is stricter (integer Hz/dB only), we accept more with the SAME
+        // meaning; everything it rejects with a 400 (unknown designator or
+        // state, out-of-range amplitude) is rejected here too, so a level is
+        // never silently reinterpreted (issue #20).
+        ["AudioGen", gen, on, hz, amp] => {
+            let idx = match gen.to_ascii_lowercase().as_str() {
+                "gen1" | "1" => 0,
+                "gen2" | "2" => 1,
+                _ => return Err((400, format!("bad generator designator: {gen} (Gen1|Gen2)"))),
+            };
+            let on = match on.to_ascii_lowercase().as_str() {
+                "on" | "1" => true,
+                "off" | "0" => false,
+                _ => return Err((400, format!("bad generator state: {on} (On|Off)"))),
+            };
+            let freq = num(hz)?;
+            if !freq.is_finite() || freq <= 0.0 {
+                return Err((400, format!("bad generator frequency: {hz} Hz")));
+            }
+            let amp_dbv = num(amp)?;
+            if !amp_dbv.is_finite() || !(AMP_DBV_MIN..=AMP_DBV_MAX).contains(&amp_dbv) {
+                return Err((
+                    400,
+                    format!("amplitude {amp} dBV out of range [{AMP_DBV_MIN}, {AMP_DBV_MAX}]"),
+                ));
+            }
+            state.gens.lock().await[idx] = GenConfig { on, freq, amp_dbv };
             Ok(value("True"))
         }
         _ => Err((404, format!("unknown /Settings/{}", rest.join("/")))),
@@ -576,6 +662,14 @@ pub(crate) fn analyze_channel(sig: &[f32], sr: u32, fund: f32) -> crate::audio::
 pub(crate) fn spectrum(sig: &[f32], sr: u32) -> crate::audio::FftResult {
     let mut fft = FftProcessor::new();
     fft.process_real_windowed(sig, sr, WindowFunction::Hann)
+}
+
+/// Digital peak amplitude (full-scale = 1.0) of a sine whose RMS at the
+/// output connectors is `dbv`, on the `range_dbv` output range. The range's
+/// dBV is by definition the RMS of a full-scale sine, so the conversion is a
+/// plain level difference: `10^((dBV − range)/20)`.
+fn dbv_to_dac_amp(dbv: f32, range_dbv: i32) -> f32 {
+    10f32.powf((dbv - range_dbv as f32) / 20.0)
 }
 
 /// Round `freq` to the nearest bin of an `n`-point FFT at `sr` Hz, so the
@@ -777,6 +871,76 @@ mod tests {
             .decode(v["Left"].as_str().unwrap())
             .unwrap();
         assert_eq!(bytes.len(), 32768 * 8, "float64 little-endian");
+    }
+
+    #[test]
+    fn dbv_to_dac_amp_is_a_level_difference_to_the_range() {
+        // −10 dBV on the +8 dBV range: 18 dB below full scale.
+        assert!((dbv_to_dac_amp(-10.0, 8) - 0.12589254).abs() < 1e-6);
+        // Full scale exactly at the range's dBV.
+        assert!((dbv_to_dac_amp(18.0, 18) - 1.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn audiogen_honors_the_gen_designator() {
+        let st = state_with_tone().await;
+        dispatch("/Settings/AudioGen/Gen1/On/1000/-10", &st).await.unwrap();
+        dispatch("/Settings/AudioGen/Gen2/On/2000/-20", &st).await.unwrap();
+        let gens = st.gens.lock().await.clone();
+        assert!(gens[0].on && gens[0].freq == 1000.0 && gens[0].amp_dbv == -10.0);
+        assert!(gens[1].on && gens[1].freq == 2000.0 && gens[1].amp_dbv == -20.0);
+        // Gen2 no longer overwrites Gen1 (the pre-#20 single-slot behavior).
+        dispatch("/Settings/AudioGen/gen2/Off/500/-30", &st).await.unwrap();
+        let gens = st.gens.lock().await.clone();
+        assert!(gens[0].on && gens[0].freq == 1000.0, "Gen1 must be untouched");
+        assert!(!gens[1].on && gens[1].freq == 500.0);
+    }
+
+    #[tokio::test]
+    async fn audiogen_rejects_what_the_official_parser_rejects() {
+        // Probed on the official app 1.22 (issue #20): unknown designator,
+        // unknown state, and amplitudes outside [−120, +18] dBV all get 400.
+        let st = state_with_tone().await;
+        for path in [
+            "/Settings/AudioGen/Gen3/On/1000/-10",
+            "/Settings/AudioGen/Gen1/Enabled/1000/-10",
+            "/Settings/AudioGen/Gen1/On/1000/19",
+            "/Settings/AudioGen/Gen1/On/1000/-121",
+            "/Settings/AudioGen/Gen1/On/0/-10",
+        ] {
+            assert_eq!(dispatch(path, &st).await.unwrap_err().0, 400, "{path}");
+        }
+        // In-range settings (including the accepted extra numeric designator)
+        // still pass.
+        dispatch("/Settings/AudioGen/1/On/1000/18", &st).await.unwrap();
+        dispatch("/Settings/AudioGen/Gen1/Off/1000/-120", &st).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn acquisition_honors_dbv_on_the_virtual_device() {
+        // End-to-end against the embedded virtual QA403 (the bench's demo
+        // target): a −10 dBV request must auto-fit the +8 dBV output range
+        // (the device powers up on −12 dBV) and read back ≈ −10 dBV.
+        let device = Arc::new(Mutex::new(QA40xDevice::new()));
+        device.lock().await.connect_virtual().await.expect("virtual connect");
+        let st = Arc::new(RestState::new(device.clone()));
+        dispatch("/Settings/AudioGen/Gen1/On/1000/-10", &st).await.unwrap();
+        dispatch("/Acquisition", &st).await.unwrap();
+        assert_eq!(
+            device.lock().await.get_config().await.output_gain.as_dbv(),
+            8,
+            "output range must auto-fit the requested level"
+        );
+        let v = dispatch("/RmsDbv/900/1100", &st).await.unwrap();
+        let left: f64 = v["Left"].as_str().unwrap().parse().unwrap();
+        assert!((left - (-10.0)).abs() < 0.5, "read {left} dBV for a -10 dBV request");
+
+        // The range fit follows the CONFIGURED level even with the generator
+        // off (On/Off only gates the tone) — a gen-off noise floor on the
+        // power-up −12 dBV range read ~4 dB high on hardware.
+        dispatch("/Settings/AudioGen/Gen1/Off/1000/17", &st).await.unwrap();
+        dispatch("/Acquisition", &st).await.unwrap();
+        assert_eq!(device.lock().await.get_config().await.output_gain.as_dbv(), 18);
     }
 
     #[tokio::test]
