@@ -321,9 +321,10 @@ real QA402 driven by the vendor app:
 2. Pause briefly (the vendor app waits ~100 ms).
 3. Write `I2S_CTRL` (`0x0A`) `= 1` to start.
 4. Stream interleaved stereo sample blocks on bulk EP `0x03`. The device
-   paces its acceptance at the I2S rate — with 16 KiB blocks of 32-bit
-   frames, one completion every ~42.7 ms, i.e. 2048 frames at 48 kHz — which
-   is what flow-controls the host's writer. The vendor app keeps a two-buffer
+   paces its acceptance at the I2S rate — one completion per 2048-frame block
+   every ~42.7 ms (48 kHz) — which is what flow-controls the host's writer.
+   Block size tracks the frame width: 16 KiB in 32-bit mode, 8 KiB in 16-bit
+   (2048 frames × 8 or × 4 bytes). The vendor app keeps a two-buffer
    ping-pong in flight and streams silence when no generator is active.
 5. Write `I2S_CTRL = 0` to stop.
 
