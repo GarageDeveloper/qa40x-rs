@@ -14,12 +14,14 @@ use tauri_app_lib::qa40x::register::{registers, RegisterOps};
 use tauri_app_lib::qa40x::QA40xDevice;
 
 /// Registers to skip in the raw scan because a *read* there has side effects or
-/// is meaningless: bootloader-entry trigger (0x0F), cal-page select (0x0D), and
-/// the cal readout (0x19, which advances an internal page pointer on each read).
+/// is meaningless: bootloader-entry trigger (0x0F), page select (0x0D), and the
+/// sequential readouts (0x19 and 0x14, which advance an internal read pointer
+/// on each read).
 const SKIP: &[u8] = &[
     registers::BOOTLOADER_ENTRY,
-    registers::CAL_PAGE_SELECT,
+    registers::PAGE_SELECT,
     registers::CALIBRATION,
+    registers::TRACE_READ,
 ];
 
 fn u32be(bytes: &[u8]) -> Option<u32> {
