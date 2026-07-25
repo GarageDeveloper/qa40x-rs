@@ -35,8 +35,10 @@ endpoint. Every control exchange is one of two fixed-size transfers:
 - **Read**: send the address with its high bit set (`reg | 0x80`) and a zero
   value, then read the 4-byte reply. (e.g. `0x80` reads register `0x00`.)
 
-Audio streaming uses separate bulk endpoints; only the control bus is
-described here.
+The unit exposes **three bulk endpoint pairs**: the register bus
+(`0x01`/`0x81`), the acquisition stream (`0x02`/`0x82`) and the front-panel
+I2S stream (`0x03`/`0x83`, see §10). Only the control bus is described in
+this section.
 
 ## 2. Register map
 
@@ -50,26 +52,31 @@ register, not necessarily the full hardware capability.
 | `0x06` | OUTPUT_GAIN | W | Output range index (mechanical relay, see §6). |
 | `0x08` | STREAM_CTRL | W | Start/stop an acquisition (see §4). |
 | `0x09` | SAMPLE_RATE | W | Sample-rate **index**, not Hz (e.g. index 0 = 48 kHz, 2 = 192 kHz). |
-| `0x0A` | *(unknown)* | W | Written `= 0` early in every connect. Purpose undocumented; only ever 0. The app replays it to match the device's expected init. *(unknown)* |
-| `0x0D` | CAL_PAGE_SELECT | W | Written before each calibration read burst (see §7). |
+| `0x0A` | I2S_CTRL | W | Front-panel I2S stream start/stop: `1` starts, `0` stops (see §10). The `= 0` every host writes at connect is simply "I2S off". |
+| `0x0B` | I2S_WIDTH | W | Front-panel I2S frame width: `0x00` = 16-bit, `0x40` = 32-bit (see §10). |
+| `0x0D` | PAGE_SELECT | W | Selects what sequential reads walk through: `0x10 + 2*page` = flash page (page 0 = calibration, see §7), `1` = firmware trace buffer (see §11). Each write resets the read pointer. |
 | `0x0F` | BOOTLOADER_ENTRY | W | Two-value unlock that resets the unit into its DFU bootloader for firmware update. **Device-mutating**; never written except during an explicit, confirmed flash. |
 | `0x10` | FIRMWARE_VERSION | R | Firmware build number as a u32 (e.g. `60`). |
 | `0x11` | TELEM_USB_VOLTAGE | R | USB rail voltage, millivolts. |
 | `0x12` | TELEM_USB_CURRENT | R | USB current, milliamps. |
 | `0x13` | TELEM_ISO_CURRENT | R | Isolated-rail current, milliamps. |
-| `0x15` | TELEM_EXTRA | R | Telemetry; purpose not yet decoded. *(unknown)* |
+| `0x14` | TRACE_READ | R | Firmware trace buffer readout, 4 bytes per read (see §11). |
+| `0x15` | TRACE_LEN | R | Byte length of the firmware trace buffer (`0x418` observed) — **not** telemetry, despite sitting in the telemetry range (see §11). |
 | `0x16` | TELEM_TEMPERATURE | R | Temperature in deci-°C (value ÷ 10 = °C). |
 | `0x19` | CALIBRATION | R | Calibration data, read as fixed-size pages (see §7). |
-| `0x1B` | *(capability word?)* | R | Reads a constant feature/capability word. Meaning *(inferred)*, not confirmed. |
+| `0x1B` | CAPABILITY | R | Constant capability/feature word: `0x40000040` on a real QA402, and the vendor app's device-info screen shows the same expected value for a QA403. Bit meaning *(unknown)*. |
+| `0x1C` | CAPABILITY2 | R | Second constant word, differing per model: `0x02A35B03` on a real QA402. The vendor app's device-info screen expects `0x7F31BD30` for a QA403 *(inferred)*. |
 | `0x1D` | SERIAL_NUMBER | R | Unit serial packed as a u32; matches the USB serial string. |
+| `0x1E` | STREAM_STATUS | R | Probed by the vendor app between a stream stop and restart. Semantics beyond that use are not settled. *(inferred)* |
 
 Telemetry decodings (mV / mA / deci-°C) were validated on hardware.
 
 ## 3. Connect sequence and the keepalive
 
 On connect the device expects, in order: one or more keepalive/comm-test
-round-trips on `0x00`, a stream stop (`STREAM_CTRL = 0`), the `0x0A = 0` init
-write, a calibration read burst, and a defined input range + sample rate.
+round-trips on `0x00`, a stream stop (`STREAM_CTRL = 0`), an I2S stop
+(`I2S_CTRL = 0`, see §10), a calibration read burst, and a defined input
+range + sample rate.
 
 While connected, the reference behaviour is a **continuous ~1 s poll loop**:
 write a pattern to `0x00`, read it back, then read the four telemetry
@@ -147,14 +154,20 @@ Two supporting rules:
 
 ## 7. Calibration readout
 
-Calibration is read as fixed-size pages: a `CAL_PAGE_SELECT` write followed by
-a burst of `0x19` reads (512-byte pages). The data is framed as fixed-size
-records with a recurring 16-bit sentinel and a small incrementing counter.
+Calibration is read as fixed-size pages: a `PAGE_SELECT = 0x10` write
+followed by a burst of `0x19` reads (512-byte pages). The data is framed as
+fixed-size records with a recurring 16-bit sentinel and a small incrementing
+counter.
+
+`PAGE_SELECT` is a true selector, not a fixed token: `0x10 + 2*page` selects
+flash page 0..=3, page 0 being the factory calibration page — pages 1..=3
+read as all zeros on a real unit — and every write resets the read pointer,
+so a page can be re-read from the top. (Observed via the vendor app's
+device-info screen, which dumps all four pages.)
 
 *Open:* the byte order of the `0x19` payload (the app reads it little-endian
-while the record framing scans more naturally big-endian) and whether
-`CAL_PAGE_SELECT` is a true page **index** or a fixed "arm readout" token are
-not settled. *(inferred)*
+while the record framing scans more naturally big-endian) is not settled.
+*(inferred)*
 
 ## 8. Output level management
 
@@ -298,15 +311,52 @@ provenance (known-hash registry) and signature, requires explicit
 confirmation, and only then performs the sequence above. See the
 [firmware section of the README](../README.md#firmware-flashing--read-this-first).
 
-## 10. Open questions
+## 10. Front-panel I2S generation
 
-- **`0x0A`** — the register written `= 0` on every connect: purpose unknown.
-- **`0x1B`** — the constant word read at connect: capability/feature bits?
-  Worth comparing across QA402 vs QA403 and firmware versions.
-- **`0x15`** — extra telemetry register, decoding unknown.
-- **Calibration** — byte order of the `0x19` payload; whether
-  `CAL_PAGE_SELECT` indexes multiple pages or is a fixed token; the record
-  layout inside a page.
+The front panel's I2S expansion port has its own stream, on the third bulk
+endpoint pair (`0x03` OUT / `0x83` IN). The whole protocol, observed on a
+real QA402 driven by the vendor app:
+
+1. Write `I2S_WIDTH` (`0x0B`): `0x00` for 16-bit frames, `0x40` for 32-bit.
+2. Pause briefly (the vendor app waits ~100 ms).
+3. Write `I2S_CTRL` (`0x0A`) `= 1` to start.
+4. Stream interleaved stereo sample blocks on bulk EP `0x03`. The device
+   paces its acceptance at the I2S rate — one completion per 2048-frame block
+   every ~42.7 ms (48 kHz) — which is what flow-controls the host's writer.
+   Block size tracks the frame width: 16 KiB in 32-bit mode, 8 KiB in 16-bit
+   (2048 frames × 8 or × 4 bytes). The vendor app keeps a two-buffer
+   ping-pong in flight and streams silence when no generator is active.
+5. Write `I2S_CTRL = 0` to stop.
+
+The I2S stream runs **concurrently** with the acquisition stream: an
+acquisition can start and stop repeatedly while I2S keeps playing. EP `0x83`
+is exposed by the device but was never observed carrying data.
+
+Because the endpoints are independent, a host (or an emulator) must not
+serialize them: register operations — the ~1 Hz keepalive in particular —
+have to keep completing normally while the paced I2S stream is running.
+
+## 11. Flash pages and the firmware trace buffer
+
+`PAGE_SELECT` (`0x0D`) arms sequential readout of two kinds of content:
+
+- **Flash pages** — `0x10 + 2*page` for pages 0..=3, read via `0x19`
+  (512 bytes each, see §7). Page 0 is the factory calibration page; pages
+  1..=3 read as zeros on a real unit.
+- **Firmware trace buffer** — `PAGE_SELECT = 1`, then `TRACE_LEN` (`0x15`)
+  answers its byte length (`0x418` observed) and `TRACE_READ` (`0x14`) serves
+  it 4 bytes per read. A healthy unit's trace reads all zeros. This is what
+  the vendor app's "Query Hardware for Firmware State" button walks through.
+
+## 12. Open questions
+
+- **`0x1B` / `0x1C`** — the constant words read as capability/feature values:
+  bit meaning unknown, and the QA403's `0x1C` value is not yet confirmed on
+  hardware.
+- **Calibration** — byte order of the `0x19` payload; the record layout
+  inside a page.
+- **EP `0x83`** — the I2S IN endpoint: exposed but never seen carrying data;
+  purpose unknown.
 - **Range settle times** — the values in §6 are working figures; the exact
   relay settle and the boundary-crossing cost deserve a dedicated measurement.
 - **Low output ranges** — whether relay clicking observed at the lower output

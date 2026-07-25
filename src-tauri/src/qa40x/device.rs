@@ -417,12 +417,12 @@ impl QA40xDevice {
             self.verify_connection().await?;
         }
 
-        // Replay the vendor's connect-init write (reg 0x0A = 0). The official app
-        // sends this on every connect (confirmed in every USB capture); its purpose
-        // is undocumented and it is only ever 0, so we mirror it verbatim. Best-
-        // effort — an unknown register must not block connecting.
+        // Front-panel I2S off (reg 0x0A = 0), as the official app writes on
+        // every connect — part of putting the unit in a defined state. (This
+        // register was "unknown init" until a USB capture of the app's I2S
+        // feature identified it.) Best-effort — must not block connecting.
         let _ = self
-            .write_register(registers::UNKNOWN_INIT_0A, &0u32.to_be_bytes())
+            .write_register(registers::I2S_CTRL, &0u32.to_be_bytes())
             .await;
 
         // Read device identity: firmware version (register 0x10) + serial. The
@@ -694,7 +694,10 @@ impl QA40xDevice {
         let usb_v = rd(self.read_register(registers::TELEM_USB_VOLTAGE).await?);
         let usb_i = rd(self.read_register(registers::TELEM_USB_CURRENT).await?);
         let iso_i = rd(self.read_register(registers::TELEM_ISO_CURRENT).await?);
-        let extra = rd(self.read_register(registers::TELEM_EXTRA).await?);
+        // Historically polled as a fifth telemetry word; actually the firmware
+        // trace-buffer length (constant 0x418 on a healthy unit). Kept in the
+        // poll so the raw readout stays available.
+        let extra = rd(self.read_register(registers::TRACE_LEN).await?);
         let temp = rd(self.read_register(registers::TELEM_TEMPERATURE).await?);
         Ok(Telemetry {
             usb_voltage_v: usb_v as f32 / 1000.0,
@@ -1007,8 +1010,8 @@ impl QA40xDevice {
     pub async fn read_calibration_page(&self) -> Result<Vec<u8>> {
         info!("Reading calibration page");
 
-        // Select the calibration page.
-        self.write_register(registers::CAL_PAGE_SELECT, &0x10u32.to_be_bytes())
+        // Select flash page 0 (0x10 + 2*page) — the factory calibration page.
+        self.write_register(registers::PAGE_SELECT, &0x10u32.to_be_bytes())
             .await?;
         tokio::time::sleep(Duration::from_millis(10)).await;
 
