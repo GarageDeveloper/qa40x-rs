@@ -16,6 +16,7 @@ import { moveTile, setPattern } from "../../store/actions/layout";
 import { visibleTiles } from "../../store/selectors/layout";
 import {
   resetAveraging,
+  resetMeasureStats,
   setAveraging,
   setPeakHold,
   setWindow,
@@ -124,6 +125,18 @@ export function mountGridPanel(
     },
     "↺"
   );
+  const statsResetBtn = el(
+    "button.btn",
+    {
+      "data-testid": "btn-stats-reset",
+      title:
+        "Reset stats: restart the scope-measure sliding statistics " +
+        "(avg/min/max/σ on the chip tooltips, all endpoints) — after " +
+        "retuning the signal, instead of waiting for the window to purge",
+      onclick: () => resetMeasureStats(store, ipc),
+    },
+    "σ↺"
+  );
 
   const gridHost = el("div.grid", { "data-testid": "graph-grid" });
 
@@ -142,7 +155,8 @@ export function mountGridPanel(
         avgSel,
         cohBtn,
         pkBtn,
-        avgResetBtn
+        avgResetBtn,
+        statsResetBtn
       ),
       gridHost
     )

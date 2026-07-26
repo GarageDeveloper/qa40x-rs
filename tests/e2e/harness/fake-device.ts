@@ -471,6 +471,11 @@ export class FakeDevice {
         // The fake has no averaging accumulator — accepting the command is
         // the contract (the real backend empties its analyzers).
         return null;
+      case "stream_reset_measure_stats":
+        // Mirrors the real backend's stats_reset consume: every endpoint's
+        // sliding windows drop, the next frame starts the new history.
+        this.measureStats = {};
+        return null;
       case "sweep_stop":
         // The fake's sweeps are instantaneous — accepting the command is the
         // contract (the real backend aborts its batched capture).

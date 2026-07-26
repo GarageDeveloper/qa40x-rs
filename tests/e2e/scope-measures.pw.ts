@@ -115,3 +115,43 @@ test("sliding stats accumulate on the chip tooltip (avg/min/max/σ/n)", async ({
   expect(avg).not.toBeNull();
   expect(Math.abs(parseFloat(avg![1]) - PLAYED_HZ)).toBeLessThan(0.05);
 });
+
+test("Reset stats (σ↺) drops the window instead of purging over 100 frames", async ({ app }) => {
+  const id = await app.addSine();
+  await app.setSelect("tile-chip-add-tile-2", "freq");
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+  await expect
+    .poll(
+      async () => {
+        const m = /n=(\d+)/.exec(await app.tileChipTitle("tile-2", "freq"));
+        return m ? Number(m[1]) : 0;
+      },
+      { timeout: 15_000 }
+    )
+    .toBeGreaterThanOrEqual(3);
+
+  // Retune 1 kHz → 2 kHz (bin-snapped 1999.512): the sliding window now
+  // mixes both tones — `min` legitimately stays at the OLD frequency…
+  const RETUNED_HZ = (Math.round((2000 * 32768) / 48000) * 48000) / 32768;
+  await app.setSineFrequency(id, 2000);
+  await expect
+    .poll(async () => parseFloat((await app.tileChips("tile-2"))["freq"]), { timeout: 10_000 })
+    .toBeGreaterThan(1900);
+  const mixed = await app.tileChipTitle("tile-2", "freq");
+  expect(parseFloat(/min ([\d.]+) Hz/.exec(mixed)![1])).toBeLessThan(1500);
+
+  // …until σ↺ drops it: the very next history describes only the new tone.
+  await app.drv.click('[data-testid="btn-stats-reset"]');
+  await expect
+    .poll(
+      async () => {
+        const m = /min ([\d.]+) Hz/.exec(await app.tileChipTitle("tile-2", "freq"));
+        return m ? parseFloat(m[1]) : 0;
+      },
+      { timeout: 10_000 }
+    )
+    .toBeGreaterThan(1900);
+  const fresh = await app.tileChipTitle("tile-2", "freq");
+  expect(Math.abs(parseFloat(/avg ([\d.]+) Hz/.exec(fresh)![1]) - RETUNED_HZ)).toBeLessThan(0.05);
+});

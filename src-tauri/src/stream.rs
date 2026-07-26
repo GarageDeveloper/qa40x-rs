@@ -528,6 +528,11 @@ pub struct StreamControl {
     /// the top of the next frame — commands never touch the analyzers
     /// directly (they live in the loop task).
     avg_reset: Arc<AtomicBool>,
+    /// One-shot request to drop every measurement-stats window (all four
+    /// endpoints) — the user's "Reset stats" after retuning the signal,
+    /// without waiting for the sliding window to purge. Same
+    /// command-to-loop contract as `avg_reset`.
+    stats_reset: Arc<AtomicBool>,
 }
 
 impl StreamControl {
@@ -561,6 +566,7 @@ impl StreamControl {
                 measures: MeasureRequest::default(),
             })),
             avg_reset: Arc::new(AtomicBool::new(false)),
+            stats_reset: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -569,6 +575,13 @@ impl StreamControl {
     /// fresh with each loop anyway.
     pub fn reset_averaging(&self) {
         self.avg_reset.store(true, Ordering::SeqCst);
+    }
+
+    /// Ask the loop to drop every measurement-stats window (all four
+    /// endpoints) at the next frame — same no-op-when-idle contract as
+    /// [`Self::reset_averaging`].
+    pub fn reset_measure_stats(&self) {
+        self.stats_reset.store(true, Ordering::SeqCst);
     }
 
     pub fn is_running(&self) -> bool {
@@ -1330,6 +1343,12 @@ async fn run_stream_loop(
             .await
             .map_err(|e| format!("analysis task failed: {e}"))??
         };
+        // A "Reset stats" click drops every window before this frame's
+        // readings land, so the emitted frame already starts the new
+        // history (the avg_reset consume-late pattern).
+        if ctl.stats_reset.swap(false, Ordering::SeqCst) {
+            measure_states = MeasureStates::default();
+        }
         measure_states.sync_acquisition(config.buffer_size, sample_rate);
         let measures = measure_states.ingest(&scope_values);
         clip_in.report(analysis.input_peak >= input_clip_threshold, now_ms());
