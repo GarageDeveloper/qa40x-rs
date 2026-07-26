@@ -652,6 +652,23 @@ function drawDbYAxis(
   ctx.fillText(unit, plot.x + 7, plot.y + 6);
 }
 
+/**
+ * X-axis unit tag, top-right corner of the plot — mirrors `drawDbYAxis`'s
+ * top-left Y-unit tag ("dB"/"%"). Used ONLY for wow & flutter's "rateHz" axis
+ * (issue #28 review): a THD/FR sweep's 20 Hz–20 kHz log axis is unambiguous
+ * by long-standing convention, but a 0.5–200 Hz log axis of MODULATION rate
+ * looks identical to a zoomed-in audio-frequency axis with no cue otherwise —
+ * the tile's numbers alone don't say what unit they're in. "frequency" and
+ * "level" modes never call this (unchanged, deliberately).
+ */
+function drawXUnitTag(ctx: CanvasRenderingContext2D, plot: Rect, unit: string): void {
+  ctx.font = TICK_FONT;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = T.inkMuted;
+  ctx.fillText(unit, plot.x + plot.w - 7, plot.y + 6);
+}
+
 function drawFrame(ctx: CanvasRenderingContext2D, plot: Rect): void {
   ctx.strokeStyle = T.axis;
   ctx.lineWidth = 1;
@@ -1554,6 +1571,9 @@ export class FrequencyResponseChart extends InteractiveLogChart {
       drawLogXAxis(ctx, plot, Math.pow(10, this.logMin), Math.pow(10, this.logMax), this.xOf);
     }
     drawDbYAxis(ctx, plot, this.yMin, this.yMax, step, this.yOf, this.yUnit);
+    // "rateHz" only (issue #28 review) — see drawXUnitTag's doc comment for why
+    // "frequency" and "level" don't get one.
+    if (this.xKind === "rateHz") drawXUnitTag(ctx, plot, "Hz");
 
     // Phase axis (right, fixed -180..180 in 90 degree steps).
     if (this.showPhase) {

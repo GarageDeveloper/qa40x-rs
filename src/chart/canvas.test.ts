@@ -24,12 +24,17 @@ import { FrequencyResponseChart, type FrequencyResponseData } from "./canvas";
  * `measureText` returns a zero-width metric — enough for the chart's
  * drawing code to run to completion without a real <canvas> backend
  * (jsdom's `getContext("2d")` returns null). */
-function makeFakeCtx(): CanvasRenderingContext2D {
+function makeFakeCtx(fillTextLog?: string[]): CanvasRenderingContext2D {
   const store: Record<string, unknown> = {};
   const handler: ProxyHandler<object> = {
     get(_t, prop) {
       if (prop === "measureText") return () => ({ width: 0 });
-      if (prop === "createLinearGradient") return () => makeFakeCtx();
+      if (prop === "createLinearGradient") return () => makeFakeCtx(fillTextLog);
+      if (prop === "fillText") {
+        return (text: string) => {
+          fillTextLog?.push(text);
+        };
+      }
       if (prop in store) return store[prop as string];
       return () => undefined;
     },
@@ -94,6 +99,19 @@ function buildChart(): FrequencyResponseChart {
   return new FrequencyResponseChart(container);
 }
 
+/** Same as `buildChart`, but every `fillText` call the chart makes lands in
+ * the returned array — used to pin the "rateHz"-only X-axis unit tag below
+ * without depending on canvas pixel output. */
+function buildChartWithFillTextLog(): { chart: FrequencyResponseChart; fillTextLog: string[] } {
+  const fillTextLog: string[] = [];
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    () => makeFakeCtx(fillTextLog) as unknown as RenderingContext
+  );
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  return { chart: new FrequencyResponseChart(container), fillTextLog };
+}
+
 describe("FrequencyResponseChart x-axis floor (issue #28 second-pass review findings #3/#7)", () => {
   it("rateHz keeps a 0.5 Hz bin — below the frequency-mode floor — INSIDE the plotted extent", () => {
     const chart = buildChart();
@@ -125,5 +143,42 @@ describe("FrequencyResponseChart x-axis floor (issue #28 second-pass review find
 
     const fullLogMin = (chart as unknown as { fullLogMin: number }).fullLogMin;
     expect(fullLogMin).toBeCloseTo(Math.log10(1), 6);
+  });
+});
+
+/**
+ * "rateHz" is the only X-axis kind whose unit isn't already implied by
+ * established convention (a 20 Hz–20 kHz sweep reads as Hz on sight; a
+ * 0.5–200 Hz modulation-rate axis does not — user report on the wow &
+ * flutter tile). This pins that the chart draws an explicit "Hz" tag in
+ * that mode ONLY — "frequency" and "level" must render byte-for-byte as
+ * before (no new fillText calls, no layout change).
+ */
+describe("FrequencyResponseChart X-axis unit tag (issue #28 review — rateHz ambiguity)", () => {
+  it('draws a "Hz" tag when xKind is "rateHz"', () => {
+    const { chart, fillTextLog } = buildChartWithFillTextLog();
+    chart.setXKind("rateHz");
+    chart.setData(makeData([0.5, 1, 2, 4, 8]), "Left");
+    chart.relayout();
+
+    expect(fillTextLog).toContain("Hz");
+  });
+
+  it('does NOT draw a "Hz" tag in "frequency" mode (default xKind, unchanged)', () => {
+    const { chart, fillTextLog } = buildChartWithFillTextLog();
+    // xKind defaults to "frequency" — no setXKind call.
+    chart.setData(makeData([20, 100, 1000, 10000]), "Left");
+    chart.relayout();
+
+    expect(fillTextLog).not.toContain("Hz");
+  });
+
+  it('does NOT draw a "Hz" tag in "level" mode (THD-vs-level, issue #27, unchanged)', () => {
+    const { chart, fillTextLog } = buildChartWithFillTextLog();
+    chart.setXKind("level");
+    chart.setData(makeData([-60, -40, -20, 0]), "Left");
+    chart.relayout();
+
+    expect(fillTextLog).not.toContain("Hz");
   });
 });
