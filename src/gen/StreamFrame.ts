@@ -7,6 +7,7 @@ import type { SpectraMsg } from "./SpectraMsg";
 import type { StereoFrame } from "./StereoFrame";
 import type { StreamMetrics } from "./StreamMetrics";
 import type { StreamStats } from "./StreamStats";
+import type { TriggerMsg } from "./TriggerMsg";
 
 /**
  * One pushed frame. `captured` and `stimulus` are digital full-scale buffers
@@ -20,7 +21,12 @@ seq: number, captured: AudioData,
 /**
  * The summed stimulus actually sent this frame (`None` in monitor mode).
  */
-stimulus: StereoFrame | null, spectra: SpectraMsg, metrics: StreamMetrics, mix: MixStatus, offsets: LevelOffsetsDb, stats: StreamStats, 
+stimulus: StereoFrame | null, spectra: SpectraMsg, metrics: StreamMetrics, 
+/**
+ * Alignment-only scope trigger result (module doc: never gates
+ * `captured`/`spectra`/`metrics` above).
+ */
+trigger: TriggerMsg, mix: MixStatus, offsets: LevelOffsetsDb, stats: StreamStats, 
 /**
  * Per-slot source errors (bad script, unknown waveform…) — named, never
  * wholesale: the rest of the mix keeps playing.

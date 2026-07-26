@@ -120,6 +120,62 @@ pub struct SpectraRequest {
     pub output_r: bool,
 }
 
+/// Trigger run mode. `Auto` reports a fallback alignment (at `pre_samples`)
+/// when nothing crosses; `Normal` holds the last triggered picture; `Single` is a
+/// latch — the loop stops reporting new alignments for that endpoint after
+/// one shot, until re-armed (`arm_epoch` bumped).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum TriggerMode {
+    Auto,
+    Normal,
+    Single,
+}
+
+/// Edge polarity to trigger on (mirrors [`crate::audio::trigger::Edge`],
+/// mapped in `evaluate_trigger` the way `StreamWindow::to_window_function()`
+/// maps windows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum TriggerEdge {
+    Rising,
+    Falling,
+}
+
+/// Per-endpoint trigger settings. Level/hysteresis are in level-VOLTS of the
+/// endpoint's own converter (signed); the loop converts them to that frame's
+/// FS domain via the frame's own [`LevelOffsetsDb`] entry, the same B-3
+/// per-frame-converter discipline as everything else on this wire.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TriggerConfig {
+    pub mode: TriggerMode,
+    pub edge: TriggerEdge,
+    /// Level in level-volts of the endpoint's OWN converter (signed).
+    pub level_v: f32,
+    /// `None` = auto: 2 % of this frame's own peak, floored at 1e-4 FS.
+    pub hysteresis_v: Option<f32>,
+    /// Pre-trigger depth the display needs; the search starts there.
+    pub pre_samples: u32,
+    /// Bumped by the UI to re-arm a `Single` shot (idempotent: only a
+    /// strictly larger value re-arms).
+    pub arm_epoch: u32,
+}
+
+/// Which endpoints are triggered this frame, and how — the `SpectraRequest`
+/// pattern. `None` = that endpoint isn't triggered (the loop skips the scan
+/// entirely, same "only pay for what's requested" rule as spectra).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TriggerRequest {
+    pub input_l: Option<TriggerConfig>,
+    pub input_r: Option<TriggerConfig>,
+    pub output_l: Option<TriggerConfig>,
+    pub output_r: Option<TriggerConfig>,
+}
+
 /// The stream loop's configuration. `stream_update` swaps it atomically; the
 /// loop reads a fresh snapshot every frame.
 #[derive(Clone, Debug, Deserialize, ts_rs::TS)]
@@ -135,6 +191,15 @@ pub struct StreamConfig {
     pub spectra: SpectraRequest,
     /// Fixed output range in dBV, or `None` = auto-fit to the summed peak.
     pub output_range_dbv: Option<i32>,
+    /// Per-endpoint scope trigger. Absent from an older/minimal client's
+    /// JSON = no triggers (byte-identical old behavior). `#[ts(as/optional)]`
+    /// exports this as `triggers?: TriggerRequest` — the Rust side stays a
+    /// plain (non-`Option`) `TriggerRequest` with `#[serde(default)]`, so
+    /// `config.triggers.*` field access below never needs an `Option` layer;
+    /// only the wire TYPE needs to tell the frontend the key is optional.
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub triggers: TriggerRequest,
 }
 
 /// One stereo digital-full-scale buffer (the summed stimulus actually sent).
@@ -188,6 +253,49 @@ pub struct StreamMetrics {
     pub harmonics_r: Option<Vec<HarmonicMark>>,
 }
 
+/// Result state of one endpoint's trigger evaluation this frame.
+/// `Triggered` = a qualified edge was found (see `index`/`frac`); `Auto` =
+/// none found but `TriggerMode::Auto` reports a fallback picture anyway;
+/// `Waiting` = `Normal`/`Single` found nothing — the frontend holds its last
+/// picture; `Stopped` = a `Single` shot already fired and hasn't been
+/// re-armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum TriggerState {
+    Triggered,
+    Auto,
+    Waiting,
+    Stopped,
+}
+
+/// One endpoint's trigger alignment for this frame — metadata only, never
+/// gates or reorders `captured`/`spectra`/`metrics` (see the module doc).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TriggerAlign {
+    pub state: TriggerState,
+    /// Trigger point: first sample at/after the crossing, in THIS frame's
+    /// emitted (mid-sliced) buffer.
+    pub index: u32,
+    /// Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`.
+    pub frac: f32,
+    /// The threshold actually compared, in this frame's FS domain.
+    pub level_fs: f32,
+    pub hysteresis_fs: f32,
+}
+
+/// Per-endpoint trigger alignment for the frame — the `SpectraMsg` pattern.
+/// An endpoint the config didn't request is `None`.
+#[derive(Clone, Copy, Debug, Default, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TriggerMsg {
+    pub input_l: Option<TriggerAlign>,
+    pub input_r: Option<TriggerAlign>,
+    pub output_l: Option<TriggerAlign>,
+    pub output_r: Option<TriggerAlign>,
+}
+
 /// Captured-input level state, judged backend-side from the frame's peak
 /// (latched ~100 ms like the clip dots so transients stay visible):
 /// `Near` = within 1 dB of full scale (measurements start degrading),
@@ -238,6 +346,9 @@ pub struct StreamFrame {
     pub stimulus: Option<StereoFrame>,
     pub spectra: SpectraMsg,
     pub metrics: StreamMetrics,
+    /// Alignment-only scope trigger result (module doc: never gates
+    /// `captured`/`spectra`/`metrics` above).
+    pub trigger: TriggerMsg,
     pub mix: MixStatus,
     pub offsets: LevelOffsetsDb,
     pub stats: StreamStats,
@@ -262,6 +373,29 @@ pub enum StreamMsg {
 /* Control                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/// One endpoint's trigger config, checked against the frame size it will
+/// scan. Same error-string style as [`validate_config`].
+fn validate_trigger_config(cfg: &TriggerConfig, buffer_size: u32) -> Result<(), String> {
+    let half = buffer_size / 2;
+    if cfg.pre_samples > half {
+        return Err(format!(
+            "stream: trigger pre_samples {} exceeds buffer_size/2 ({half})",
+            cfg.pre_samples
+        ));
+    }
+    if !cfg.level_v.is_finite() {
+        return Err(format!("stream: trigger level_v not finite ({})", cfg.level_v));
+    }
+    if let Some(h) = cfg.hysteresis_v {
+        if !h.is_finite() || h < 0.0 {
+            return Err(format!(
+                "stream: trigger hysteresis_v must be finite and >= 0, got {h}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_config(config: &StreamConfig) -> Result<(), String> {
     let n = config.buffer_size;
     if !(4096..=1_048_576).contains(&n) || !n.is_power_of_two() {
@@ -273,6 +407,17 @@ fn validate_config(config: &StreamConfig) -> Result<(), String> {
         if OutputGain::from_dbv(r).is_none() {
             return Err(format!("stream: invalid output range {r} dBV"));
         }
+    }
+    for cfg in [
+        config.triggers.input_l,
+        config.triggers.input_r,
+        config.triggers.output_l,
+        config.triggers.output_r,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_trigger_config(&cfg, n)?;
     }
     Ok(())
 }
@@ -330,6 +475,7 @@ impl StreamControl {
                     output_r: false,
                 },
                 output_range_dbv: None,
+                triggers: TriggerRequest::default(),
             })),
             avg_reset: Arc::new(AtomicBool::new(false)),
         }
@@ -468,6 +614,100 @@ impl Analyzers {
     }
 }
 
+/// One endpoint's loop-owned trigger latch — mirrors [`Analyzers`]'s
+/// per-channel-not-per-device shape (issue #25: keyed per endpoint, never
+/// "the device"). `armed_epoch` tracks the last `arm_epoch` seen so a UI
+/// re-arm (idempotent bump) can be told apart from a config no-op;
+/// `fired` is the `Single`-mode latch.
+#[derive(Default)]
+struct EndpointTrigger {
+    armed_epoch: u32,
+    fired: bool,
+}
+
+/// The four endpoints' trigger latches — one per endpoint, like
+/// [`Analyzers`], never a single shared latch (multi-device / multi-endpoint
+/// discipline, issue #25).
+#[derive(Default)]
+struct TriggerStates {
+    input_l: EndpointTrigger,
+    input_r: EndpointTrigger,
+    output_l: EndpointTrigger,
+    output_r: EndpointTrigger,
+}
+
+/// Evaluate one endpoint's trigger against its already-emitted buffer.
+/// READS `samples` only — never mutates or reorders it, never influences
+/// what `analyze_frame` sees (module doc). `offset_db` is that endpoint's
+/// OWN [`LevelOffsetsDb`] entry for THIS frame (B-3: never a stale or wrong
+/// converter's reference).
+fn evaluate_trigger(
+    cfg: &TriggerConfig,
+    st: &mut EndpointTrigger,
+    samples: &[f32],
+    offset_db: f32,
+) -> TriggerAlign {
+    // Volts (the wire unit) -> this frame's FS domain, via the SAME
+    // per-converter offset the frame's own trace uses to go the other way.
+    let to_fs = 10f32.powf(-offset_db / 20.0);
+    let level_fs = cfg.level_v * to_fs;
+    let hysteresis_fs = cfg
+        .hysteresis_v
+        .map(|v| v * to_fs)
+        .unwrap_or_else(|| crate::audio::auto_hysteresis(samples, 0.02, 1e-4));
+
+    // A strictly larger arm_epoch re-arms a Single latch (idempotent: the
+    // same or a smaller value is a no-op, so a replayed/duplicate config
+    // update never re-fires a shot).
+    if cfg.arm_epoch > st.armed_epoch {
+        st.armed_epoch = cfg.arm_epoch;
+        st.fired = false;
+    }
+
+    if cfg.mode == TriggerMode::Single && st.fired {
+        return TriggerAlign {
+            state: TriggerState::Stopped,
+            index: 0,
+            frac: 0.0,
+            level_fs,
+            hysteresis_fs,
+        };
+    }
+
+    let edge = match cfg.edge {
+        TriggerEdge::Rising => crate::audio::Edge::Rising,
+        TriggerEdge::Falling => crate::audio::Edge::Falling,
+    };
+    let pre = cfg.pre_samples as usize;
+    match crate::audio::find_edge(samples, level_fs, hysteresis_fs, edge, pre) {
+        Some(hit) => {
+            if cfg.mode == TriggerMode::Single {
+                st.fired = true;
+            }
+            TriggerAlign {
+                state: TriggerState::Triggered,
+                index: hit.index as u32,
+                frac: hit.frac,
+                level_fs,
+                hysteresis_fs,
+            }
+        }
+        None => {
+            let state = match cfg.mode {
+                TriggerMode::Auto => TriggerState::Auto,
+                TriggerMode::Normal | TriggerMode::Single => TriggerState::Waiting,
+            };
+            TriggerAlign {
+                state,
+                index: cfg.pre_samples,
+                frac: 0.0,
+                level_fs,
+                hysteresis_fs,
+            }
+        }
+    }
+}
+
 /// Everything the per-frame blocking analysis step produces.
 struct AnalysisOut {
     spectra: SpectraMsg,
@@ -594,6 +834,7 @@ async fn run_stream_loop(
     let mut clip_in = ClipLatch::default();
     let mut near_in = ClipLatch::default();
     let mut clip_out = ClipLatch::default();
+    let mut trigger_states = TriggerStates::default();
     let mut last_slots_key = String::new();
     let mut last_averaging: Option<StreamAveraging> = None;
     let mut seq: u64 = 0;
@@ -777,6 +1018,30 @@ async fn run_stream_loop(
             }
         };
 
+        // ---- Trigger alignment (reads the emitted buffers only — never
+        // feeds analyze_frame below; see the module doc) ----
+        // One linear scan per REQUESTED endpoint (≤4), cheap relative to the
+        // FFTs, so it runs inline rather than adding another spawn_blocking
+        // round trip.
+        let trigger = TriggerMsg {
+            input_l: config.triggers.input_l.as_ref().map(|cfg| {
+                evaluate_trigger(cfg, &mut trigger_states.input_l, &captured.left_channel, offsets.input_l)
+            }),
+            input_r: config.triggers.input_r.as_ref().map(|cfg| {
+                evaluate_trigger(cfg, &mut trigger_states.input_r, &captured.right_channel, offsets.input_r)
+            }),
+            output_l: config.triggers.output_l.as_ref().and_then(|cfg| {
+                stimulus
+                    .as_ref()
+                    .map(|s| evaluate_trigger(cfg, &mut trigger_states.output_l, &s.left, offsets.output_l))
+            }),
+            output_r: config.triggers.output_r.as_ref().and_then(|cfg| {
+                stimulus
+                    .as_ref()
+                    .map(|s| evaluate_trigger(cfg, &mut trigger_states.output_r, &s.right, offsets.output_r))
+            }),
+        };
+
         // ---- Spectra + input peak (CPU-heavy → blocking thread) ----
         // Consume a reset that landed DURING this frame's capture, so the
         // analysis below already starts a fresh averaging window — the frame
@@ -817,6 +1082,7 @@ async fn run_stream_loop(
             stimulus,
             spectra: analysis.spectra,
             metrics: analysis.metrics,
+            trigger,
             mix: MixStatus {
                 sigma_peak_dbv,
                 clip_input: if clip_in.is_lit(now_ms()) {
@@ -846,5 +1112,164 @@ async fn run_stream_loop(
             ))
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_trigger_cfg() -> TriggerConfig {
+        TriggerConfig {
+            mode: TriggerMode::Auto,
+            edge: TriggerEdge::Rising,
+            level_v: 0.0,
+            hysteresis_v: Some(0.1),
+            pre_samples: 10,
+            arm_epoch: 0,
+        }
+    }
+
+    /// A signal with no rising crossing of level 0 at all (constant negative).
+    fn no_edge_samples() -> Vec<f32> {
+        vec![-1.0f32; 200]
+    }
+
+    /// A signal with one clean, well-qualified rising edge through level 0.
+    fn one_edge_samples() -> Vec<f32> {
+        let mut s = vec![-1.0f32; 50];
+        s.extend((0..50).map(|i| -1.0 + 2.0 * i as f32 / 49.0));
+        s.extend(vec![1.0f32; 50]);
+        s
+    }
+
+    /// 9a. AUTO, no edge -> Auto with index == pre_samples.
+    #[test]
+    fn evaluate_trigger_auto_no_edge_reports_auto_at_pre_samples() {
+        let cfg = TriggerConfig { mode: TriggerMode::Auto, pre_samples: 10, ..default_trigger_cfg() };
+        let mut st = EndpointTrigger::default();
+        let align = evaluate_trigger(&cfg, &mut st, &no_edge_samples(), 0.0);
+        assert_eq!(align.state, TriggerState::Auto);
+        assert_eq!(align.index, 10);
+    }
+
+    /// 9b. NORMAL, no edge -> Waiting.
+    #[test]
+    fn evaluate_trigger_normal_no_edge_waits() {
+        let cfg = TriggerConfig { mode: TriggerMode::Normal, ..default_trigger_cfg() };
+        let mut st = EndpointTrigger::default();
+        let align = evaluate_trigger(&cfg, &mut st, &no_edge_samples(), 0.0);
+        assert_eq!(align.state, TriggerState::Waiting);
+    }
+
+    /// 9c. SINGLE: fires once, then Stopped without re-arming, then
+    /// Triggered again once arm_epoch is bumped.
+    #[test]
+    fn evaluate_trigger_single_latches_then_rearms() {
+        let mut cfg = TriggerConfig {
+            mode: TriggerMode::Single,
+            pre_samples: 0,
+            arm_epoch: 1,
+            ..default_trigger_cfg()
+        };
+        let mut st = EndpointTrigger::default();
+        let samples = one_edge_samples();
+
+        let first = evaluate_trigger(&cfg, &mut st, &samples, 0.0);
+        assert_eq!(first.state, TriggerState::Triggered);
+
+        let second = evaluate_trigger(&cfg, &mut st, &samples, 0.0);
+        assert_eq!(second.state, TriggerState::Stopped);
+
+        cfg.arm_epoch += 1;
+        let third = evaluate_trigger(&cfg, &mut st, &samples, 0.0);
+        assert_eq!(third.state, TriggerState::Triggered);
+    }
+
+    /// Test 10 — Volts -> FS conversion uses the frame's own offset; hysteresis
+    /// `None` falls back to the pinned auto value (2 % of frame peak).
+    #[test]
+    fn evaluate_trigger_converts_volts_to_fs() {
+        // 10^(-offset/20) == 0.5 exactly for offset = 20*log10(2).
+        let offset_db = 20.0 * 2f32.log10();
+        let cfg = TriggerConfig {
+            level_v: 0.5,
+            hysteresis_v: None,
+            ..default_trigger_cfg()
+        };
+        let mut st = EndpointTrigger::default();
+        let samples = vec![1.0f32; 100]; // peak exactly 1.0
+        let align = evaluate_trigger(&cfg, &mut st, &samples, offset_db);
+        assert!((align.level_fs - 0.25).abs() < 1e-5, "level_fs {}", align.level_fs);
+        // auto_hysteresis(peak=1.0, frac=0.02, floor=1e-4) == 0.02, unaffected
+        // by the level's offset conversion (it reads the FS-domain samples).
+        assert!((align.hysteresis_fs - 0.02).abs() < 1e-6, "hysteresis_fs {}", align.hysteresis_fs);
+    }
+
+    fn base_stream_config() -> StreamConfig {
+        StreamConfig {
+            buffer_size: 8192,
+            slots: Vec::new(),
+            window: StreamWindow::Hann,
+            averaging: StreamAveraging { coherent: false, count: 1 },
+            spectra: SpectraRequest { input_l: false, input_r: false, output_l: false, output_r: false },
+            output_range_dbv: None,
+            triggers: TriggerRequest::default(),
+        }
+    }
+
+    /// 11. `validate_config` rejects each bad trigger field.
+    #[test]
+    fn validate_config_rejects_bad_trigger_fields() {
+        let half = base_stream_config().buffer_size / 2;
+
+        let mut too_deep = base_stream_config();
+        too_deep.triggers.input_l = Some(TriggerConfig { pre_samples: half + 1, ..default_trigger_cfg() });
+        assert!(validate_config(&too_deep).is_err());
+
+        let mut neg_hyst = base_stream_config();
+        neg_hyst.triggers.input_l = Some(TriggerConfig { hysteresis_v: Some(-0.1), ..default_trigger_cfg() });
+        assert!(validate_config(&neg_hyst).is_err());
+
+        let mut bad_level = base_stream_config();
+        bad_level.triggers.input_l = Some(TriggerConfig { level_v: f32::NAN, ..default_trigger_cfg() });
+        assert!(validate_config(&bad_level).is_err());
+
+        // A well-formed trigger config must still pass.
+        let mut ok = base_stream_config();
+        ok.triggers.input_l = Some(default_trigger_cfg());
+        assert!(validate_config(&ok).is_ok());
+    }
+
+    /// Test 12 — non-interference pin: `analyze_frame` (the function feeding
+    /// spectra/metrics) produces byte-identical output whether or not
+    /// `triggers` is set on the config — the trigger reads captured/stimulus
+    /// independently and never touches this path (module doc's central
+    /// invariant, and the reason the A/B bench numbers can't move).
+    #[test]
+    fn analyze_frame_ignores_triggers_field() {
+        let captured = AudioData {
+            left_channel: one_edge_samples(),
+            right_channel: one_edge_samples(),
+            sample_rate: 48_000,
+        };
+        let stimulus = StereoFrame { left: one_edge_samples(), right: one_edge_samples() };
+
+        let mut config_no_trigger = base_stream_config();
+        config_no_trigger.spectra = SpectraRequest { input_l: true, input_r: true, output_l: true, output_r: true };
+
+        let mut config_with_trigger = config_no_trigger.clone();
+        config_with_trigger.triggers.input_l = Some(default_trigger_cfg());
+        config_with_trigger.triggers.output_r =
+            Some(TriggerConfig { mode: TriggerMode::Single, ..default_trigger_cfg() });
+
+        let mut analyzers_a = Analyzers::new();
+        let out_a = analyze_frame(&mut analyzers_a, &config_no_trigger, &captured, Some(&stimulus), 48_000);
+        let mut analyzers_b = Analyzers::new();
+        let out_b = analyze_frame(&mut analyzers_b, &config_with_trigger, &captured, Some(&stimulus), 48_000);
+
+        assert_eq!(format!("{:?}", out_a.spectra), format!("{:?}", out_b.spectra));
+        assert_eq!(format!("{:?}", out_a.metrics), format!("{:?}", out_b.metrics));
+        assert_eq!(out_a.input_peak, out_b.input_peak);
     }
 }
