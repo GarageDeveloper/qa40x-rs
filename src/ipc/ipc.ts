@@ -32,6 +32,7 @@ import type {
   ThdSweepResult,
   TransformChainResult,
   TransformStep,
+  WowFlutterResult,
 } from "../gen";
 
 export { TauriChannel };
@@ -152,6 +153,21 @@ export interface Commands {
       amplitudeDbfs: number;
     };
     result: FrequencyResponseTrace[];
+  };
+  // Wow & flutter (issue #28): FM-demodulate a captured reference tone
+  // (DIN/IEC 386 approximation). `generate` plays the reference tone on
+  // `outputChannel` (loopback / driven DUT); off, silence is sent and
+  // `inputChannel` is just monitored (an external transport already playing
+  // the test tone — tape, turntable). Session-scoped like the sweeps above.
+  measure_wow_flutter: {
+    args: {
+      referenceFreq: number;
+      durationSecs: number;
+      outputChannel: Channel;
+      inputChannel: Channel;
+      generate: boolean;
+    };
+    result: WowFlutterResult;
   };
 
   // Measurement scripts (M4): the run streams `script-log` / `script-frame`

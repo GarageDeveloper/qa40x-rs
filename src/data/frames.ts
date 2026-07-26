@@ -15,7 +15,8 @@ import type { TraceId } from "../core/model";
 import type { AnalysisResult, Frame, HarmonicMark, ScopeMeasures } from "../gen";
 import type { DecodedFd, DecodedTd } from "../ipc/stream";
 
-/** A swept measurement's curves (THD vs freq, FR) in cache form. */
+/** A swept measurement's curves (THD vs freq, FR, wow & flutter) in cache
+ * form. */
 export interface DecodedSweep {
   freqs: Float64Array;
   curves: {
@@ -26,17 +27,35 @@ export interface DecodedSweep {
   /**
    * The x-axis unit, carried WITH the data (issue #27 review finding #1):
    * "Hz" for a frequency sweep (THD-vs-frequency, FR), "dBFS" for a
-   * THD-vs-level sweep. Derived from the backend's authoritative
-   * `ThdSweepResult.swept` at decode time (see `wireToSweep`'s `xUnit`
-   * param) — NEVER re-derived later from the program's CURRENT params,
-   * which may have changed axis without a re-run, or gone entirely (a
-   * frozen ❄ memory trace, or the program deleted): either would strand
-   * the frame on the wrong axis (log Hz on negative dBFS values logs NaN).
-   * Optional only for frames that predate this field (a script-emitted
-   * sweep has no axis concept; an old saved doc) — chartvm.ts's
-   * `sweepXUnit` falls back to the program lookup only when this is unset.
+   * THD-vs-level sweep, "rateHz" for a wow & flutter deviation spectrum
+   * (issue #28 second-pass review findings #3/#7 — a DIFFERENT quantity
+   * from stimulus Hz: modulation rate, log-scaled but with sub-1 Hz content
+   * that matters — a 33⅓ rpm once-per-revolution wow sits at 0.555 Hz, so
+   * it gets its own axis floor instead of sharing "Hz"'s ≥1 Hz clamp, AND
+   * the tile axis-mismatch guard now correctly separates it from an actual
+   * frequency sweep sharing a tile, instead of silently drawing both on one
+   * axis). Derived from the backend's authoritative result at decode time
+   * (see `wireToSweep`'s `xUnit` param) — NEVER re-derived later from the
+   * program's CURRENT params, which may have changed axis without a re-run,
+   * or gone entirely (a frozen ❄ memory trace, or the program deleted):
+   * either would strand the frame on the wrong axis (log Hz on negative
+   * dBFS values logs NaN). Optional only for frames that predate this field
+   * (a script-emitted sweep has no axis concept; an old saved doc) —
+   * chartvm.ts's `sweepXUnit` falls back to the program lookup only when
+   * this is unset.
    */
-  xUnit?: "Hz" | "dBFS";
+  xUnit?: "Hz" | "dBFS" | "rateHz";
+  /**
+   * The y-axis unit, carried WITH the data for the SAME reason as `xUnit`
+   * (issue #28 second-pass review finding #5): "%" for a THD-percent or
+   * wow & flutter curve, "dB" otherwise. Deriving this from the program at
+   * RENDER time (the original approach) loses it the moment a trace is
+   * frozen (❄, a program-less `memory` trace) or the doc is reloaded — the
+   * exact freeze-and-compare use case wow & flutter exists for. Optional
+   * only for frames predating this field; `sweepUnitLabel` falls back to
+   * the program lookup only when this is unset.
+   */
+  yUnit?: "dB" | "%";
 }
 
 export interface TraceFrames {
@@ -121,7 +140,11 @@ export function wireToFd(f: Frame): DecodedFd | undefined {
   return { freqs: Float64Array.from(f.freqs), magDb: Float64Array.from(f.mag_db) };
 }
 
-export function wireToSweep(f: Frame, xUnit?: "Hz" | "dBFS"): DecodedSweep | undefined {
+export function wireToSweep(
+  f: Frame,
+  xUnit?: "Hz" | "dBFS" | "rateHz",
+  yUnit?: "dB" | "%"
+): DecodedSweep | undefined {
   if (f.domain !== "sweep") return undefined;
   return {
     freqs: Float64Array.from(f.freqs),
@@ -131,5 +154,6 @@ export function wireToSweep(f: Frame, xUnit?: "Hz" | "dBFS"): DecodedSweep | und
       phaseDeg: c.phase_deg ? Float64Array.from(c.phase_deg) : null,
     })),
     xUnit,
+    yUnit,
   };
 }

@@ -58,6 +58,7 @@ import { MEASURES, measureByKey } from "../../core/measure";
 import { getFrames } from "../../data/frames";
 import { measuresFor } from "../../data/measures";
 import { openTileGearDialog } from "./gear";
+import { addTraceCandidates } from "./addtrace";
 import { el, keyedList } from "../../ui/dom";
 
 const FD_UNITS: { value: FdUnit; label: string }[] = [
@@ -666,8 +667,12 @@ export function createTile(
         unitSel.value = current;
       }
 
-      // Add-trace candidates: pool traces not already on the tile.
-      const candidates = s.traces.order.filter((id) => !tile.traces.includes(id));
+      // Add-trace candidates: pool traces not already on the tile AND whose
+      // KNOWN domains (if any) are compatible with this tile's kind (issue
+      // #28 second-pass review finding #9) — a sweep-only trace (e.g. the
+      // wow & flutter program) offered on a scope/spectrum tile just draws
+      // nothing.
+      const candidates = addTraceCandidates(s.traces.order, s.traces.byId, tile.traces, tile.kind);
       const addSig = candidates
         .map((id) => `${id}:${s.traces.byId[id]?.label}`)
         .join("|");

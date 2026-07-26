@@ -248,12 +248,14 @@ export interface SourcesState {
 
 /** Parameters of a swept measurement program (v1 SweepParams): THD vs
  * frequency (point sweep), THD vs level (issue #27, same point sweep with
- * the swept axis flipped), or frequency response (chirp). */
+ * the swept axis flipped), frequency response (chirp), or wow & flutter
+ * (issue #28 second pass — a one-shot DIN/IEC 386 capture reshaped as a
+ * program so its result freezes/compares/persists like any other sweep). */
 export interface SweepProgramParams {
-  measurement: "thd" | "fr";
+  measurement: "thd" | "fr" | "wowflutter";
   /** THD only: the swept axis — "frequency" (log-spaced, constant level) or
-   * "level" (linear dB steps at a fixed tone). FR has no axis choice: a
-   * chirp is inherently a frequency sweep. */
+   * "level" (linear dB steps at a fixed tone). FR and wow & flutter have no
+   * axis choice. */
   axis: "frequency" | "level";
   channel: "left" | "right" | "both";
   startHz: number;
@@ -269,10 +271,26 @@ export interface SweepProgramParams {
   endDbfs: number;
   /** THD only: number of tone points. */
   points: number;
-  /** FR only: chirp length in seconds. */
+  /** FR: chirp length in seconds. Wow & flutter: capture duration in
+   * seconds (same field — both are "how long does this one capture run"). */
   durationS: number;
   /** THD only: which curve to keep. */
   metric: "thd_db" | "thd_percent" | "thdn_db";
+  /** Wow & flutter only: the DIN/IEC 386 reference tone, Hz (typically
+   * 3150 Hz) — clamped sub-Nyquist backend-side; the program card reports
+   * the frequency actually used once a run lands (`wowResult`). */
+  wowReferenceHz: number;
+  /** Wow & flutter only: which channel plays the reference tone (only
+   * matters while `wowGenerate` is on) and which channel is demodulated —
+   * independent selections (an external transport may feed a different
+   * channel than the one driving it), unlike THD/FR's single `channel`. */
+  wowOutputChannel: "left" | "right";
+  wowInputChannel: "left" | "right";
+  /** Wow & flutter only: play the reference tone on `wowOutputChannel`
+   * (loopback / driven DUT). Off: silence is sent and `wowInputChannel` is
+   * just monitored — an external transport (tape, turntable) is assumed to
+   * already be playing the test tone. */
+  wowGenerate: boolean;
 }
 
 export const DEFAULT_SWEEP_PARAMS: SweepProgramParams = {
@@ -291,7 +309,31 @@ export const DEFAULT_SWEEP_PARAMS: SweepProgramParams = {
   points: 30,
   durationS: 1,
   metric: "thd_db",
+  wowReferenceHz: 3150,
+  wowOutputChannel: "left",
+  wowInputChannel: "left",
+  wowGenerate: true,
 };
+
+/**
+ * Wow & flutter's scalar readout (issue #28 second pass, review point 4) —
+ * the deviation-SPECTRUM lands as the program's sweep curve (rate Hz vs
+ * %), but the weighted/unweighted/peak/offset numbers aren't points on that
+ * curve; they ride alongside on the program itself so they stay readable
+ * off the program card without reopening anything. `null` until a
+ * wowflutter program's first successful run; absent/meaningless for
+ * thd/fr programs (never set for those).
+ */
+export interface WowFlutterProgramResult {
+  weightedPercent: number;
+  unweightedPercent: number;
+  peakPercent: number;
+  staticOffsetHz: number;
+  /** The reference frequency the backend ACTUALLY used (Nyquist-clamped,
+   * see `measure_wow_flutter`) — cents must be computed against this, never
+   * the requested `wowReferenceHz`, which the backend may have moved. */
+  referenceFreqUsed: number;
+}
 
 export type ProgramRun = "idle" | "running";
 
@@ -309,6 +351,11 @@ interface ProgramBase {
 export interface SweepProgram extends ProgramBase {
   kind: "sweep";
   params: SweepProgramParams;
+  /** Wow & flutter's scalar readout, landed alongside the deviation-
+   * spectrum curve trace (see `WowFlutterProgramResult`). Optional/absent
+   * for thd/fr programs and for a wowflutter program that hasn't run yet —
+   * an older saved doc predating this field also reads as absent. */
+  wowResult?: WowFlutterProgramResult | null;
 }
 
 /** A measurement (or plot) script program: the inline Rhai source it runs.

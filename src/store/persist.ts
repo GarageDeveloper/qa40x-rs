@@ -66,12 +66,19 @@ export interface PersistedFrames {
   td?: Frame;
   fd?: Frame;
   sweep?: Frame;
-  /** The sweep's x-axis unit (issue #27 review finding #1) — travels WITH
-   * the frame (`DecodedSweep.xUnit`), not re-derived from the program on
-   * load (a frozen ❄ memory trace has none, and program params can go
-   * stale). Absent for pre-#27 docs — `docToFrames` leaves it undefined and
-   * chartvm.ts's `sweepXUnit` falls back to "Hz". */
-  sweepXUnit?: "Hz" | "dBFS";
+  /** The sweep's x-axis unit (issue #27 review finding #1; "rateHz" added
+   * issue #28 second pass) — travels WITH the frame (`DecodedSweep.xUnit`),
+   * not re-derived from the program on load (a frozen ❄ memory trace has
+   * none, and program params can go stale). Absent for pre-#27 docs —
+   * `docToFrames` leaves it undefined and chartvm.ts's `sweepXUnit` falls
+   * back to "Hz". */
+  sweepXUnit?: "Hz" | "dBFS" | "rateHz";
+  /** The sweep's y-axis unit (issue #28 second pass review finding #5) —
+   * travels WITH the frame for the same reason as `sweepXUnit`: a frozen ❄
+   * wow & flutter trace must still read "%" after a reload, not fall back
+   * to "dB" because its originating program is gone. Absent for docs
+   * predating this field — `sweepUnitLabel` falls back to the program. */
+  sweepYUnit?: "dB" | "%";
 }
 
 export interface WorkspaceDoc {
@@ -120,6 +127,7 @@ function framesToDoc(f: TraceFrames): PersistedFrames {
       })),
     };
     if (f.sweep.xUnit) out.sweepXUnit = f.sweep.xUnit;
+    if (f.sweep.yUnit) out.sweepYUnit = f.sweep.yUnit;
   }
   return out;
 }
@@ -133,7 +141,7 @@ export function docToFrames(p: PersistedFrames): {
   return {
     td: p.td ? wireToTd(p.td) : undefined,
     fd: p.fd ? wireToFd(p.fd) : undefined,
-    sweep: p.sweep ? wireToSweep(p.sweep, p.sweepXUnit) : undefined,
+    sweep: p.sweep ? wireToSweep(p.sweep, p.sweepXUnit, p.sweepYUnit) : undefined,
   };
 }
 
@@ -348,6 +356,11 @@ function importSweepParams(params: Record<string, unknown>): SweepProgramParams 
     toneHz: DEFAULT_SWEEP_PARAMS.toneHz,
     startDbfs: DEFAULT_SWEEP_PARAMS.startDbfs,
     endDbfs: DEFAULT_SWEEP_PARAMS.endDbfs,
+    // Legacy (v4) sweeps predate wow & flutter as a program kind entirely.
+    wowReferenceHz: DEFAULT_SWEEP_PARAMS.wowReferenceHz,
+    wowOutputChannel: DEFAULT_SWEEP_PARAMS.wowOutputChannel,
+    wowInputChannel: DEFAULT_SWEEP_PARAMS.wowInputChannel,
+    wowGenerate: DEFAULT_SWEEP_PARAMS.wowGenerate,
     points: num(params.points, DEFAULT_SWEEP_PARAMS.points),
     durationS: num(params.duration, DEFAULT_SWEEP_PARAMS.durationS),
     metric:
@@ -467,6 +480,10 @@ export function importV4(ws: RawV4): WorkspaceDoc {
           progress: null,
           startedAtMs: null,
           params: importSweepParams(source.params ?? {}),
+          // Always present, never left `undefined` — see `addProgram`'s
+          // same comment (a re-saved-then-reloaded import must digest
+          // identically; migrate() only fills a field that's MISSING).
+          wowResult: null,
         };
         addTrace({
           id,
@@ -679,6 +696,20 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
       if (params.toneHz === undefined) params.toneHz = DEFAULT_SWEEP_PARAMS.toneHz;
       if (params.startDbfs === undefined) params.startDbfs = DEFAULT_SWEEP_PARAMS.startDbfs;
       if (params.endDbfs === undefined) params.endDbfs = DEFAULT_SWEEP_PARAMS.endDbfs;
+      // Issue #28 second pass: a v5 doc saved before wow & flutter became a
+      // program kind never had these fields (only thd/fr existed) — pick up
+      // the same defaults a fresh program gets.
+      if (params.wowReferenceHz === undefined) {
+        params.wowReferenceHz = DEFAULT_SWEEP_PARAMS.wowReferenceHz;
+      }
+      if (params.wowOutputChannel === undefined) {
+        params.wowOutputChannel = DEFAULT_SWEEP_PARAMS.wowOutputChannel;
+      }
+      if (params.wowInputChannel === undefined) {
+        params.wowInputChannel = DEFAULT_SWEEP_PARAMS.wowInputChannel;
+      }
+      if (params.wowGenerate === undefined) params.wowGenerate = DEFAULT_SWEEP_PARAMS.wowGenerate;
+      if (prog.wowResult === undefined) prog.wowResult = null;
     }
   }
   if (!doc.triggers || typeof doc.triggers !== "object") doc.triggers = {};

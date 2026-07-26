@@ -63,6 +63,62 @@ async fn virtual_demo_device_connect_capture_reconnect() {
     device.disconnect().await.expect("second disconnect");
 }
 
+/// Issue #28 review point 3: `measure_wow_flutter` clamps `reference_freq`
+/// to a safe sub-Nyquist range and reports the frequency it ACTUALLY used
+/// (not the raw request) in `WowFlutterResult::reference_freq` — above the
+/// clamp, both the generated tone and the heterodyne demodulation would
+/// alias silently. The default sample rate is 48 kHz (Nyquist 24 kHz), so
+/// the upper clamp is `24_000 * 0.9 = 21_600` Hz. Asking for 50 kHz (above
+/// even the sample rate itself) through a real generate+capture loopback
+/// must land the reported frequency at the clamp, not at 50 kHz.
+#[tokio::test(flavor = "multi_thread")]
+async fn wow_flutter_reference_freq_is_clamped_below_nyquist() {
+    let _sim = SIM_LOCK.lock().await;
+    let device = QA40xDevice::new();
+    device.connect_virtual().await.expect("virtual connect");
+
+    let result = device
+        .measure_wow_flutter(50_000.0, 2.0, Channel::Left, Channel::Left, true, None)
+        .await
+        .expect("a clamped, in-range tone must still be a valid measurement");
+    assert!(
+        (result.reference_freq - 21_600.0).abs() < 1.0,
+        "reference_freq {} was not clamped to 21600 Hz (0.9 * Nyquist at 48 kHz)",
+        result.reference_freq
+    );
+
+    device.disconnect().await.expect("disconnect");
+}
+
+/// Issue #28: `measure_wow_flutter` takes the SAME cooperative-cancel flag
+/// the batched THD sweep uses (`Option<&AtomicBool>`) so a Stop button can
+/// abort a long capture. A flag that is ALREADY set before the call starts
+/// must abort the very first block rather than being checked too late (or
+/// not at all) — the caller (`lib.rs::measure_wow_flutter`) maps this
+/// specific variant to "wow & flutter measurement cancelled", which the
+/// frontend matches on to show a "stopped" toast instead of an error one
+/// (see `src/panels/programs/wowflutterdialog.ts`'s `message.includes(
+/// "cancelled")` and `wow-flutter.pw.ts`'s Stop test — both exercise the
+/// fake device, not this real cancel path).
+#[tokio::test(flavor = "multi_thread")]
+async fn wow_flutter_honors_a_preset_cancel_flag() {
+    let _sim = SIM_LOCK.lock().await;
+    let device = QA40xDevice::new();
+    device.connect_virtual().await.expect("virtual connect");
+
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let err = device
+        .measure_wow_flutter(3150.0, 2.0, Channel::Left, Channel::Left, true, Some(&cancel))
+        .await
+        .expect_err("a pre-armed cancel flag must abort the capture, not run it to completion");
+    assert!(
+        matches!(err, tauri_app_lib::qa40x::QA40xError::Cancelled),
+        "unexpected error: {err:?}"
+    );
+
+    device.disconnect().await.expect("disconnect");
+}
+
 /// Issue #8 closure: a dBV-denominated stimulus pre-compensated by the
 /// per-unit DAC trims must come back — through the sim's calibrated
 /// DAC→loopback→ADC chain and the ADC-calibrated readout — at exactly the

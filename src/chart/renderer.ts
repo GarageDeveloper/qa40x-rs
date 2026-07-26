@@ -63,10 +63,11 @@ export interface SweepRenderer {
   setSeries(series: SweepSeriesVM[]): void;
   /** Y-axis caption ("dB" / "%"). */
   setUnitLabel(label: string): void;
-  /** X-axis unit ("Hz" — log scale — or "dBFS" — linear scale, THD-vs-level,
-   * issue #27). Call before setSeries so a switch re-renders with the right
-   * axis semantics. */
-  setXUnit(unit: "Hz" | "dBFS"): void;
+  /** X-axis unit: "Hz" (log scale, ≥1 Hz floor), "dBFS" (linear scale,
+   * THD-vs-level, issue #27), or "rateHz" (log scale, sub-1 Hz floor — wow &
+   * flutter's deviation spectrum, issue #28 second pass). Call before
+   * setSeries so a switch re-renders with the right axis semantics. */
+  setXUnit(unit: "Hz" | "dBFS" | "rateHz"): void;
   /** ∠ phase overlay (FR sweeps carrying phase). */
   setShowPhase(on: boolean): void;
   destroy(): void;

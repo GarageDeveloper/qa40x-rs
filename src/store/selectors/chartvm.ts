@@ -188,13 +188,15 @@ export interface SweepSeriesVM {
 export interface SweepVM {
   series: SweepSeriesVM[];
   unitLabel: string;
-  /** X-axis unit: "Hz" for a frequency sweep (THD-vs-frequency or FR), or
-   * "dBFS" for a THD-vs-level sweep (issue #27) — the renderer switches its
-   * axis scale (log Hz vs linear dB) and tick/marker formatting on this.
-   * Fixed by the FIRST member trace with data; any other member whose OWN
-   * axis differs lands in `omitted` instead of `series` (a tile can't mix
-   * a log-Hz and a linear-dBFS x-axis on one plot). */
-  xUnit: "Hz" | "dBFS";
+  /** X-axis unit: "Hz" for a frequency sweep (THD-vs-frequency or FR),
+   * "dBFS" for a THD-vs-level sweep (issue #27), or "rateHz" for a wow &
+   * flutter deviation spectrum (issue #28 second pass — a DIFFERENT
+   * quantity from stimulus Hz, so it never silently shares an axis with
+   * one) — the renderer switches its axis scale/floor and tick/marker
+   * formatting on this. Fixed by the FIRST member trace with data; any
+   * other member whose OWN axis differs lands in `omitted` instead of
+   * `series` (a tile can't mix incompatible x-axes on one plot). */
+  xUnit: "Hz" | "dBFS" | "rateHz";
   /** Member traces skipped because their sweep's x-axis unit doesn't match
    * `xUnit` (issue #27 review finding #3) — tile.ts marks their legend chip
    * instead of silently dropping them. */
@@ -276,13 +278,23 @@ function harmonicsVM(s: AppState, tile: TileConfig, dbrRef: number): HarmonicMar
   }));
 }
 
-/** A sweep trace's Y unit: "%" for a THD-percent program curve, "dB"
- * otherwise (sweep values are measurement units, not converter-referenced —
- * no offsets apply). */
-function sweepUnitLabel(s: AppState, id: TraceId): string {
+/**
+ * A sweep trace's Y unit — read from the FRAME first (issue #28 second
+ * pass review finding #5), the SAME reasoning as `sweepXUnit` below: "%"
+ * for a THD-percent program curve or a wow & flutter deviation spectrum,
+ * "dB" otherwise (sweep values are measurement units, not converter-
+ * referenced — no offsets apply). Deriving this from the CURRENT program
+ * params only (the original approach) lost the unit the moment a trace
+ * froze into a program-less `memory` trace or the doc reloaded — exactly
+ * the freeze-and-compare use case wow & flutter exists for. The
+ * program-params lookup is only a fallback for frames predating this field.
+ */
+function sweepUnitLabel(s: AppState, id: TraceId, sweep: DecodedSweep | undefined): string {
+  if (sweep?.yUnit) return sweep.yUnit;
   const p = s.programs.byId[id];
-  if (p?.kind === "sweep" && p.params.measurement === "thd" && p.params.metric === "thd_percent") {
-    return "%";
+  if (p?.kind === "sweep") {
+    if (p.params.measurement === "wowflutter") return "%";
+    if (p.params.measurement === "thd" && p.params.metric === "thd_percent") return "%";
   }
   return "dB";
 }
@@ -299,13 +311,21 @@ function sweepUnitLabel(s: AppState, id: TraceId): string {
  * relabel a landed Hz sweep the moment the dialog's axis is flipped to
  * Level without a re-run (finding #4), and strand a level sweep's frozen /
  * program-deleted trace back on "Hz" (log10 of a negative dBFS is NaN —
- * the original bug report).
+ * the original bug report). "rateHz" (issue #28 second pass) is wow &
+ * flutter's own axis — a DIFFERENT quantity from stimulus Hz (modulation
+ * rate, not tone frequency), so it never silently shares "Hz"'s axis/floor
+ * with an actual frequency sweep on the same tile (findings #3/#7).
  */
-function sweepXUnit(s: AppState, id: TraceId, sweep: DecodedSweep | undefined): "Hz" | "dBFS" {
+function sweepXUnit(
+  s: AppState,
+  id: TraceId,
+  sweep: DecodedSweep | undefined
+): "Hz" | "dBFS" | "rateHz" {
   if (sweep?.xUnit) return sweep.xUnit;
   const p = s.programs.byId[id];
-  if (p?.kind === "sweep" && p.params.measurement === "thd" && p.params.axis === "level") {
-    return "dBFS";
+  if (p?.kind === "sweep") {
+    if (p.params.measurement === "wowflutter") return "rateHz";
+    if (p.params.measurement === "thd" && p.params.axis === "level") return "dBFS";
   }
   return "Hz";
 }
@@ -324,7 +344,7 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
   const series: SweepSeriesVM[] = [];
   const omitted: TraceId[] = [];
   let unitLabel = "dB";
-  let xUnit: "Hz" | "dBFS" = "Hz";
+  let xUnit: "Hz" | "dBFS" | "rateHz" = "Hz";
   let xUnitFixed = false;
   for (const id of shownTraces(tile)) {
     const t = s.traces.byId[id];
@@ -333,7 +353,7 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
     if (!sweep) continue;
     const traceXUnit = sweepXUnit(s, id, sweep);
     if (!xUnitFixed) {
-      unitLabel = sweepUnitLabel(s, id);
+      unitLabel = sweepUnitLabel(s, id, sweep);
       xUnit = traceXUnit;
       xUnitFixed = true;
     } else if (traceXUnit !== xUnit) {

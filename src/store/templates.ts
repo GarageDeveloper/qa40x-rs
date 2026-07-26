@@ -57,10 +57,27 @@ function sine(route: SourceMeta["route"]): SourceMeta {
   };
 }
 
+/** The DIN/IEC 386 wow & flutter reference tone (issue #28's stimulus
+ * preset) — record it to tape/vinyl at a steady speed, then play the
+ * recording back and run the "Tape / turntable" template's wow & flutter
+ * program on the captured input. Paused, like every template source. */
+function wowFlutterTone(route: SourceMeta["route"]): SourceMeta {
+  return {
+    id: "src-wf-3150",
+    label: "Wow & flutter ref (3150 Hz)",
+    route,
+    playing: false,
+    kind: "sine",
+    frequencyHz: 3150,
+    levelDbv: -12,
+    extraTones: [],
+  };
+}
+
 function sweep(
   id: string,
   label: string,
-  measurement: "thd" | "fr",
+  measurement: "thd" | "fr" | "wowflutter",
   channel: SweepProgramParams["channel"],
   over: Partial<SweepProgramParams> = {}
 ): { prog: ProgramMeta; label: string } {
@@ -73,6 +90,11 @@ function sweep(
       progress: null,
       startedAtMs: null,
       params: { ...DEFAULT_SWEEP_PARAMS, measurement, channel, ...over },
+      // Always present (never `undefined`) — a template-seeded workspace
+      // that gets saved and reloaded must digest identically; persist.ts's
+      // migrate() only fills a MISSING field, so a fresh doc must already
+      // carry it (same reasoning as actions/programs.ts's `addProgram`).
+      wowResult: null,
     },
   };
 }
@@ -239,7 +261,23 @@ export function templates(): { name: string; make: () => WorkspaceDoc }[] {
           programs: [sweep("t-fr", "RIAA response", "fr", "both")],
         }),
     },
-    // 9. Loopback self-test — one big spectrum, driven by a 1 kHz tone.
+    // 9. Tape / turntable — the DIN/IEC 386 reference tone (issue #28) as a
+    // stimulus preset, a scope to watch the played-back recording, and a
+    // wow & flutter program (its deviation-spectrum curve lands on "g-wf" —
+    // ▶ it once the recording is playing back).
+    {
+      name: "Tape / turntable",
+      make: () =>
+        doc("Tape / turntable", "1x2", {
+          tiles: [
+            tile("g-scope", "scope", [L], { measures: ["rms", "peak"] }),
+            tile("g-wf", "sweep", ["t-wf"]),
+          ],
+          sources: [wowFlutterTone("left")],
+          programs: [sweep("t-wf", "W&F 3150 Hz", "wowflutter", "left")],
+        }),
+    },
+    // 10. Loopback self-test — one big spectrum, driven by a 1 kHz tone.
     {
       name: "Loopback self-test",
       make: () =>

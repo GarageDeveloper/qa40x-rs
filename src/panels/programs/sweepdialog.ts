@@ -1,9 +1,16 @@
 /**
  * Sweep-program dialog (M4, port of v1 sweepdialog.ts): name, measurement
- * (THD vs freq | frequency response), range, level, channel, and the
- * kind-specific knobs (points + curve for THD, duration for FR). THD also
- * picks its swept AXIS (issue #27): frequency (log sweep, constant level —
- * the original shape) or level (linear dB sweep at a fixed tone).
+ * (THD vs freq | frequency response | wow & flutter), range, level, channel,
+ * and the kind-specific knobs (points + curve for THD, duration for FR,
+ * reference tone + independent output/input channel + generate toggle for
+ * wow & flutter). THD also picks its swept AXIS (issue #27): frequency (log
+ * sweep, constant level — the original shape) or level (linear dB sweep at
+ * a fixed tone).
+ *
+ * Wow & flutter (issue #28 second pass) reuses this SAME dialog/program
+ * shape instead of its own bespoke one-shot dialog: its result is exactly a
+ * curve (modulation rate vs % deviation), so it gets the same gear-config,
+ * ▶/⏹, freeze, and persistence every other sweep already has.
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
@@ -12,8 +19,8 @@ import { configureSweepProgram } from "../../store/actions/programs";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
 
-function row(label: string, field: HTMLElement): HTMLElement {
-  return el("label.dialog__row", {}, el("span.dialog__label", {}, label), field);
+function row(label: string, field: HTMLElement, help?: string): HTMLElement {
+  return el("label.dialog__row", { title: help ?? "" }, el("span.dialog__label", {}, label), field);
 }
 
 export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): void {
@@ -28,8 +35,9 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
 
   const measurement = el("select.field", { "data-testid": `sweep-measurement-${id}` });
   measurement.append(
-    el("option", { value: "thd" }, "THD vs frequency"),
-    el("option", { value: "fr" }, "Frequency response")
+    el("option", { value: "thd" }, "THD vs frequency/level"),
+    el("option", { value: "fr" }, "Frequency response"),
+    el("option", { value: "wowflutter" }, "Wow & flutter")
   );
   measurement.value = p.measurement;
 
@@ -53,6 +61,17 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
   const endDb = num(`sweep-enddb-${id}`, p.endDbfs);
   const points = num(`sweep-points-${id}`, p.points, { min: "2", step: "1" });
   const duration = num(`sweep-duration-${id}`, p.durationS, { min: "0.1", step: "0.1" });
+  // Bounds matching the backend's own clamp (issue #28 second-pass review
+  // finding #4): `measure_wow_flutter` clamps reference_freq to
+  // [20, 0.9·Nyquist] and duration_secs to [1, 15] regardless of what's
+  // asked — an unbounded input invites a silent surprise. `duration`'s own
+  // max/min are further adjusted per-measurement in `syncVisibility()`
+  // since FR's chirp length has no such ceiling.
+  const nyquist = (s.device.config?.sample_rate ?? 48000) / 2;
+  const wowReference = num(`sweep-wowref-${id}`, p.wowReferenceHz, {
+    min: "20",
+    max: String(Math.floor(nyquist * 0.9)),
+  });
 
   // Level-axis-only note (issue #27 review finding #5): the batched capture
   // uses ONE fixed input range for the WHOLE sweep (no per-point
@@ -80,8 +99,24 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
   );
   metric.value = p.metric;
 
-  // Rows that follow the measurement select (THD-only vs FR-only), plus,
-  // within THD, the axis select (frequency-axis vs level-axis fields).
+  // Wow & flutter's own channel selects — independent output/input (an
+  // external transport may feed a different channel than the one driving
+  // it), unlike THD/FR's single "both/left/right" `channel`.
+  const wowOutputChannel = el("select.field", { "data-testid": `sweep-wowout-${id}` });
+  wowOutputChannel.append(el("option", { value: "left" }, "Left"), el("option", { value: "right" }, "Right"));
+  wowOutputChannel.value = p.wowOutputChannel;
+  const wowInputChannel = el("select.field", { "data-testid": `sweep-wowin-${id}` });
+  wowInputChannel.append(el("option", { value: "left" }, "Left"), el("option", { value: "right" }, "Right"));
+  wowInputChannel.value = p.wowInputChannel;
+  const wowGenerate = el("input", {
+    type: "checkbox",
+    "data-testid": `sweep-wowgen-${id}`,
+  }) as HTMLInputElement;
+  wowGenerate.checked = p.wowGenerate;
+
+  // Rows that follow the measurement select (THD-only vs FR-only vs
+  // wow-flutter-only), plus, within THD, the axis select (frequency-axis vs
+  // level-axis fields).
   const axisRow = row("Sweep axis", axis);
   const startRow = row("Start (Hz)", start);
   const endRow = row("End (Hz)", end);
@@ -92,20 +127,63 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
   const pointsRow = row("Points", points);
   const metricRow = row("Curve", metric);
   const durationRow = row("Duration (s)", duration);
+  const channelRow = row("Channel", channel);
+  const wowReferenceRow = row(
+    "Reference tone (Hz)",
+    wowReference,
+    "The DIN/IEC 386 reference tone, typically 3150 Hz. Clamped sub-Nyquist backend-side."
+  );
+  const wowOutputRow = row(
+    "Play tone on",
+    wowOutputChannel,
+    'Only used while "Generate reference tone" is checked.'
+  );
+  const wowInputRow = row("Monitor input", wowInputChannel);
+  const wowGenerateRow = row(
+    "Generate reference tone",
+    wowGenerate,
+    'Off: silence is sent and the input is just monitored — an external transport (tape, turntable) is assumed to already be playing the test tone.'
+  );
+  const wowNote = el(
+    "p.dialog__note",
+    { "data-testid": `sweep-wow-note-${id}` },
+    "The weighted (DIN/IEC 386) figure is an APPROXIMATION of the standard's " +
+      "weighting curve — treat it as indicative, not a certified reading. " +
+      "Scalars (weighted/unweighted %, peak, static offset) show on the " +
+      "program card once a run lands."
+  );
   const syncVisibility = (): void => {
     const fr = measurement.value === "fr";
-    const levelAxis = !fr && axis.value === "level";
-    axisRow.classList.toggle("u-hidden", fr); // FR has no axis choice — always frequency
-    startRow.classList.toggle("u-hidden", levelAxis);
-    endRow.classList.toggle("u-hidden", levelAxis);
-    levelRow.classList.toggle("u-hidden", levelAxis);
+    const wow = measurement.value === "wowflutter";
+    const thd = !fr && !wow;
+    const levelAxis = thd && axis.value === "level";
+    axisRow.classList.toggle("u-hidden", !thd); // FR/W&F have no axis choice
+    startRow.classList.toggle("u-hidden", !thd || levelAxis);
+    endRow.classList.toggle("u-hidden", !thd || levelAxis);
+    levelRow.classList.toggle("u-hidden", !thd || levelAxis);
     toneRow.classList.toggle("u-hidden", !levelAxis);
     startDbRow.classList.toggle("u-hidden", !levelAxis);
     endDbRow.classList.toggle("u-hidden", !levelAxis);
     levelNote.classList.toggle("u-hidden", !levelAxis);
-    pointsRow.classList.toggle("u-hidden", fr);
-    metricRow.classList.toggle("u-hidden", fr);
-    durationRow.classList.toggle("u-hidden", !fr);
+    pointsRow.classList.toggle("u-hidden", !thd);
+    metricRow.classList.toggle("u-hidden", !thd);
+    durationRow.classList.toggle("u-hidden", !fr && !wow);
+    // Wow & flutter's capture is backend-clamped to [1, 15] s (finding #4);
+    // FR's chirp has no such ceiling — the shared `duration` field's own
+    // bounds follow whichever measurement currently owns the row.
+    if (wow) {
+      duration.min = "1";
+      duration.max = "15";
+    } else {
+      duration.min = "0.1";
+      duration.removeAttribute("max");
+    }
+    channelRow.classList.toggle("u-hidden", wow); // W&F has its own two selects
+    wowReferenceRow.classList.toggle("u-hidden", !wow);
+    wowOutputRow.classList.toggle("u-hidden", !wow);
+    wowInputRow.classList.toggle("u-hidden", !wow);
+    wowGenerateRow.classList.toggle("u-hidden", !wow);
+    wowNote.classList.toggle("u-hidden", !wow);
   };
   measurement.addEventListener("change", syncVisibility);
   axis.addEventListener("change", syncVisibility);
@@ -116,10 +194,10 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
     {
       "data-testid": `sweep-apply-${id}`,
       onclick: () => {
-        const measurementVal = measurement.value as "thd" | "fr";
+        const measurementVal = measurement.value as "thd" | "fr" | "wowflutter";
         const params: SweepProgramParams = {
           measurement: measurementVal,
-          axis: measurementVal === "fr" ? "frequency" : (axis.value as "frequency" | "level"),
+          axis: measurementVal === "thd" ? (axis.value as "frequency" | "level") : "frequency",
           channel: channel.value as SweepProgramParams["channel"],
           startHz: Number(start.value) || 20,
           endHz: Number(end.value) || 20000,
@@ -128,8 +206,22 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
           startDbfs: Number(startDb.value),
           endDbfs: Number(endDb.value),
           points: Math.max(2, Math.round(Number(points.value) || 2)),
-          durationS: Math.max(0.1, Number(duration.value) || 1),
+          // A typed-over-the-max value isn't blocked by the input's `max`
+          // attribute (a soft hint, not enforced without reportValidity())
+          // — clamp explicitly so the STORED param matches what the
+          // backend will actually do (finding #4).
+          durationS:
+            measurementVal === "wowflutter"
+              ? Math.min(15, Math.max(1, Number(duration.value) || 4))
+              : Math.max(0.1, Number(duration.value) || 1),
           metric: metric.value as SweepProgramParams["metric"],
+          wowReferenceHz: Math.min(
+            Math.floor(nyquist * 0.9),
+            Math.max(20, Number(wowReference.value) || 3150)
+          ),
+          wowOutputChannel: wowOutputChannel.value as "left" | "right",
+          wowInputChannel: wowInputChannel.value as "left" | "right",
+          wowGenerate: wowGenerate.checked,
         };
         configureSweepProgram(store, id, { label: name.value, params });
         dialog.close();
@@ -155,10 +247,15 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
       startDbRow,
       endDbRow,
       levelNote,
-      row("Channel", channel),
+      channelRow,
       pointsRow,
       metricRow,
-      durationRow
+      durationRow,
+      wowReferenceRow,
+      wowOutputRow,
+      wowInputRow,
+      wowGenerateRow,
+      wowNote
     ),
     actions: [cancel, apply],
   });

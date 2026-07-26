@@ -47,7 +47,7 @@ async fn main() {
 
     println!("\n== Wow & flutter (3150 Hz, generate+capture loopback, 4 s) ==");
     let wf = device
-        .measure_wow_flutter(3150.0, 4.0, Channel::Left, Channel::Left, true)
+        .measure_wow_flutter(3150.0, 4.0, Channel::Left, Channel::Left, true, None)
         .await
         .expect("w&f failed");
     println!(

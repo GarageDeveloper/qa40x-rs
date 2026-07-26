@@ -5,10 +5,10 @@
  * define signal sources, play the mix and render frames — and NOTHING beyond
  * that. It is a stand-in, not a simulator: where it cannot be honest it
  * throws a loud error (unknown commands, script execution, measurement
- * programs other than the THD sweep — see thdSweep for why that one exists
- * and what may be asserted against it) instead of quietly inventing behaviour
- * a test could then "verify". See tests/e2e/README.md for the full list of
- * what is and is not simulated.
+ * programs other than the THD sweep and wow & flutter — see thdSweep and
+ * wowFlutter for why those exist and what may be asserted against them)
+ * instead of quietly inventing behaviour a test could then "verify". See
+ * tests/e2e/README.md for the full list of what is and is not simulated.
  *
  * Level model (kept honest, because level bookkeeping is where UI bugs hide):
  * - mixer slots render in the frontend's "level-volts" (sine peak 1.0 ≙
@@ -242,6 +242,13 @@ export class FakeDevice {
    * program-is-running state instead of racing a timer. */
   private programGate: Promise<void> | null = null;
   private programGateRelease: (() => void) | null = null;
+  /** Armed while a `wowFlutter()` call is in flight: `sweep_stop` rejects it
+   * with "cancelled" — the fake's model of the real backend's cancellable
+   * capture (issue #28 review point 7). Unlike the THD sweep (an
+   * intentional instantaneous stub, see `thdSweep`), wow & flutter's Stop
+   * button is meant to actually abort a held capture, so its fake honors
+   * that instead of only being a lock-observation gate. */
+  private wowFlutterCancel: (() => void) | null = null;
   /* v2 stream loop (stream_start/update/stop) */
   private streamTimer: ReturnType<typeof setInterval> | null = null;
   private streamConfig: StreamConfigWire | null = null;
@@ -477,8 +484,10 @@ export class FakeDevice {
         this.measureStats = {};
         return null;
       case "sweep_stop":
-        // The fake's sweeps are instantaneous — accepting the command is the
-        // contract (the real backend aborts its batched capture).
+        // The fake's THD sweep is instantaneous — accepting the command is
+        // its whole contract. Wow & flutter's held capture, if any, is
+        // actually cancelled (see `wowFlutterCancel`).
+        this.wowFlutterCancel?.();
         return null;
 
       /* -- output-only mode (rewrite-v2 M2): gap-free DAC, no capture ---- */
@@ -562,6 +571,9 @@ export class FakeDevice {
       case "measure_thd_vs_level":
         this.assertConnected(cmd);
         return this.thdLevelSweep(a);
+      case "measure_wow_flutter":
+        this.assertConnected(cmd);
+        return this.wowFlutter(a);
 
       /* -- scripts: honestly refused, not silently faked -- */
       case "script_run":
@@ -713,6 +725,96 @@ export class FakeDevice {
       };
     });
     return { swept: "level", points };
+  }
+
+  /**
+   * Wow & flutter (issue #28) — like `thdSweep`, a STUB result: the fake
+   * does not run the heterodyne/phase-diff FM demodulation the real
+   * backend does (pinned by the Rust unit tests in
+   * `src-tauri/src/audio/wow_flutter.rs`, e.g. `recovers_known_wow`).
+   * Instead it synthesizes the RESULT that SAME test's signal — a tone
+   * FM-modulated by a known 4 Hz / 0.15 %-peak wow — would produce, using
+   * the SAME decimation/window/cap constants as the real
+   * `deviation_spectrum` (1000 Hz demod rate, power-of-two FFT window,
+   * 200 Hz cap) so the axis, resolution and peak-vs-RMS relationship the
+   * dialog renders are physically consistent, not just "a plausible
+   * shape". `deviation_series` is populated too — the real backend always
+   * returns one. Tests must assert the PLUMBING (fields populate, the
+   * spectrum peaks near 4 Hz, the device-lock semantics), never these
+   * exact numbers.
+   *
+   * Gated by the same `programGate` as `thdSweep` so
+   * `holdPrograms()`/`releasePrograms()` covers it — but UNLIKE the THD
+   * stub (deliberately instantaneous, Stop is only a lock-observation
+   * no-op there), a held wow & flutter call is actually cancellable: Stop
+   * (`sweep_stop`) rejects it, mirroring the real backend's cancellable
+   * capture (issue #28 review point 7).
+   */
+  private async wowFlutter(a: Args): Promise<unknown> {
+    if (this.programGate) {
+      const gate = this.programGate;
+      await new Promise<void>((resolve, reject) => {
+        // EXACT match to the real backend's cancel message (issue #28
+        // second-pass review finding #2 — the frontend now matches this
+        // string exactly, not by substring, so it must not drift).
+        this.wowFlutterCancel = () => reject(new Error("wow & flutter measurement cancelled"));
+        gate.then(resolve);
+      }).finally(() => {
+        this.wowFlutterCancel = null;
+      });
+    }
+    const referenceFreq = (a.referenceFreq as number) || 3150;
+    const durationSecs = Math.min(15, Math.max(1, (a.durationSecs as number) || 4));
+    const wowRateHz = 4;
+    const depth = 0.0015; // 0.15% peak fractional deviation — recovers_known_wow's signal
+    const unweightedRms = (depth / Math.SQRT2) * 100;
+    // The DIN/IEC weighting curve peaks at 4 Hz, so a pure 4 Hz wow reads
+    // close to (not exactly) its unweighted RMS — the RBJ approximation
+    // isn't unity gain at the peak.
+    const weightedRms = unweightedRms * 0.92;
+    const demodRate = 1000; // mirrors the real backend's target_rate/demod_rate
+
+    // Deviation series: a 4 Hz sine at `depth`, decimated like the real
+    // backend (a 50 ms settling skip, then one sample per demod period).
+    const skip = Math.round(demodRate * 0.05);
+    const seriesLen = Math.max(0, Math.round(durationSecs * demodRate) - skip);
+    const deviationSeries = Array.from({ length: seriesLen }, (_, i) => {
+      const t = (skip + i) / demodRate;
+      return depth * 100 * Math.sin(2 * Math.PI * wowRateHz * t);
+    });
+
+    // Deviation spectrum: the SAME power-of-two window + 200 Hz cap as the
+    // real `deviation_spectrum`, so bin resolution matches (e.g. ~0.49 Hz
+    // at a 4 s capture) — fine enough that the 4 Hz peak actually lands
+    // near a sampled bin, unlike the old fixed 7.8 Hz-spaced stub.
+    let fftLen = 1;
+    while (fftLen * 2 <= deviationSeries.length) fftLen *= 2;
+    const maxRate = 200;
+    const rateHz: number[] = [];
+    const spectrumPercent: number[] = [];
+    if (fftLen >= 64) {
+      const binHz = demodRate / fftLen;
+      // Amplitude spectrum peak ties directly to the reported RMS
+      // (RMS = amplitude/√2 for a single tone) — not an independent guess.
+      const peakAmplitude = unweightedRms * Math.SQRT2;
+      const sigma = 1.0; // Hz — narrow enough that 4 Hz is clearly the tallest bin
+      for (let f = 0; f <= maxRate; f += binHz) {
+        rateHz.push(f);
+        spectrumPercent.push(peakAmplitude * Math.exp(-((f - wowRateHz) ** 2) / (2 * sigma * sigma)));
+      }
+    }
+
+    return {
+      reference_freq: referenceFreq,
+      weighted_rms_percent: weightedRms,
+      unweighted_rms_percent: unweightedRms,
+      peak_weighted_percent: weightedRms * Math.SQRT2,
+      static_offset_hz: 0,
+      demod_rate: demodRate,
+      deviation_series: deviationSeries,
+      rate_hz: rateHz,
+      spectrum_percent: spectrumPercent,
+    };
   }
 
   private store(kind: string): unknown[] {
