@@ -222,18 +222,11 @@ export function configureScriptProgram(
   if (cfg.label.trim()) setTraceLabel(store, id, cfg.label.trim());
 }
 
-/** Sentinel `run.programLock` value for the Levels panel (issue #29): a
- * one-shot `measure_levels` call, not a `ProgramMeta`/trace — it takes the
- * SAME exclusive-device lock as a sweep/script so every other transport
- * greys out with a reason while it runs, but has no trace id to key on. */
-export const LEVELS_LOCK_ID = "__levels__";
-
 /** Why the transports are locked right now, or null. Names the running
  * program so panels grey their controls with a reason (v1 Phase H). */
 export function programLockReason(s: AppState): string | null {
   const id = s.run.programLock;
   if (id === null) return null;
-  if (id === LEVELS_LOCK_ID) return 'measurement "Levels" is running';
   const label = s.traces.byId[id]?.label ?? "program";
   return `measurement "${label}" is running`;
 }

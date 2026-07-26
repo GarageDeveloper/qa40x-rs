@@ -313,34 +313,6 @@ describe("v5 in-version hook: user weighting curve (issue #29)", () => {
     expect(dest.get().weighting.userCurve).toBeNull();
     expect(dest.get().weighting.userCurveName).toBeNull();
   });
-
-  it("applyWorkspaceDoc clears any held Levels reading (issue #29 review finding #8)", () => {
-    const dest = freshStore();
-    dest.update("test/stale-levels", (s) => ({
-      ...s,
-      levels: {
-        ...s.levels,
-        result: {
-          rms_dbfs: -20,
-          peak_dbfs: -15,
-          rms_a_dbfs: -22,
-          rms_c_dbfs: -20.5,
-          rms_vrms: 0.1,
-          rms_dbv: -20,
-          rms_dbu: -17.8,
-          rms_a_dbv: -22,
-          calibrated: true,
-          clipped: false,
-          stimulus_freq_hz: 1000,
-        },
-        error: "stale",
-      },
-    }));
-    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get()))))!;
-    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
-    expect(dest.get().levels.result).toBeNull();
-    expect(dest.get().levels.error).toBeNull();
-  });
 });
 
 describe("v4 importer (real legacy blob)", () => {

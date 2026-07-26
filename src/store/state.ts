@@ -12,7 +12,6 @@ import type {
   DeviceConfig,
   DeviceMeta,
   LevelOffsetsDb,
-  LevelResult,
   RestStatus,
   ScriptRole,
   SlotError,
@@ -422,25 +421,6 @@ export interface WeightingState {
   userCurveName: string | null;
 }
 
-/**
- * The Levels panel (issue #29 — exposes `measure_levels`): one exclusive
- * generate+capture, like a sweep program but a single scalar result, not a
- * trace. Transient — excluded from the workspace document (the acquisition
- * knobs default fresh each session, like the sweep dialogs' own params
- * would if they weren't attached to a saved program).
- */
-export interface LevelsState {
-  inputChannel: Chan;
-  outputChannel: Chan;
-  durationSecs: number;
-  generate: boolean;
-  stimulusFreqHz: number;
-  stimulusDbfs: number;
-  running: boolean;
-  result: LevelResult | null;
-  error: string | null;
-}
-
 /* ------------------------------------------------------------------ */
 /* Layout (M3): the multi-tile graph grid.                              */
 /* ------------------------------------------------------------------ */
@@ -551,8 +531,6 @@ export interface AppState {
   triggers: Record<TraceId, TriggerSettings>;
   /** The bench's loaded user weighting curve (issue #29), workspace-persisted. */
   weighting: WeightingState;
-  /** The Levels panel's params/result (issue #29), transient. */
-  levels: LevelsState;
 }
 
 export const FFT_SIZES = [
@@ -758,16 +736,5 @@ export function initialState(): AppState {
     },
     triggers: {},
     weighting: { userCurve: null, userCurveName: null },
-    levels: {
-      inputChannel: "left",
-      outputChannel: "left",
-      durationSecs: 1,
-      generate: true,
-      stimulusFreqHz: 1000,
-      stimulusDbfs: -20,
-      running: false,
-      result: null,
-      error: null,
-    },
   };
 }

@@ -110,12 +110,6 @@ export function applyWorkspaceDoc(
       userCurveName:
         typeof doc.userWeightingCurveName === "string" ? doc.userWeightingCurveName : null,
     },
-    // A Levels reading is meaningless once the bench underneath it changed
-    // (different ranges/traces/calibration context) — never leave a STALE
-    // Vrms/dBV on screen implying it still applies (issue #29 review
-    // finding #8; the readouts stay always-rendered, just fall back to
-    // their "—" placeholder like before any measurement ran).
-    levels: { ...st.levels, result: null, error: null },
   }));
 
   // A running stream keeps running and simply follows the new bench (its

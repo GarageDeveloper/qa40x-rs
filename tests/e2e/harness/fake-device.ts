@@ -574,9 +574,6 @@ export class FakeDevice {
       case "measure_wow_flutter":
         this.assertConnected(cmd);
         return this.wowFlutter(a);
-      case "measure_levels":
-        this.assertConnected(cmd);
-        return this.measureLevels(a);
 
       /* -- scripts: honestly refused, not silently faked -- */
       case "script_run":
@@ -817,63 +814,6 @@ export class FakeDevice {
       deviation_series: deviationSeries,
       rate_hz: rateHz,
       spectrum_percent: spectrumPercent,
-    };
-  }
-
-  /**
-   * `measure_levels` (issue #29 review finding #3a): the Levels panel's ONE
-   * exclusive generate+capture, same device-lock family as `thdSweep` (same
-   * `programGate`, so `holdPrograms()`/`releasePrograms()` gates it too —
-   * a test can observe the panel/transports locked mid-measurement). The
-   * RESULT is a STUB, not a physics model: no converter distortion, no
-   * actual A/C-weighting math, no clipping model (see tests/e2e/README.md)
-   * — tests must assert plumbing (readouts populate, the lock holds, the
-   * played frequency reflects the clamp), never these exact numbers.
-   *
-   * What IS kept honest: the dBFS→dBV projection uses the SAME
-   * `inputDbvOffsetDb` the fake's `get_input_dbv_offset` reports (so a
-   * Levels reading agrees with an Input trace's dBV for the same nominal
-   * level), and the stimulus frequency clamp mirrors the real backend's
-   * `effective_stimulus_freq` (0.98·Nyquist — issue #29 review finding #1).
-   */
-  private async measureLevels(a: Args): Promise<unknown> {
-    if (this.programGate) await this.programGate;
-    const generate = Boolean(a.generate);
-    const stimulusDbfs = Math.min(0, a.stimulusDbfs as number);
-    const nyquist = this.config.sample_rate / 2;
-    const stimulusFreqHz = generate
-      ? Math.min(Math.max(1, a.stimulusFreq as number), nyquist * 0.98)
-      : 0;
-
-    // A full-scale-peak sine's RMS sits 3.0103 dB below its peak; silence
-    // (or "monitor the DUT" with generate=false) reads the fake's flat
-    // synthetic noise floor.
-    const peakDbfs = generate ? stimulusDbfs : -90;
-    const rmsDbfs = generate ? stimulusDbfs - 20 * Math.log10(Math.SQRT2) : -95;
-    // No A/C-weighting model in the stub — same value as unweighted
-    // (documented, never asserted as a golden number).
-    const rmsADbfs = rmsDbfs;
-    const rmsCDbfs = rmsDbfs;
-
-    const offsetDb = inputDbvOffsetDb(this.config.input_gain);
-    const toDbv = (dbfs: number) => dbfs + offsetDb;
-    const rmsDbv = toDbv(rmsDbfs);
-    const rmsVrms = Math.pow(10, rmsDbv / 20);
-    const rmsDbu = rmsDbv - 20 * Math.log10(0.775);
-    const rmsADbv = toDbv(rmsADbfs);
-
-    return {
-      rms_dbfs: rmsDbfs,
-      peak_dbfs: peakDbfs,
-      rms_a_dbfs: rmsADbfs,
-      rms_c_dbfs: rmsCDbfs,
-      rms_vrms: rmsVrms,
-      rms_dbv: rmsDbv,
-      rms_dbu: rmsDbu,
-      rms_a_dbv: rmsADbv,
-      calibrated: true,
-      clipped: false, // no clipping model in the fake (see README)
-      stimulus_freq_hz: stimulusFreqHz,
     };
   }
 

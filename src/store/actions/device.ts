@@ -30,13 +30,7 @@ async function readOffsets(ipc: Ipc): Promise<LevelOffsetsDb> {
   };
 }
 
-/** Refresh config + offsets together: offsets move with the ranges. Any
- * held Levels reading (store/actions/levels.ts) is invalidated in the same
- * update: its Vrms/dBV/dBu were computed from the input calibration factor
- * AT THE TIME OF THE MEASUREMENT, and a range/rate change moves that
- * factor — an unchanged on-screen reading would silently misrepresent the
- * new config (issue #29 review finding #8). The readout stays always
- * rendered (no layout shift), just falls back to its "—" placeholder. */
+/** Refresh config + offsets together: offsets move with the ranges. */
 async function refreshConfig(store: Store<AppState>, ipc: Ipc): Promise<void> {
   const [config, offsets] = await Promise.all([
     ipc.call("get_device_config", {}),
@@ -45,7 +39,6 @@ async function refreshConfig(store: Store<AppState>, ipc: Ipc): Promise<void> {
   store.update("device/config", (s) => ({
     ...s,
     device: { ...s.device, config, offsets },
-    levels: { ...s.levels, result: null, error: null },
   }));
 }
 

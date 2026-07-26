@@ -70,7 +70,7 @@ Does: connect/presence/config registers, the two dBFS→dBV converter offsets,
 mixer slot rendering (sine/square/triangle/sawtooth/tones/noise/chirp/
 multitone at correct RMS levels, routed and summed), a range-correct
 loopback capture with a small noise floor, real windowed FFTs and crude
-derived metrics, telemetry, in-memory storage stubs. FOUR measurement
+derived metrics, telemetry, in-memory storage stubs. THREE measurement
 programs, same discipline (a stub RESULT, gateable with `app.holdPrograms()`
 / `releasePrograms()` so the locked UI can be observed instead of raced,
 never asserted by value):
@@ -81,21 +81,12 @@ never asserted by value):
 - wow & flutter (`measure_wow_flutter`, issue #28) — synthesizes the result
   of a known 4 Hz / 0.15 %-peak wow with the real backend's own
   decimation/window/cap constants; genuinely cancellable while held (Stop
-  rejects it), unlike the instantaneous THD stubs;
-- the Levels panel's one-shot capture (`measure_levels`, issue #29) — a
-  played tone's RMS/peak derived from the REQUESTED stimulus level (RMS =
-  peak − 3.0103 dB), projected to dBV through the SAME `inputDbvOffsetDb`
-  the fake's `get_input_dbv_offset` reports (so a Levels reading agrees with
-  an Input trace's dBV for the same nominal level) and the SAME
-  0.98·Nyquist stimulus-frequency clamp as the real backend. NOT modeled:
-  A/C-weighting math (both read back equal to the unweighted value) or any
-  clipping (`clipped` is always `false`) — see the two bullets below.
+  rejects it), unlike the instantaneous THD stubs.
 
 Does NOT: Rhai script execution (refused with a named error), other
 measurement programs / sweeps (unimplemented commands throw), converter
 distortion or frequency response, round-trip latency, relay settling,
-averaging, FFT windows other than Hann, calibration pages, A/C-weighting
-math or ADC clipping in `measure_levels` (see above). **Unknown commands
+averaging, FFT windows other than Hann, calibration pages. **Unknown commands
 throw loudly** — if the app grows a new startup invoke, a test will name it
 instead of hanging.
 

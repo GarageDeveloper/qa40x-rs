@@ -18,7 +18,6 @@ import { mountStatusBar } from "./panels/status/panel";
 import { mountSourcesPanel } from "./panels/sources/panel";
 import { mountTracesPanel } from "./panels/traces/panel";
 import { mountProgramsPanel } from "./panels/programs/panel";
-import { mountLevelsPanel } from "./panels/levels/panel";
 import { mountGridPanel } from "./panels/grid/panel";
 import { mountWorkspaceBar } from "./panels/workspace/panel";
 import { watchChains } from "./data/chains";
@@ -66,7 +65,6 @@ export function mountApp(
   mountSourcesPanel(sidebar, store, ipc);
   mountTracesPanel(sidebar, store, ipc);
   mountProgramsPanel(sidebar, store, ipc);
-  mountLevelsPanel(sidebar, store, ipc);
   mountGridPanel(main, store, ipc);
   mountStatusBar(statusbar, store, ipc);
   mountToasts(root, store);
