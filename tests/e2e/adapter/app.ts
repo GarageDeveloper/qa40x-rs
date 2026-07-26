@@ -662,6 +662,87 @@ export class AppV2 {
     await this.drv.click(`[data-testid="tile-trigger-arm-${tileId}"]`);
   }
 
+  /** Client-px bounding box of a scope tile's chart canvas — the coordinate
+   * space `dragOnScopeCanvas` and the trigger/marker hit zones live in. */
+  async chartCanvasRect(
+    tileId: string
+  ): Promise<{ x: number; y: number; width: number; height: number }> {
+    return this.drv.eval(
+      (a: { tileId: string }) => {
+        const el = document.querySelector(
+          `[data-testid="tile-chart-${a.tileId}"] canvas`
+        ) as HTMLCanvasElement;
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      },
+      { tileId }
+    );
+  }
+
+  /**
+   * Drive a real pointer-gesture (down at the first point, move through the
+   * rest, up at the last) directly on a scope tile's chart canvas — the same
+   * synthetic-PointerEvent approach `dragTile` uses (the ScopeChart's own
+   * `pointerdown`/`pointermove`/`pointerup` listeners, `setPointerCapture`
+   * wrapped in a try/catch for exactly this reason, see tile.ts's drag
+   * handle). Exercises the SAME onPointerDown hit-test → onPointerMove →
+   * onPointerUp(done=true) path a mouse drag takes — trigger level/position
+   * handles and A/B time markers all live on this one canvas and share this
+   * gesture shape.
+   */
+  async dragOnScopeCanvas(
+    tileId: string,
+    points: { x: number; y: number }[]
+  ): Promise<void> {
+    await this.drv.eval(
+      (a: { tileId: string; points: { x: number; y: number }[] }) => {
+        const el = document.querySelector(
+          `[data-testid="tile-chart-${a.tileId}"] canvas`
+        ) as HTMLElement;
+        const at = (x: number, y: number): PointerEventInit => ({
+          bubbles: true,
+          pointerId: 1,
+          button: 0,
+          clientX: x,
+          clientY: y,
+        });
+        const [first, ...rest] = a.points;
+        el.dispatchEvent(new PointerEvent("pointerdown", at(first.x, first.y)));
+        for (const p of rest) {
+          el.dispatchEvent(new PointerEvent("pointermove", at(p.x, p.y)));
+        }
+        const last = a.points[a.points.length - 1];
+        el.dispatchEvent(new PointerEvent("pointerup", at(last.x, last.y)));
+      },
+      { tileId, points }
+    );
+  }
+
+  /** A scope tile's A/B marker readout row ("A" or "B"), or null when that
+   * marker doesn't exist — `.mk-freq` is the Δt-from-start readout, the
+   * cheapest DOM-observable proof a marker moved. */
+  async scopeMarkerRow(
+    tileId: string,
+    label: "A" | "B"
+  ): Promise<{ freq: string; val: string } | null> {
+    return this.drv.eval(
+      (a: { tileId: string; label: string }) => {
+        const rows = Array.from(
+          document.querySelectorAll(`[data-testid="tile-chart-${a.tileId}"] .mk-row`)
+        );
+        const row = rows.find(
+          (r) => r.querySelector(".mk-name")?.textContent === a.label
+        );
+        if (!row) return null;
+        return {
+          freq: row.querySelector(".mk-freq")?.textContent ?? "",
+          val: row.querySelector(".mk-val")?.textContent ?? "",
+        };
+      },
+      { tileId, label }
+    );
+  }
+
   /** The pool rows as {id, label, badges: [{tag, dim, tip}]}. */
   async poolRows(): Promise<
     { id: string; label: string; badges: { tag: string; dim: boolean; tip: string }[] }[]

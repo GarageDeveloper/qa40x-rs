@@ -225,3 +225,161 @@ test("gear Trigger tab round-trips into per-endpoint and per-tile state", async 
   expect(s.layout.tiles["tile-2"].triggerPositionPct).toBe(30);
   expect(s.layout.tiles["tile-2"].showTriggerMarkers).toBe(false);
 });
+
+/**
+ * Draggable marker coverage (review follow-up): the level line + right-
+ * gutter "T" handle and the top-strip "▼" position handle are only
+ * unit-tested at the canvas-class level (onPointerDown/Move/Up on a bare
+ * ScopeChart). These three exercise the SAME gestures through the real DOM
+ * — `[data-testid="tile-chart-tile-2"] canvas` — end to end into the store,
+ * and pin the hit-test precedence between the position handle and an A/B
+ * time marker sharing its top strip (canvas.ts's `markerSlotNear(x) < 0`
+ * guard, review #11a) so a future edit can't silently swap the winner.
+ *
+ * Plot geometry mirrors `ScopeChart.drawStatic`'s margins (canvas.ts:
+ * `this.plot = { x: 54, y: 14, w: this.w - 54 - 16, h: this.h - 14 - 32 }`)
+ * — computed from the live canvas rect so the test isn't tied to a
+ * particular tile size, only to those margins.
+ */
+function scopePlot(rect: { x: number; y: number; width: number; height: number }) {
+  return {
+    x: rect.x + 54,
+    y: rect.y + 14,
+    w: rect.width - 54 - 16,
+    h: rect.height - 14 - 32,
+  };
+}
+
+test("dragging the level handle moves the trigger level in the store (#26 review coverage)", async ({
+  app,
+}) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  await app.setTileTrigger("tile-2", { mode: "auto", edge: "rising", levelV: 0, positionPct: 50 });
+  await expect
+    .poll(async () => (await app.scopeTrigger("tile-2"))?.state, { timeout: 10_000 })
+    .toBe("triggered");
+
+  const before = await app.drv.eval(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: { state(): { triggers: Record<string, { levelV: number }> } };
+        }
+      ).qa40xV2Debug.state().triggers["hw-in-left"].levelV,
+    undefined as void
+  );
+  expect(before).toBeCloseTo(0, 6);
+
+  const rect = await app.chartCanvasRect("tile-2");
+  const p = scopePlot(rect);
+  // Grab via the right-gutter "T" handle (x independent of the current
+  // level — hitTriggerLevel's gutter branch spans the whole plot height),
+  // then drag UP a quarter of the plot: `valueAtY` maps a smaller y to a
+  // LARGER display value, so the level must come out strictly positive.
+  await app.dragOnScopeCanvas("tile-2", [
+    { x: p.x + p.w + 7, y: p.y + p.h * 0.5 },
+    { x: p.x + p.w + 7, y: p.y + p.h * 0.2 },
+    { x: p.x + p.w + 7, y: p.y + p.h * 0.2 },
+  ]);
+
+  const after = await app.drv.eval(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: { state(): { triggers: Record<string, { levelV: number }> } };
+        }
+      ).qa40xV2Debug.state().triggers["hw-in-left"].levelV,
+    undefined as void
+  );
+  expect(after).toBeGreaterThan(before);
+});
+
+test("dragging the top-strip handle moves the tile's trigger position in the store (#26 review coverage)", async ({
+  app,
+}) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  await app.setTileTrigger("tile-2", { mode: "auto", edge: "rising", levelV: 0, positionPct: 20 });
+  await expect
+    .poll(async () => (await app.scopeTrigger("tile-2"))?.state, { timeout: 10_000 })
+    .toBe("triggered");
+
+  const rect = await app.chartCanvasRect("tile-2");
+  const p = scopePlot(rect);
+  // Grab the "▼" handle at its current 20% position (top strip, y ≤ 12 px
+  // from the plot top) and drag it to 60%.
+  await app.dragOnScopeCanvas("tile-2", [
+    { x: p.x + 0.2 * p.w, y: p.y + 6 },
+    { x: p.x + 0.6 * p.w, y: p.y + 6 },
+    { x: p.x + 0.6 * p.w, y: p.y + 6 },
+  ]);
+
+  const pct = await app.drv.eval(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: {
+            state(): { layout: { tiles: Record<string, { triggerPositionPct: number }> } };
+          };
+        }
+      ).qa40xV2Debug.state().layout.tiles["tile-2"].triggerPositionPct,
+    undefined as void
+  );
+  expect(pct).toBeCloseTo(60, 0);
+});
+
+test("an A/B marker sharing the position handle's row wins the drag, not the trigger (#26 review #11a)", async ({
+  app,
+}) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  await app.setTileTrigger("tile-2", { mode: "auto", edge: "rising", levelV: 0, positionPct: 50 });
+  await expect
+    .poll(async () => (await app.scopeTrigger("tile-2"))?.state, { timeout: 10_000 })
+    .toBe("triggered");
+
+  const rect = await app.chartCanvasRect("tile-2");
+  const p = scopePlot(rect);
+  const markerX = p.x + 0.5 * p.w; // same X as the 50% position handle
+
+  // Drop an A marker at that X, well below the top strip and away from the
+  // (level 0 ⇒ mid-height) level line, so its own creation click can't be
+  // shadowed by either trigger handle.
+  await app.dragOnScopeCanvas("tile-2", [{ x: markerX, y: p.y + 0.75 * p.h }]);
+  const before = await app.scopeMarkerRow("tile-2", "A");
+  expect(before).not.toBeNull();
+
+  // Now drag from the SAME X, but in the top strip — the row the position
+  // handle claims. The marker's vertical line spans the full plot height,
+  // so `markerSlotNear` must give it first refusal: this drag should move
+  // the MARKER, and the trigger position must stay untouched.
+  await app.dragOnScopeCanvas("tile-2", [
+    { x: markerX, y: p.y + 6 },
+    { x: p.x + 0.7 * p.w, y: p.y + 6 },
+    { x: p.x + 0.7 * p.w, y: p.y + 6 },
+  ]);
+
+  const after = await app.scopeMarkerRow("tile-2", "A");
+  expect(after).not.toBeNull();
+  expect(after?.freq).not.toBe(before?.freq);
+
+  const pct = await app.drv.eval(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: {
+            state(): { layout: { tiles: Record<string, { triggerPositionPct: number }> } };
+          };
+        }
+      ).qa40xV2Debug.state().layout.tiles["tile-2"].triggerPositionPct,
+    undefined as void
+  );
+  expect(pct).toBe(50);
+});
