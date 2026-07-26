@@ -664,9 +664,11 @@ function drawDbYAxis(
 function drawXUnitTag(ctx: CanvasRenderingContext2D, plot: Rect, unit: string): void {
   ctx.font = TICK_FONT;
   ctx.textAlign = "right";
-  ctx.textBaseline = "top";
+  ctx.textBaseline = "bottom";
   ctx.fillStyle = T.inkMuted;
-  ctx.fillText(unit, plot.x + plot.w - 7, plot.y + 6);
+  // Bottom-right, next to the X tick labels it qualifies (the Y unit tag
+  // sits top-LEFT for the same reason: nearest its own axis).
+  ctx.fillText(unit, plot.x + plot.w - 7, plot.y + plot.h - 6);
 }
 
 function drawFrame(ctx: CanvasRenderingContext2D, plot: Rect): void {
