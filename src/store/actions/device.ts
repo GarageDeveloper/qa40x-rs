@@ -6,6 +6,7 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, LevelOffsetsDb } from "../state";
+import { syncStream } from "./stream";
 import { toast } from "./ui";
 
 /**
@@ -262,6 +263,11 @@ export async function setSampleRate(
   try {
     await ipc.call("set_sample_rate", { rateHz });
     await refreshConfig(store, ipc);
+    // A running stream's ms→samples projections (scope windows, trigger
+    // pre_samples — selectors/trigger.ts::tileWindowSamples) key on the
+    // device sample rate: a step here must reach a live loop, same as every
+    // other capture-affecting change (pre-existing gap, surfaced by Lot A).
+    syncStream(store, ipc);
   } catch (e) {
     toast(store, "error", `Sample rate: ${e}`);
   }

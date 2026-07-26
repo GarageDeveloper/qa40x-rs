@@ -16,7 +16,7 @@ use std::time::Instant;
 use tauri_app_lib::qa40x::types::AudioData;
 use tauri_app_lib::stream::{
     ClipState, LevelOffsetsDb, MixStatus, SpectraMsg, StereoFrame, StreamFrame, StreamMetrics,
-    StreamMsg, StreamStats,
+    StreamMsg, StreamStats, TriggerMsg,
 };
 
 /// Deterministic full-scale-ish samples with noisy mantissas — a constant or a
@@ -61,6 +61,7 @@ fn frame(n: usize) -> StreamMsg {
             harmonics_l: None,
             harmonics_r: None,
         },
+        trigger: TriggerMsg::default(),
         mix: MixStatus {
             sigma_peak_dbv: Some(-3.2),
             clip_input: ClipState::None,

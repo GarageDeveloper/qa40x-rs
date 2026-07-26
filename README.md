@@ -49,6 +49,10 @@ application **v1** and the upcoming **v2** expected in 2026.
 - **Live views** — spectrum, oscilloscope and swept measurements in a
   configurable multi-tile grid; any trace can be frozen and kept as a
   reference for comparison.
+- **Scope trigger** — Auto/Normal/Single edge trigger per input or output
+  channel, with draggable level/position markers on the oscilloscope and
+  sub-sample alignment; it only picks which slice the scope displays and
+  never affects spectra or measurements.
 - **Measurements** — THD, THD+N, SNR, RMS and peak levels (dBV), crest
   factor; input-attenuator status surfaced in the UI.
 - **Frequency response** — swept (log-chirp) measurement with

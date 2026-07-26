@@ -40,6 +40,7 @@ const T = {
   markerA: "#e6a23c",
   markerB: "#e06ca6",
   markerLine: "rgba(232, 237, 241, 0.45)",
+  trigger: "#2dd4bf",
   readoutBg: "rgba(11, 15, 20, 0.95)",
   readoutBorder: "rgba(255, 255, 255, 0.13)",
   chipInk: "#0f141a",
@@ -66,6 +67,7 @@ function refreshChartTheme(): void {
   T.markerA = v("--marker-a", T.markerA);
   T.markerB = v("--marker-b", T.markerB);
   T.markerLine = v("--chart-marker-line", T.markerLine);
+  T.trigger = v("--chart-trigger", T.trigger);
   T.readoutBg = v("--chart-readout-bg", T.readoutBg);
   T.readoutBorder = v("--chart-readout-border", T.readoutBorder);
   T.chipInk = v("--chart-chip-ink", T.chipInk);
@@ -2347,6 +2349,32 @@ export class ScopeChart extends BaseChart {
   // Up-to-two draggable time markers (sample indices) with a Δt / frequency readout.
   private markers: number[] = [];
   private dragSlot = -1;
+
+  // Trigger overlay (Lot A, issue #26): a level (Y, display units) and a
+  // position (X, 0..1 of the displayed window) marker, both draggable.
+  // `triggerLevel === null` means no trigger is set — the hit-test in
+  // onPointerDown then never runs (see there), so plain-scope pointer
+  // behavior stays byte-identical to before this feature existed.
+  private triggerLevel: number | null = null;
+  private triggerPosition = 0;
+  /** Uniform x-shift applied in `xOf`, in samples: the wire contract is that
+   * the crossing sits at continuous sample `index - 1 + frac`, i.e. `frac -
+   * 1` samples before the reported (integer) `index` — so drawn sample `i`
+   * must land at `(i - (frac - 1)) / (count - 1)` of the plot for the
+   * crossing to fall exactly on the marker (issue #26 reviews #4/#7). Stays
+   * 0 when no trigger is set, which makes the shift an identity. */
+  private xShiftSamples = 0;
+  /** Level drag reports a DISPLAY-unit value — the volts conversion happens
+   * in the tile layer (this chart never sees a converter, plan §3.4).
+   * `done` is true exactly once, on pointerup (issue #26 review #10): the
+   * tile only pushes the value to the running stream (IPC + full grid
+   * re-feed) on that call, and just updates the store on every intermediate
+   * pointermove. */
+  onTriggerLevel?: (displayValue: number, done: boolean) => void;
+  /** Position drag reports the 0..1 fraction of the displayed window; same
+   * `done` contract as `onTriggerLevel`. */
+  onTriggerPosition?: (position: number, done: boolean) => void;
+  private dragTrigger: "level" | "position" | null = null;
   /** Pointer plot-X while hovering (null = not hovering), so a live refresh can
    * re-derive the cursor readout instead of dropping it every frame. */
   private hoverPx: number | null = null;
@@ -2419,6 +2447,33 @@ export class ScopeChart extends BaseChart {
     this.render();
   }
 
+  /** Set (or clear, `null`) the trigger overlay: a level line (display
+   * units, matching the drawn samples) and a position line (0..1 of the
+   * window), plus the sub-sample `frac` shift. `null` resets all three —
+   * the trigger-off state this chart started in. A no-op (no render) when
+   * nothing actually changed from last time — `feed()` calls this every
+   * frame, including every frame of a HELD waiting/stopped picture where the
+   * VM reports the exact same trigger repeatedly (issue #26 review #10). */
+  setTrigger(t: { levelDisplay: number; position: number; frac: number } | null): void {
+    const nextLevel = t ? t.levelDisplay : null;
+    const nextPosition = t ? t.position : 0;
+    // `frac - 1`: the wire crossing sits at `index - 1 + frac`, so sample
+    // `i` must draw at `i - (frac - 1)` for the crossing to land on the
+    // marker (reviews #4/#7; see the `xShiftSamples` field doc).
+    const nextShift = t ? t.frac - 1 : 0;
+    if (
+      nextLevel === this.triggerLevel &&
+      nextPosition === this.triggerPosition &&
+      nextShift === this.xShiftSamples
+    ) {
+      return;
+    }
+    this.triggerLevel = nextLevel;
+    this.triggerPosition = nextPosition;
+    this.xShiftSamples = nextShift;
+    this.render();
+  }
+
   /** Sample index under a pixel X, honoring the displayed window. */
   private sampleAtX(px: number): number {
     const n = this.displayCount();
@@ -2432,18 +2487,79 @@ export class ScopeChart extends BaseChart {
     return 0;
   }
 
+  /** Inverse of `yOf`: pixel Y back to a value in the chart's current
+   * (display-unit) domain — used by the trigger level drag. */
+  private valueAtY(y: number): number {
+    return ((this.plot.y + this.plot.h / 2 - y) / (this.plot.h / 2)) * this.yRange;
+  }
+
+  /** Level-line hit zone: near the line itself, or anywhere within the
+   * PLOT'S Y EXTENT in its right-gutter handle (the handle is the easier,
+   * X-independent-in-Y target — a scalar level has no natural X to sit
+   * under; bounded to the plot's height so it can't claim clicks in the
+   * axis-label margin above/below, issue #26 review #11b). */
+  private hitTriggerLevel(x: number, y: number): boolean {
+    const p = this.plot;
+    if (x >= p.x + p.w && x <= p.x + p.w + 14 && y >= p.y && y <= p.y + p.h) return true;
+    if (this.triggerLevel === null) return false;
+    const ly = this.yOf(this.triggerLevel);
+    return x >= p.x && x <= p.x + p.w && Math.abs(y - ly) <= 4;
+  }
+
+  /** Position-line hit zone: the top strip only (so it can never overlap
+   * the level line's full-height hit test), near the line's X. Checked by
+   * the caller only AFTER an A/B marker slot near `x` has had first refusal
+   * — the marker chip labels live in this same top strip (review #11a). */
+  private hitTriggerPosition(x: number, y: number): boolean {
+    const p = this.plot;
+    if (y < p.y || y > p.y + 12) return false;
+    const px = p.x + this.triggerPosition * p.w;
+    return Math.abs(x - px) <= 6;
+  }
+
+  /** Index of an existing A/B time marker within grab range of `x` — y
+   * independent, mirroring the plain marker-drag hit test below (a marker's
+   * vertical line/chip spans the full plot height, so only X matters). */
+  private markerSlotNear(px: number): number {
+    for (let s = 0; s < this.markers.length; s++) {
+      if (Math.abs(this.xOf(this.markers[s]) - px) <= 6) return s;
+    }
+    return -1;
+  }
+
   private onPointerDown(e: PointerEvent): void {
     if (e.button !== 0 || !this.hasData()) return;
     const { plot } = this;
-    if (e.offsetX < plot.x || e.offsetX > plot.x + plot.w) return;
-    // Grab a nearby existing marker (within 6 px) to drag it; else drop a new one.
-    let slot = -1;
-    for (let s = 0; s < this.markers.length; s++) {
-      if (Math.abs(this.xOf(this.markers[s]) - e.offsetX) <= 6) {
-        slot = s;
-        break;
+
+    // Trigger hit-test runs FIRST, and only when a trigger is actually set —
+    // with an early return on a hit. This ordering (before the A/B marker
+    // logic below) and the `triggerLevel !== null` guard are load-bearing:
+    // with no trigger set, no trigger branch is ever taken, so pointer
+    // behavior stays byte-identical to the pre-Lot-A scope.
+    if (this.triggerLevel !== null) {
+      if (this.hitTriggerLevel(e.offsetX, e.offsetY)) {
+        this.dragTrigger = "level";
+        this.canvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        return;
+      }
+      // The A/B marker chip labels sit in the SAME top strip the
+      // trigger-position handle claims — give the marker first refusal so
+      // it isn't shadowed when the two land near the same X (review #11a).
+      if (
+        this.markerSlotNear(e.offsetX) < 0 &&
+        this.hitTriggerPosition(e.offsetX, e.offsetY)
+      ) {
+        this.dragTrigger = "position";
+        this.canvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        return;
       }
     }
+
+    if (e.offsetX < plot.x || e.offsetX > plot.x + plot.w) return;
+    // Grab a nearby existing marker (within 6 px) to drag it; else drop a new one.
+    let slot = this.markerSlotNear(e.offsetX);
     if (slot < 0) {
       if (this.markers.length < 2) {
         this.markers.push(this.sampleAtX(e.offsetX));
@@ -2465,6 +2581,24 @@ export class ScopeChart extends BaseChart {
   }
 
   private onPointerUp(e: PointerEvent): void {
+    if (this.dragTrigger !== null) {
+      // Final callback with `done: true` — the tile syncs the stream on
+      // THIS call only, never on the pointermoves that got us here (review
+      // #10). `this.triggerLevel`/`triggerPosition` already hold the
+      // last-dragged value (kept live by onPointerMove).
+      if (this.dragTrigger === "level" && this.triggerLevel !== null) {
+        this.onTriggerLevel?.(this.triggerLevel, true);
+      } else if (this.dragTrigger === "position") {
+        this.onTriggerPosition?.(this.triggerPosition, true);
+      }
+      this.dragTrigger = null;
+      try {
+        this.canvas.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     if (this.dragSlot >= 0) {
       this.dragSlot = -1;
       try {
@@ -2494,9 +2628,58 @@ export class ScopeChart extends BaseChart {
       return;
     }
     this.blit((ctx) => {
+      this.drawTriggerMarkers(ctx);
       this.drawScopeMarkers(ctx);
       if (this.cursorIndex >= 0 && this.dragSlot < 0) this.drawCursor(ctx, this.cursorIndex);
     });
+  }
+
+  /** The trigger overlay: a dashed level line + right-gutter "T" handle, and
+   * a dotted position line + a "▼" handle in the top strip. Overlay-layer
+   * (like the A/B markers), so dragging never forces a full data redraw. */
+  private drawTriggerMarkers(ctx: CanvasRenderingContext2D): void {
+    if (this.triggerLevel === null) return;
+    const p = this.plot;
+
+    const ly = Math.round(this.yOf(this.triggerLevel)) + 0.5;
+    ctx.save();
+    ctx.setLineDash([5, 3]);
+    ctx.strokeStyle = T.trigger;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p.x, ly);
+    ctx.lineTo(p.x + p.w, ly);
+    ctx.stroke();
+    ctx.restore();
+
+    const label = "T";
+    ctx.font = `600 10px ${MONO}`;
+    const cw = ctx.measureText(label).width + 8;
+    const gy = Math.max(p.y + 8, Math.min(p.y + p.h - 8, this.yOf(this.triggerLevel)));
+    ctx.fillStyle = T.trigger;
+    roundRectPath(ctx, p.x + p.w + 2, gy - 7, cw, 14, 3);
+    ctx.fill();
+    ctx.fillStyle = T.chipInk;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, p.x + p.w + 2 + cw / 2, gy);
+
+    const px = Math.round(p.x + this.triggerPosition * p.w) + 0.5;
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = T.trigger;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, p.y);
+    ctx.lineTo(px, p.y + p.h);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = T.trigger;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.font = `600 10px ${MONO}`;
+    ctx.fillText("▼", px, p.y + 1);
   }
 
   protected setCursor(index: number): void {
@@ -2630,8 +2813,11 @@ export class ScopeChart extends BaseChart {
     return Math.max(this.left.length, this.right.length);
   }
 
+  // The `- xShiftSamples` term shifts every drawn sample by the trigger's
+  // sub-sample residual (0 when no trigger is set, an identity — plain-scope
+  // pixel positions must stay byte-identical to before this feature).
   private xOf = (i: number): number =>
-    this.plot.x + (i / Math.max(1, this.displayCount() - 1)) * this.plot.w;
+    this.plot.x + ((i - this.xShiftSamples) / Math.max(1, this.displayCount() - 1)) * this.plot.w;
 
   private yOf = (v: number): number =>
     this.plot.y + this.plot.h / 2 - (v / this.yRange) * (this.plot.h / 2);
@@ -2765,7 +2951,9 @@ export class ScopeChart extends BaseChart {
     if (this.hoverPx != null && this.dragSlot < 0 && this.hasData()) {
       this.cursorIndex = this.indexAtPx(this.hoverPx);
     }
-    if (this.cursorIndex >= 0 || this.markers.length) this.refreshScopeOverlay();
+    if (this.cursorIndex >= 0 || this.markers.length || this.triggerLevel !== null) {
+      this.refreshScopeOverlay();
+    }
   }
 
   private indexAtPx(px: number): number {
@@ -2780,6 +2968,26 @@ export class ScopeChart extends BaseChart {
 
   protected onPointerMove(e: PointerEvent): void {
     if (!this.hasData()) return;
+    if (this.dragTrigger === "level") {
+      // Clamp the Y used for the value conversion to the plot's own extent
+      // FIRST — a drag that strays below/above the plot (into the axis
+      // margin) must not set an off-scale level (review #11c); `valueAtY`
+      // maps `plot.y`/`plot.y + plot.h` to exactly `+yRange`/`-yRange`.
+      const clampedY = Math.max(this.plot.y, Math.min(this.plot.y + this.plot.h, e.offsetY));
+      const v = this.valueAtY(clampedY);
+      this.triggerLevel = v;
+      this.onTriggerLevel?.(v, false);
+      this.refreshScopeOverlay();
+      return;
+    }
+    if (this.dragTrigger === "position") {
+      const p = this.plot;
+      const frac = Math.max(0, Math.min(1, (e.offsetX - p.x) / Math.max(1, p.w)));
+      this.triggerPosition = frac;
+      this.onTriggerPosition?.(frac, false);
+      this.refreshScopeOverlay();
+      return;
+    }
     if (this.dragSlot >= 0) {
       this.markers[this.dragSlot] = this.sampleAtX(e.offsetX);
       this.updateMarkerPanel();

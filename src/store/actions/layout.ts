@@ -268,3 +268,57 @@ export function setTileTimeWindow(
     t.timeWindowMs === timeWindowMs ? t : { ...t, timeWindowMs }
   );
 }
+
+/** Scope tiles: which endpoint's trigger this tile aligns to ("auto" =
+ * follow the chip source). Changes the `pre_samples` this tile asks for
+ * (selectors/trigger.ts::triggerPreSamples), so syncs the stream. */
+export function setTileTriggerSource(
+  store: Store<AppState>,
+  ipc: Ipc,
+  tileId: string,
+  triggerSource: "auto" | TraceId
+): void {
+  patchTile(store, "layout/trigger-source", tileId, (t) =>
+    t.triggerSource === triggerSource ? t : { ...t, triggerSource }
+  );
+  syncStream(store, ipc);
+}
+
+/**
+ * Trigger position as % of the displayed window — widens/narrows the
+ * `pre_samples` this tile needs, so syncs the stream by default. Ignores a
+ * non-finite value outright and clamps to [0,100] (issue #26 review #1: a
+ * bad value must never reach `validate_config`, which would reject the
+ * WHOLE stream config and silently kill every later `stream_update` —
+ * including play/stop — until fixed).
+ *
+ * `opts.sync` (default true): pass `false` during a canvas drag's
+ * pointermove (store-only, cheap) and `true` once on pointerup (review #10:
+ * an IPC round trip + full grid re-feed on every pointermove is wasteful).
+ */
+export function setTileTriggerPosition(
+  store: Store<AppState>,
+  ipc: Ipc,
+  tileId: string,
+  triggerPositionPct: number,
+  opts: { sync?: boolean } = {}
+): void {
+  if (!Number.isFinite(triggerPositionPct)) return;
+  const clamped = Math.max(0, Math.min(100, triggerPositionPct));
+  patchTile(store, "layout/trigger-position", tileId, (t) =>
+    t.triggerPositionPct === clamped ? t : { ...t, triggerPositionPct: clamped }
+  );
+  if (opts.sync ?? true) syncStream(store, ipc);
+}
+
+/** Display-only: draw the level/position marker handles (persisted with the
+ * tile, no backend effect). */
+export function setTileShowTriggerMarkers(
+  store: Store<AppState>,
+  tileId: string,
+  showTriggerMarkers: boolean
+): void {
+  patchTile(store, "layout/show-trigger-markers", tileId, (t) =>
+    t.showTriggerMarkers === showTriggerMarkers ? t : { ...t, showTriggerMarkers }
+  );
+}

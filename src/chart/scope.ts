@@ -7,8 +7,8 @@
  * never re-engage through this wrapper (#60's td twin of #51).
  */
 import { ScopeChart } from "./canvas";
-import type { TdSeriesVM } from "../store/selectors/chartvm";
-import type { ScopeRenderer } from "./renderer";
+import type { ScopeTriggerVM, TdSeriesVM } from "../store/selectors/chartvm";
+import type { ScopeRenderer, ScopeTriggerHandlers } from "./renderer";
 
 export class WrappedScopeChart implements ScopeRenderer {
   private readonly chart: ScopeChart;
@@ -49,6 +49,19 @@ export class WrappedScopeChart implements ScopeRenderer {
 
   setTimeWindow(ms: number | null): void {
     this.chart.setTimeWindow(ms);
+  }
+
+  setTrigger(trigger: ScopeTriggerVM | null): void {
+    this.chart.setTrigger(
+      trigger
+        ? { levelDisplay: trigger.levelDisplay, position: trigger.position, frac: trigger.frac }
+        : null
+    );
+  }
+
+  setTriggerHandlers(handlers: ScopeTriggerHandlers): void {
+    this.chart.onTriggerLevel = handlers.onLevel;
+    this.chart.onTriggerPosition = handlers.onPosition;
   }
 
   destroy(): void {

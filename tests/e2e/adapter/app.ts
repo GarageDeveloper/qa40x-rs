@@ -546,6 +546,248 @@ export class AppV2 {
     );
   }
 
+  /** Raw display-unit samples of a tile's first scope series (the trigger
+   * source's own picture) — for edge-alignment and held-frame assertions. */
+  async scopeSamples(tileId?: string): Promise<number[]> {
+    return this.drv.eval(
+      (a: { tileId?: string }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              scopeVM(id?: string): {
+                series: { samples: Float64Array }[];
+              };
+            };
+          }
+        ).qa40xV2Debug;
+        const s = dbg.scopeVM(a.tileId).series[0];
+        return s ? Array.from(s.samples) : [];
+      },
+      { tileId }
+    );
+  }
+
+  /** The scope trigger overlay of a tile's view-model (Lot A, issue #26) —
+   * `null` when the tile's resolved trigger is off or nothing has latched
+   * yet, the same shape `scopeVM().trigger` returns. */
+  async scopeTrigger(tileId?: string): Promise<{
+    sourceId: string;
+    state: string;
+    frac: number;
+    levelDisplay: number;
+    position: number;
+    held: boolean;
+  } | null> {
+    return this.drv.eval(
+      (a: { tileId?: string }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              scopeVM(id?: string): {
+                trigger: {
+                  sourceId: string;
+                  state: string;
+                  frac: number;
+                  levelDisplay: number;
+                  position: number;
+                  held: boolean;
+                } | null;
+              };
+            };
+          }
+        ).qa40xV2Debug;
+        return dbg.scopeVM(a.tileId).trigger;
+      },
+      { tileId }
+    );
+  }
+
+  /** Set a scope tile's trigger controls via the ⚙ Trigger tab (same
+   * gesture the Axis-tab tests use elsewhere in this adapter) — pass only
+   * the fields to change, the rest are left as-is. Mode/edge/level/hyst
+   * land on the tile's CURRENTLY resolved endpoint (per-endpoint, plan
+   * §3.2); source/position/markers land on the tile itself. */
+  async setTileTrigger(
+    tileId: string,
+    opts: {
+      source?: "auto" | string;
+      mode?: "off" | "auto" | "normal" | "single";
+      edge?: "rising" | "falling";
+      levelV?: number;
+      hystV?: number | null;
+      positionPct?: number;
+      markers?: boolean;
+    }
+  ): Promise<void> {
+    await this.drv.click(`[data-testid="tile-gear-${tileId}"]`);
+    await this.drv.click('[data-testid="gear-tab-trigger"]');
+    if (opts.source !== undefined) await this.setSelect("gear-trigger-source", opts.source);
+    if (opts.mode !== undefined) await this.setSelect("gear-trigger-mode", opts.mode);
+    if (opts.edge !== undefined) await this.setSelect("gear-trigger-edge", opts.edge);
+    if (opts.levelV !== undefined) await this.setNumber("gear-trigger-level", opts.levelV);
+    if (opts.hystV !== undefined) {
+      await this.drv.eval(
+        (a: { value: number | null }) => {
+          const input = document.querySelector(
+            '[data-testid="gear-trigger-hyst"]'
+          ) as HTMLInputElement;
+          input.value = a.value === null ? "" : String(a.value);
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        { value: opts.hystV }
+      );
+    }
+    if (opts.positionPct !== undefined) await this.setNumber("gear-trigger-position", opts.positionPct);
+    if (opts.markers !== undefined) {
+      await this.drv.eval(
+        (a: { want: boolean }) => {
+          const box = document.querySelector(
+            '[data-testid="gear-trigger-markers"]'
+          ) as HTMLInputElement;
+          if (box.checked !== a.want) box.click();
+        },
+        { want: opts.markers }
+      );
+    }
+    await this.closeDialog();
+  }
+
+  /** The tile-header trigger chip's text (`T off` / `T ▲ AUTO` / ...). */
+  async triggerChip(tileId: string): Promise<string | null> {
+    return this.drv.text(`[data-testid="tile-trigger-${tileId}"]`);
+  }
+
+  /** Left-click the trigger chip (toggles its quick menu). */
+  async clickTriggerChip(tileId: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigger-${tileId}"]`);
+  }
+
+  /** Whether the chip's quick trigger menu is open. */
+  async triggerMenuOpen(tileId: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { sel: string }) => {
+        const menu = document.querySelector(a.sel) as HTMLElement | null;
+        return menu !== null && !menu.hidden;
+      },
+      { sel: `[data-testid="tile-trigmenu-${tileId}"]` }
+    );
+  }
+
+  /** Click a quick-menu item: `mode-auto`, `edge-falling`, `settings`, ... */
+  async clickTriggerMenuItem(tileId: string, item: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigmenu-${tileId}-${item}"]`);
+  }
+
+  /** Right-click the trigger chip — jumps straight to the ⚙ Trigger tab. */
+  async contextClickTriggerChip(tileId: string): Promise<void> {
+    await this.drv.eval(
+      (a: { sel: string }) => {
+        document
+          .querySelector(a.sel)!
+          .dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true })
+          );
+      },
+      { sel: `[data-testid="tile-trigger-${tileId}"]` }
+    );
+  }
+
+  /** Click a tile's Arm button (re-)arms a SINGLE shot. */
+  async armTrigger(tileId: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigger-arm-${tileId}"]`);
+  }
+
+  /** Whether the Arm button carries the armed highlight (SINGLE waiting). */
+  async armHighlighted(tileId: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { sel: string }) =>
+        document.querySelector(a.sel)?.classList.contains("btn--primary") ===
+        true,
+      { sel: `[data-testid="tile-trigger-arm-${tileId}"]` }
+    );
+  }
+
+  /** Client-px bounding box of a scope tile's chart canvas — the coordinate
+   * space `dragOnScopeCanvas` and the trigger/marker hit zones live in. */
+  async chartCanvasRect(
+    tileId: string
+  ): Promise<{ x: number; y: number; width: number; height: number }> {
+    return this.drv.eval(
+      (a: { tileId: string }) => {
+        const el = document.querySelector(
+          `[data-testid="tile-chart-${a.tileId}"] canvas`
+        ) as HTMLCanvasElement;
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      },
+      { tileId }
+    );
+  }
+
+  /**
+   * Drive a real pointer-gesture (down at the first point, move through the
+   * rest, up at the last) directly on a scope tile's chart canvas — the same
+   * synthetic-PointerEvent approach `dragTile` uses (the ScopeChart's own
+   * `pointerdown`/`pointermove`/`pointerup` listeners, `setPointerCapture`
+   * wrapped in a try/catch for exactly this reason, see tile.ts's drag
+   * handle). Exercises the SAME onPointerDown hit-test → onPointerMove →
+   * onPointerUp(done=true) path a mouse drag takes — trigger level/position
+   * handles and A/B time markers all live on this one canvas and share this
+   * gesture shape.
+   */
+  async dragOnScopeCanvas(
+    tileId: string,
+    points: { x: number; y: number }[]
+  ): Promise<void> {
+    await this.drv.eval(
+      (a: { tileId: string; points: { x: number; y: number }[] }) => {
+        const el = document.querySelector(
+          `[data-testid="tile-chart-${a.tileId}"] canvas`
+        ) as HTMLElement;
+        const at = (x: number, y: number): PointerEventInit => ({
+          bubbles: true,
+          pointerId: 1,
+          button: 0,
+          clientX: x,
+          clientY: y,
+        });
+        const [first, ...rest] = a.points;
+        el.dispatchEvent(new PointerEvent("pointerdown", at(first.x, first.y)));
+        for (const p of rest) {
+          el.dispatchEvent(new PointerEvent("pointermove", at(p.x, p.y)));
+        }
+        const last = a.points[a.points.length - 1];
+        el.dispatchEvent(new PointerEvent("pointerup", at(last.x, last.y)));
+      },
+      { tileId, points }
+    );
+  }
+
+  /** A scope tile's A/B marker readout row ("A" or "B"), or null when that
+   * marker doesn't exist — `.mk-freq` is the Δt-from-start readout, the
+   * cheapest DOM-observable proof a marker moved. */
+  async scopeMarkerRow(
+    tileId: string,
+    label: "A" | "B"
+  ): Promise<{ freq: string; val: string } | null> {
+    return this.drv.eval(
+      (a: { tileId: string; label: string }) => {
+        const rows = Array.from(
+          document.querySelectorAll(`[data-testid="tile-chart-${a.tileId}"] .mk-row`)
+        );
+        const row = rows.find(
+          (r) => r.querySelector(".mk-name")?.textContent === a.label
+        );
+        if (!row) return null;
+        return {
+          freq: row.querySelector(".mk-freq")?.textContent ?? "",
+          val: row.querySelector(".mk-val")?.textContent ?? "",
+        };
+      },
+      { tileId, label }
+    );
+  }
+
   /** The pool rows as {id, label, badges: [{tag, dim, tip}]}. */
   async poolRows(): Promise<
     { id: string; label: string; badges: { tag: string; dim: boolean; tip: string }[] }[]

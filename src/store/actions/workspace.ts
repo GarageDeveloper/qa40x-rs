@@ -11,6 +11,7 @@
 import type { Ipc } from "../../ipc/ipc";
 import { clearAllFrames, putFrames } from "../../data/frames";
 import { clearAllMeasures } from "../../data/measures";
+import { clearTriggerSnapshots } from "../../data/triggered";
 import { resetAllChains, syncChains } from "../../data/chains";
 import type { Store } from "../store";
 import type { AppState } from "../state";
@@ -42,10 +43,14 @@ export function applyWorkspaceDoc(
     return false;
   }
 
-  // The whole data plane restarts: cached frames, measures and transform
-  // scheduling all key on trace ids about to be replaced.
+  // The whole data plane restarts: cached frames, measures, transform
+  // scheduling and held trigger snapshots all key on trace ids about to be
+  // replaced — a stale snapshot left behind here would let a HELD
+  // NORMAL/SINGLE scope picture from the OLD bench keep rendering under a
+  // trace id the new bench just reused (issue #26 review #3).
   clearAllFrames();
   clearAllMeasures();
+  clearTriggerSnapshots();
   resetAllChains();
 
   // Frozen ❄ data lands in the cache FIRST, then the store update reveals
@@ -84,6 +89,7 @@ export function applyWorkspaceDoc(
     },
     layout: { ...doc.layout, focus: null },
     workspace: { name: doc.name, collapsed: [...doc.collapsed] },
+    triggers: doc.triggers,
   }));
 
   // A running stream keeps running and simply follows the new bench (its

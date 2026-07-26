@@ -225,6 +225,15 @@ export function mountGridPanel(
           const t = s.traces.byId[id];
           return t ? [id, t.label, t.color, t.seq, t.offsetDb] : id;
         }),
+        // The chip/marker text (tile.ts's `feed()`) reads mode/edge from
+        // `s.triggers` and live state from `s.run.triggers` even while the
+        // stream is stopped — without these in the key, a trigger config
+        // change with no running stream (no new frame to re-feed on) left
+        // the chip stale until something else happened to fire this
+        // selector (issue #26 review #6).
+        s.triggers,
+        s.run.triggers,
+        s.run.trigArmPending,
       ]),
     () => {
       const s = store.get();

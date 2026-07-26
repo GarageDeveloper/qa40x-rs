@@ -3,6 +3,7 @@ import type { MixerSlotDesc } from "./MixerSlotDesc";
 import type { SpectraRequest } from "./SpectraRequest";
 import type { StreamAveraging } from "./StreamAveraging";
 import type { StreamWindow } from "./StreamWindow";
+import type { TriggerRequest } from "./TriggerRequest";
 
 /**
  * The stream loop's configuration. `stream_update` swaps it atomically; the
@@ -21,4 +22,13 @@ slots: Array<MixerSlotDesc>, window: StreamWindow, averaging: StreamAveraging, s
 /**
  * Fixed output range in dBV, or `None` = auto-fit to the summed peak.
  */
-output_range_dbv: number | null, };
+output_range_dbv: number | null, 
+/**
+ * Per-endpoint scope trigger. Absent from an older/minimal client's
+ * JSON = no triggers (byte-identical old behavior). `#[ts(as/optional)]`
+ * exports this as `triggers?: TriggerRequest` — the Rust side stays a
+ * plain (non-`Option`) `TriggerRequest` with `#[serde(default)]`, so
+ * `config.triggers.*` field access below never needs an `Option` layer;
+ * only the wire TYPE needs to tell the frontend the key is optional.
+ */
+triggers?: TriggerRequest, };

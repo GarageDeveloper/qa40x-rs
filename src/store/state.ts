@@ -17,6 +17,7 @@ import type {
   SlotError,
   Telemetry,
   TransformStep,
+  TriggerState,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
 
@@ -68,6 +69,36 @@ export interface AcquisitionState {
   coherentGen: boolean;
 }
 
+/** Trigger run mode (store-side): the wire `TriggerMode` has no "off" — an
+ * "off" endpoint is simply ABSENT from the `TriggerRequest` (selectors/
+ * trigger.ts::triggerRequest). */
+export type TriggerMode = "off" | "auto" | "normal" | "single";
+export type TriggerEdge = "rising" | "falling";
+
+/** Per-endpoint trigger settings (plan §3.2 — decision 2: mode/edge/level/
+ * hysteresis are per ENDPOINT, shared by every tile pointing its trigger
+ * source there; position/source/markers are per TILE, see `TileConfig`). */
+export interface TriggerSettings {
+  mode: TriggerMode;
+  edge: TriggerEdge;
+  /** Level in level-volts of the endpoint's own converter (signed) — the
+   * backend converts to that frame's FS domain via its own offset. */
+  levelV: number;
+  /** null = auto (2 % of the frame's own peak, floored at 1e-4 FS). */
+  hystV: number | null;
+  /** Bumped by `armSingle` to re-arm a SINGLE shot (idempotent backend-side:
+   * only a strictly larger value re-arms). */
+  armEpoch: number;
+}
+
+export const DEFAULT_TRIGGER: TriggerSettings = {
+  mode: "off",
+  edge: "rising",
+  levelV: 0,
+  hystV: null,
+  armEpoch: 0,
+};
+
 export interface RunState {
   streaming: boolean;
   /** A stop request is in flight (backend draining its last frame). The
@@ -82,6 +113,18 @@ export interface RunState {
   /** Per-slot source problems from the backend (bad script, unknown
    * waveform…) — named per source id, never wholesale (M2). */
   slotErrors: SlotError[];
+  /** Latest per-endpoint trigger alignment, mirrored from the pushed frame
+   * (`ingestFrame`) — the live-frame twin of a held `TriggerSnapshot`
+   * (data/triggered.ts). Endpoints the current config doesn't trigger are
+   * simply absent. */
+  triggers: Record<TraceId, { state: TriggerState; index: number; frac: number }>;
+  /** Endpoints with a SINGLE re-arm in flight: set by armSingle/mode→single,
+   * cleared by the first frame whose trigger state proves the re-armed scan
+   * ran (`waiting`/`triggered`/`auto`). Bridges the gap where the in-flight
+   * frame — captured under the OLD config — still reports `stopped`: at
+   * 1M-FFT frame rates that gap is a visible fraction of a second, and the
+   * Arm highlight must cover it. */
+  trigArmPending: Record<TraceId, boolean>;
   /**
    * Output-only session mode (M2, v1 #49): playing sources drive the DAC
    * gap-free with NO capture — for feeding an external DUT. A property of
@@ -369,6 +412,16 @@ export interface TileConfig {
    * trace, backend-located). Off by default — a multi-tile dashboard reads
    * cleaner without them (maintainer decision, M6 gap review). */
   showHarmonics: boolean;
+  /** Scope tiles: which endpoint's trigger this tile aligns to. "auto" =
+   * `chipSourceTraceId(tile)` (selectors/trigger.ts::tileTriggerSourceId) —
+   * per-TILE (plan §3.2 decision 2), unlike the shared per-endpoint
+   * mode/edge/level/hysteresis in `AppState.triggers`. */
+  triggerSource: "auto" | TraceId;
+  /** Trigger position as % of the displayed window (0 = left edge, the
+   * classic "all post-trigger" scope setting; 100 = right edge). */
+  triggerPositionPct: number;
+  /** Draw the level/position marker handles (canvas, Step 5). */
+  showTriggerMarkers: boolean;
 }
 
 export interface LayoutState {
@@ -392,6 +445,9 @@ export interface AppState {
   layout: LayoutState;
   workspace: WorkspaceState;
   ui: UiState;
+  /** Per-endpoint trigger settings, keyed by `HW_TRACE_IDS.*` (plan §3.2).
+   * Read-through default: an absent entry means `DEFAULT_TRIGGER` ("off"). */
+  triggers: Record<TraceId, TriggerSettings>;
 }
 
 export const FFT_SIZES = [
@@ -511,6 +567,10 @@ export function defaultTile(
     timeWindowMs: 10,
     showPhase: false,
     showHarmonics: false,
+    triggerSource: "auto",
+    // Default trigger position 50 % (plan decision 8).
+    triggerPositionPct: 50,
+    showTriggerMarkers: true,
   };
 }
 
@@ -577,6 +637,8 @@ export function initialState(): AppState {
       outputOnly: false,
       generatorRunning: false,
       programLock: null,
+      triggers: {},
+      trigArmPending: {},
     },
     traces: initialTraces(),
     sources: initialSources(),
@@ -589,5 +651,6 @@ export function initialState(): AppState {
       rest: null,
       peakHoldEpoch: 0,
     },
+    triggers: {},
   };
 }

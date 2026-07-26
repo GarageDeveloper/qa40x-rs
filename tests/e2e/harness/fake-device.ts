@@ -26,7 +26,7 @@
  *   absolute level that was actually driven when it was captured.
  */
 
-import { analyzeAudio, analyzeSpectrum, processFft } from "./dsp";
+import { analyzeAudio, analyzeSpectrum, autoHysteresis, findEdge, processFft } from "./dsp";
 import { inputDbvOffsetDb, syntheticLoopbackProvider, type FrameProvider } from "./frames";
 
 /* ---- mirrors of the frontend/backend wire types ---------------------- */
@@ -67,6 +67,27 @@ interface MixSlotError {
 
 /* ---- v2 stream wire (mirrors src-tauri/src/stream.rs) ----------------- */
 
+/** Mirrors `TriggerConfig` (stream.rs) — level/hysteresis in level-volts of
+ * the endpoint's own converter, converted per-frame to FS just like the
+ * real backend's `evaluate_trigger`. */
+interface TriggerConfigWire {
+  mode: "auto" | "normal" | "single";
+  edge: "rising" | "falling";
+  level_v: number;
+  hysteresis_v: number | null;
+  pre_samples: number;
+  arm_epoch: number;
+}
+
+/** Mirrors `TriggerRequest` — the `SpectraRequest` pattern, one optional
+ * config per hw endpoint. */
+interface TriggerRequestWire {
+  input_l: TriggerConfigWire | null;
+  input_r: TriggerConfigWire | null;
+  output_l: TriggerConfigWire | null;
+  output_r: TriggerConfigWire | null;
+}
+
 interface StreamConfigWire {
   buffer_size: number;
   slots: MixSlotDesc[];
@@ -74,6 +95,7 @@ interface StreamConfigWire {
   averaging: { coherent: boolean; count: number };
   spectra: { input_l: boolean; input_r: boolean; output_l: boolean; output_r: boolean };
   output_range_dbv: number | null;
+  triggers: TriggerRequestWire;
 }
 
 /** Under mockIPC invoke args are not serialized: the live Tauri `Channel`
@@ -209,6 +231,12 @@ export class FakeDevice {
   /** Named per-slot errors of the current stream config (script refusals) —
    * carried on every frame, like the real backend's set_slots errors. */
   private streamSlotErrors: MixSlotError[] = [];
+  /** Per-endpoint SINGLE latch — mirrors stream.rs's `TriggerStates` /
+   * `EndpointTrigger`: one armed-epoch + fired flag PER ENDPOINT ("input_l"
+   * etc.), never a single shared latch (multi-endpoint discipline, issue
+   * #25's e2e twin). */
+  private triggerArmedEpoch: Record<string, number> = {};
+  private triggerFired: Record<string, boolean> = {};
 
   constructor(private provider: FrameProvider = syntheticLoopbackProvider()) {}
 
@@ -397,6 +425,11 @@ export class FakeDevice {
         this.applyStreamConfig(a.config as StreamConfigWire);
         this.streamChannel = a.onFrame as ChannelLike;
         this.streamSeq = 0;
+        // A fresh loop = fresh trigger latches (mirrors `TriggerStates`
+        // being a LOCAL of `run_stream_loop`, not shared across restarts —
+        // only `stream_update` on an already-running loop must NOT reset).
+        this.triggerArmedEpoch = {};
+        this.triggerFired = {};
         // ~8 fps: fast enough for the specs, slow enough to stay honest
         // about per-frame work in a browser context.
         this.streamTimer = setInterval(() => this.streamFrame(), 120);
@@ -660,14 +693,66 @@ export class FakeDevice {
     this.streamChannel = null;
   }
 
+  /** One endpoint's trigger alignment this frame — mirrors stream.rs's
+   * `evaluate_trigger`: level/hysteresis volts -> this frame's FS domain via
+   * the SAME offset the frame's own trace uses (the twin of the offsets
+   * object below), ANY change in `arm_epoch` re-arms a SINGLE latch — not
+   * only an increase (a workspace load resets `arm_epoch` to 0 in the
+   * frontend while this fake's own latch may already sit higher — issue #26
+   * review #2) — and a fired SINGLE returns `stopped` without scanning.
+   * READS `samples` only — this never influences spectra/metrics
+   * (module-doc parity). */
+  private evaluateTrigger(
+    endpoint: string,
+    cfg: TriggerConfigWire,
+    samples: number[],
+    offsetDb: number
+  ): { state: "triggered" | "auto" | "waiting" | "stopped"; index: number; frac: number; level_fs: number; hysteresis_fs: number } {
+    const toFs = Math.pow(10, -offsetDb / 20);
+    const levelFs = cfg.level_v * toFs;
+    const hysteresisFs =
+      cfg.hysteresis_v !== null ? cfg.hysteresis_v * toFs : autoHysteresis(samples, 0.02, 1e-4);
+
+    const armedEpoch = this.triggerArmedEpoch[endpoint] ?? 0;
+    if (cfg.arm_epoch !== armedEpoch) {
+      this.triggerArmedEpoch[endpoint] = cfg.arm_epoch;
+      this.triggerFired[endpoint] = false;
+    }
+
+    if (cfg.mode === "single" && this.triggerFired[endpoint]) {
+      return { state: "stopped", index: 0, frac: 0, level_fs: levelFs, hysteresis_fs: hysteresisFs };
+    }
+
+    const hit = findEdge(samples, levelFs, hysteresisFs, cfg.edge, cfg.pre_samples);
+    if (hit) {
+      if (cfg.mode === "single") this.triggerFired[endpoint] = true;
+      return {
+        state: "triggered",
+        index: hit.index,
+        frac: hit.frac,
+        level_fs: levelFs,
+        hysteresis_fs: hysteresisFs,
+      };
+    }
+    return {
+      state: cfg.mode === "auto" ? "auto" : "waiting",
+      index: cfg.pre_samples,
+      frac: 0,
+      level_fs: levelFs,
+      hysteresis_fs: hysteresisFs,
+    };
+  }
+
   /**
    * One v2 stream frame, mirroring the backend loop's order: render the mix
    * (level-volts) → fit the output range to the summed peak ({+8,+18} with
    * +1 dB margin, 1 dB down-hysteresis — the mixer.rs policy) → scale to
    * DAC full scale (clamp + report, never rescale) → capture through the
    * PROVIDER seam (synthetic or recorded fixtures — unchanged) → windowed
-   * FFTs for the requested channels → push the frame with the
-   * per-converter offsets of THIS frame's register state.
+   * FFTs for the requested channels → scans the requested endpoints'
+   * trigger alignment (reads the emitted buffers only, never gates the
+   * spectra/metrics above — the stream.rs module-doc rule) → push the
+   * frame with the per-converter offsets of THIS frame's register state.
    *
    * Simplifications, documented: one Hann window whatever `window` says, no
    * averaging (same stance as analyze_spectrum above), and clip flags are
@@ -804,6 +889,20 @@ export class FakeDevice {
       harmonics_r: harmonicsOf(spectra.input_r),
     };
 
+    // ---- trigger alignment (reads cap.left/right and the stimulus only —
+    // never gates spectra/metrics above, mirrors the stream.rs module doc) --
+    const offsetInputDb = inputDbvOffsetDb(this.config.input_gain);
+    const offsetOutputDb = this.config.output_gain + 20 * Math.log10(Math.SQRT2);
+    const trig = cfg.triggers;
+    const trigger = {
+      input_l: trig.input_l ? this.evaluateTrigger("input_l", trig.input_l, cap.left, offsetInputDb) : null,
+      input_r: trig.input_r ? this.evaluateTrigger("input_r", trig.input_r, cap.right, offsetInputDb) : null,
+      output_l:
+        tone && trig.output_l ? this.evaluateTrigger("output_l", trig.output_l, left, offsetOutputDb) : null,
+      output_r:
+        tone && trig.output_r ? this.evaluateTrigger("output_r", trig.output_r, right, offsetOutputDb) : null,
+    };
+
     this.streamSeq += 1;
     ch.onmessage({
       type: "frame",
@@ -812,6 +911,7 @@ export class FakeDevice {
       stimulus: tone ? { left, right } : null,
       spectra,
       metrics,
+      trigger,
       mix: {
         sigma_peak_dbv: sigmaPeakDbv,
         clip_input: clipInput,
@@ -819,10 +919,10 @@ export class FakeDevice {
         fitted_output_range_dbv: this.config.output_gain,
       },
       offsets: {
-        input_l: inputDbvOffsetDb(this.config.input_gain),
-        input_r: inputDbvOffsetDb(this.config.input_gain),
-        output_l: this.config.output_gain + 20 * Math.log10(Math.SQRT2),
-        output_r: this.config.output_gain + 20 * Math.log10(Math.SQRT2),
+        input_l: offsetInputDb,
+        input_r: offsetInputDb,
+        output_l: offsetOutputDb,
+        output_r: offsetOutputDb,
         calibrated: true,
       },
       stats: { frames: this.streamSeq, fps: 8, frame_ms: 120 },

@@ -12,6 +12,7 @@ import type { AppState, SweepProgram } from "./state";
 import { HW_TRACE_IDS, initialState } from "./state";
 import { migrate, snapshotWorkspace, WS_VERSION } from "./persist";
 import { applyWorkspaceDoc } from "./actions/workspace";
+import { getTriggerSnapshot, putTriggerSnapshot } from "../data/triggered";
 import { templates } from "./templates";
 import type { Ipc } from "../ipc/ipc";
 
@@ -67,6 +68,55 @@ describe("v5 document", () => {
     expect(doc.sources.byId["src-sine-1"].playing).toBe(false);
   });
 
+  it("carries trigger settings through the round trip, armEpoch reset to 0", () => {
+    const store = freshStore();
+    store.update("test/trigger", (s) => ({
+      ...s,
+      triggers: {
+        ...s.triggers,
+        [HW_TRACE_IDS.inputL]: {
+          mode: "single",
+          edge: "falling",
+          levelV: -0.2,
+          hystV: 0.05,
+          armEpoch: 7, // a live SINGLE arm — must NOT survive the snapshot
+        },
+      },
+    }));
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))));
+    expect(doc).not.toBeNull();
+    expect(doc!.triggers[HW_TRACE_IDS.inputL]).toEqual({
+      mode: "single",
+      edge: "falling",
+      levelV: -0.2,
+      hystV: 0.05,
+      armEpoch: 0,
+    });
+
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
+    expect(dest.get().triggers[HW_TRACE_IDS.inputL]?.armEpoch).toBe(0);
+    expect(dest.get().triggers[HW_TRACE_IDS.inputL]?.mode).toBe("single");
+  });
+
+  it("clears any HELD trigger snapshot on load (review #3: a stale picture must not survive under a reused trace id)", () => {
+    putTriggerSnapshot(HW_TRACE_IDS.inputL, {
+      seq: 1,
+      state: "triggered",
+      index: 10,
+      frac: 0,
+      sampleRate: 48000,
+      samples: { [HW_TRACE_IDS.inputL]: Float64Array.from([0, 1, 2]) },
+      offsetDb: { [HW_TRACE_IDS.inputL]: 0 },
+    });
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeDefined();
+
+    const dest = freshStore();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(dest.get()))))!;
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeUndefined();
+  });
+
   it("every built-in template survives JSON + migrate and references real traces", () => {
     for (const t of templates()) {
       const doc = migrate(JSON.parse(JSON.stringify(t.make())));
@@ -79,6 +129,55 @@ describe("v5 document", () => {
       // Loadable onto a live store without throwing.
       expect(applyWorkspaceDoc(freshStore(), stubIpc, doc!)).toBe(true);
     }
+  });
+});
+
+describe("v5 in-version hook: trigger additions (Lot A, issue #26)", () => {
+  // A v5 doc predating the trigger fields — no `triggers` key, no per-tile
+  // triggerSource/triggerPositionPct/showTriggerMarkers (additions only, so
+  // WS_VERSION did NOT bump — the v5 in-version hook must fill these in).
+  function oldV5Doc(): Record<string, unknown> {
+    const raw = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    delete raw.triggers;
+    for (const tile of Object.values(raw.layout.tiles as Record<string, Record<string, unknown>>)) {
+      delete tile.triggerSource;
+      delete tile.triggerPositionPct;
+      delete tile.showTriggerMarkers;
+    }
+    return raw;
+  }
+
+  it("a doc without new fields loads with defaults", () => {
+    const doc = migrate(oldV5Doc());
+    expect(doc).not.toBeNull();
+    expect(doc!.triggers).toEqual({});
+    for (const tile of Object.values(doc!.layout.tiles)) {
+      expect(tile.triggerSource).toBe("auto");
+      expect(tile.triggerPositionPct).toBe(50);
+      expect(tile.showTriggerMarkers).toBe(true);
+    }
+  });
+
+  it("round-trips: loading an old doc then re-snapshotting is stable", () => {
+    const doc = migrate(oldV5Doc())!;
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(snapshotWorkspace(dest.get())).toEqual(doc);
+  });
+
+  it("a doc with a stale non-zero armEpoch is normalized to 0", () => {
+    const raw = oldV5Doc();
+    raw.triggers = {
+      [HW_TRACE_IDS.inputL]: {
+        mode: "single",
+        edge: "rising",
+        levelV: 0,
+        hystV: null,
+        armEpoch: 42, // e.g. a hand-edited blob, or a future format quirk
+      },
+    };
+    const doc = migrate(raw);
+    expect(doc!.triggers[HW_TRACE_IDS.inputL].armEpoch).toBe(0);
   });
 });
 

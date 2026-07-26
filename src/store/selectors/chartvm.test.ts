@@ -8,10 +8,20 @@
  */
 import { describe, expect, it, beforeEach } from "vitest";
 import { clearAllFrames, putFrames } from "../../data/frames";
+import { clearTriggerSnapshots, putTriggerSnapshot } from "../../data/triggered";
 import { initialState, type AppState, type TileConfig } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { DBU_OVER_DBV_DB } from "../../core/units";
-import { displayOffsetDb, displayScale, scopeVM, spectrumVM, sweepVM } from "./chartvm";
+import {
+  displayOffsetDb,
+  displayScale,
+  scopeVM,
+  spectrumVM,
+  sweepVM,
+  triggerLevelFromDisplay,
+  triggerLevelToDisplay,
+  triggerSourceOffsetDb,
+} from "./chartvm";
 
 const FREQS = Float64Array.from([100, 1000, 10000]);
 
@@ -207,6 +217,291 @@ describe("scopeVM", () => {
     const vm = scopeVM(s, tile(s));
     expect(vm.unitLabel).toBe("%FS");
     expect(vm.series[0].samples[0]).toBeCloseTo(25, 9);
+  });
+
+  it("trigger off (default) ⇒ EXACTLY today's shape plus trigger: null (regression pin)", () => {
+    seedTd(HW_TRACE_IDS.inputL, [0.5, -0.5]);
+    const s = stateWith([HW_TRACE_IDS.inputL], {
+      [HW_TRACE_IDS.inputL]: { offsetDb: 20, seq: 1 },
+    });
+    tile(s).kind = "scope";
+    tile(s).tdUnit = "v";
+    const vm = scopeVM(s, tile(s));
+    expect(vm).toEqual({
+      series: [
+        {
+          id: HW_TRACE_IDS.inputL,
+          label: "Input L",
+          color: "#3987e5",
+          samples: Float64Array.from([5, -5]),
+          sampleRate: 48000,
+          seq: 1,
+        },
+      ],
+      unitLabel: "V",
+      trigger: null,
+    });
+  });
+});
+
+describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  /** A resolved-source state: tile-1 is a scope on Input L, trigger mode on,
+   * 480-sample window (10 ms @ 48 kHz), position 50 % ⇒ pre = 240. fftSize
+   * matches `seedSnapshot`'s 1000-sample ramp (review #3: `scopeVM` now
+   * requires a held snapshot's own sample length to match the CURRENT
+   * fftSize, else it falls back to the live path — see the dedicated
+   * mismatch test below). */
+  function stateWithTrigger(mode: "auto" | "normal" | "single" = "auto"): AppState {
+    const s = stateWith([HW_TRACE_IDS.inputL], {
+      [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
+    });
+    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.acquisition.fftSize = 1000;
+    tile(s).kind = "scope";
+    tile(s).tdUnit = "v";
+    tile(s).timeWindowMs = 10;
+    tile(s).triggerPositionPct = 50;
+    s.triggers[HW_TRACE_IDS.inputL] = {
+      mode,
+      edge: "rising",
+      levelV: 0.5,
+      hystV: null,
+      armEpoch: 0,
+    };
+    return s;
+  }
+
+  /** A 1000-sample ramp so slicing is verifiable by value (samples[i] = i). */
+  function seedSnapshot(over: Partial<Parameters<typeof putTriggerSnapshot>[1]> = {}): void {
+    putTriggerSnapshot(HW_TRACE_IDS.inputL, {
+      seq: 1,
+      state: "triggered",
+      index: 500,
+      frac: 0.3,
+      sampleRate: 48000,
+      samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
+      offsetDb: { [HW_TRACE_IDS.inputL]: 20 }, // 10x, distinct from the live 20.81 above
+      ...over,
+    });
+  }
+
+  it("no snapshot yet ⇒ falls back to today's (live, unaligned) shape with trigger: null", () => {
+    seedTd(HW_TRACE_IDS.inputL, [0.1, 0.2]);
+    const s = stateWithTrigger();
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger).toBeNull();
+    expect(Array.from(vm.series[0].samples)).toEqual([
+      0.1 * Math.pow(10, 20.81 / 20),
+      0.2 * Math.pow(10, 20.81 / 20),
+    ]);
+  });
+
+  it("aligned: series start at index − pre, and frac is passed through", () => {
+    seedSnapshot();
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 500, frac: 0.3 };
+    const vm = scopeVM(s, tile(s));
+    // pre = round(0.5 * 480) = 240; start = 500 - 240 = 260.
+    const k = Math.pow(10, 20 / 20); // the SNAPSHOT's baked offset (20), not the live 20.81
+    expect(vm.series[0].samples[0]).toBeCloseTo(260 * k, 9);
+    expect(vm.series[0].samples.length).toBe(480);
+    expect(vm.trigger).not.toBeNull();
+    expect(vm.trigger!.frac).toBe(0.3);
+    // count = end - start = 480 (unclamped here), so the denominator is
+    // count - 1 = 479, NOT windowSamples (480) — this is what matches the
+    // canvas's own `displayCount() - 1` denominator in `xOf`, so the
+    // crossing at continuous sample `index - 1 + frac` lands exactly on the
+    // drawn marker (issue #26 reviews #4/#7; the old 240/480 pin put the
+    // marker very slightly off).
+    expect(vm.trigger!.position).toBeCloseTo(240 / 479, 9);
+    expect(vm.trigger!.sourceId).toBe(HW_TRACE_IDS.inputL);
+  });
+
+  it("clamps pre to the trigger index so the slice never starts before sample 0 (review #4/#7)", () => {
+    seedSnapshot({ index: 100 });
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 100, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    // pre would be round(0.5*480) = 240, > index (100) ⇒ clamped to 100 ⇒
+    // start = 0, end = min(0+480,1000) = 480, count = 480.
+    const k = Math.pow(10, 20 / 20);
+    expect(vm.series[0].samples[0]).toBeCloseTo(0 * k, 9);
+    expect(vm.series[0].samples.length).toBe(480);
+    expect(vm.trigger!.position).toBeCloseTo(100 / 479, 9);
+  });
+
+  it("clamps the slice end to the snapshot length when the window would run past it (review #4/#7)", () => {
+    seedSnapshot({ index: 900 });
+    const s = stateWithTrigger();
+    tile(s).triggerPositionPct = 10; // pre = round(0.1*480) = 48
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 900, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    // start = 900 - 48 = 852; end = min(852+480, 1000) = 1000; count = 148.
+    expect(vm.series[0].samples.length).toBe(148);
+    expect(vm.trigger!.position).toBeCloseTo(48 / 147, 9);
+  });
+
+  it("a snapshot whose sample length no longer matches the current fftSize falls back to the live path (review #3)", () => {
+    seedTd(HW_TRACE_IDS.inputL, [0.1, 0.2]);
+    seedSnapshot(); // 1000-sample ramp, baked while fftSize was 1000
+    const s = stateWithTrigger("normal");
+    s.acquisition.fftSize = 2048; // the user changed FFT size while NORMAL held a picture
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 999, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger).toBeNull();
+    expect(Array.from(vm.series[0].samples)).toEqual([
+      0.1 * Math.pow(10, 20.81 / 20),
+      0.2 * Math.pow(10, 20.81 / 20),
+    ]);
+  });
+
+  it("levelDisplay converts the endpoint's level-volts via the SNAPSHOT offset, in v/mv/%FS", () => {
+    seedSnapshot();
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "auto", index: 500, frac: 0 };
+    // Snapshot offset baked at 20 dB ⇒ 10x volts-per-FS.
+    tile(s).tdUnit = "v";
+    expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(0.5, 9);
+    tile(s).tdUnit = "mv";
+    expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(500, 9);
+    tile(s).tdUnit = "pctfs";
+    expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(5, 9); // 0.5/10 × 100
+  });
+
+  it("sourceOffsetDb exposes the SNAPSHOT-baked offset, not the live trace offset (review #5)", () => {
+    seedSnapshot(); // baked offsetDb 20, distinct from the live 20.81
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "auto", index: 500, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger!.sourceOffsetDb).toBe(20);
+    expect(vm.trigger!.sourceOffsetDb).not.toBe(s.traces.byId[HW_TRACE_IDS.inputL].offsetDb);
+  });
+
+  it("held (waiting/stopped): trigger.held is true and the picture is the snapshot's", () => {
+    seedSnapshot();
+    const s = stateWithTrigger("normal");
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 999, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger!.held).toBe(true);
+    expect(vm.trigger!.state).toBe("waiting");
+    // Slicing still uses the SNAPSHOT's own index (999 was never latched —
+    // it's this frame's live report; the held index stays the one baked in
+    // seedSnapshot(), 500).
+    const k = Math.pow(10, 20 / 20);
+    expect(vm.series[0].samples[0]).toBeCloseTo(260 * k, 9);
+  });
+
+  it("a later live range/offset change does NOT rescale a held picture", () => {
+    seedSnapshot();
+    const s = stateWithTrigger("normal");
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "stopped", index: 500, frac: 0.3 };
+    const before = scopeVM(s, tile(s)).series[0].samples[0];
+
+    // A live range step moves the trace's OWN (store) offset — the snapshot
+    // must not follow it.
+    s.traces.byId[HW_TRACE_IDS.inputL] = {
+      ...s.traces.byId[HW_TRACE_IDS.inputL],
+      offsetDb: 20.81 + 12,
+    };
+    const after = scopeVM(s, tile(s)).series[0].samples[0];
+    expect(after).toBeCloseTo(before, 9);
+  });
+
+  it("a memory trace member keeps its OWN (live, unsliced) origin", () => {
+    seedSnapshot();
+    seedTd("mem-1", [0.1, -0.1]); // its own, much shorter time base
+    const s = stateWithTrigger();
+    s.traces.order.push("mem-1");
+    s.traces.byId["mem-1"] = {
+      id: "mem-1",
+      label: "Input L ❄1",
+      color: "#3987e599",
+      source: { kind: "memory", frozenFrom: HW_TRACE_IDS.inputL },
+      domains: ["td"],
+      seq: 1,
+      offsetDb: 0,
+    };
+    tile(s).traces = [HW_TRACE_IDS.inputL, "mem-1"];
+    // Explicit — the "mem-1" member has its own td frame too, which would
+    // otherwise win the "auto" chip-source fallback (drawn order).
+    tile(s).triggerSource = HW_TRACE_IDS.inputL;
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 500, frac: 0.3 };
+    const vm = scopeVM(s, tile(s));
+    const mem = vm.series.find((sv) => sv.id === "mem-1")!;
+    expect(Array.from(mem.samples)).toEqual([0.1, -0.1]); // offsetDb 0 ⇒ identity, unsliced
+  });
+});
+
+describe("triggerLevelToDisplay / triggerLevelFromDisplay", () => {
+  it("v is identity regardless of offset", () => {
+    expect(triggerLevelToDisplay(0.5, "v", 20)).toBeCloseTo(0.5, 9);
+    expect(triggerLevelToDisplay(0.5, "v", null)).toBeCloseTo(0.5, 9);
+  });
+
+  it("mv is a flat ×1000, independent of offset", () => {
+    expect(triggerLevelToDisplay(0.5, "mv", 20)).toBeCloseTo(500, 9);
+    expect(triggerLevelToDisplay(0.5, "mv", -6)).toBeCloseTo(500, 9);
+  });
+
+  it("pctfs folds in the offset (level-volts ÷ volts-per-FS × 100)", () => {
+    expect(triggerLevelToDisplay(0.5, "pctfs", 20)).toBeCloseTo(5, 9); // ÷10 × 100
+  });
+
+  it("triggerLevelFromDisplay is the exact inverse", () => {
+    for (const unit of ["v", "mv", "pctfs"] as const) {
+      for (const offsetDb of [null, 0, 20.81, -6]) {
+        const levelV = 0.37;
+        const display = triggerLevelToDisplay(levelV, unit, offsetDb);
+        expect(triggerLevelFromDisplay(display, unit, offsetDb)).toBeCloseTo(levelV, 9);
+      }
+    }
+  });
+});
+
+describe("triggerSourceOffsetDb (review #5)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  function stateWithTrigger(mode: "off" | "auto" | "normal" | "single" = "auto"): AppState {
+    const s = stateWith([HW_TRACE_IDS.inputL], {
+      [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
+    });
+    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.acquisition.fftSize = 1000;
+    tile(s).kind = "scope";
+    tile(s).timeWindowMs = 10;
+    tile(s).triggerPositionPct = 50;
+    s.triggers[HW_TRACE_IDS.inputL] = { mode, edge: "rising", levelV: 0.5, hystV: null, armEpoch: 0 };
+    return s;
+  }
+
+  it("no snapshot resolved (mode off, or none latched) ⇒ the trace's LIVE offset", () => {
+    const s = stateWithTrigger("off");
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20.81);
+  });
+
+  it("a resolved snapshot ⇒ the SNAPSHOT's baked offset, matching scopeVM's levelDisplay exactly", () => {
+    const s = stateWithTrigger();
+    putTriggerSnapshot(HW_TRACE_IDS.inputL, {
+      seq: 1,
+      state: "triggered",
+      index: 500,
+      frac: 0.3,
+      sampleRate: 48000,
+      samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
+      offsetDb: { [HW_TRACE_IDS.inputL]: 20 },
+    });
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20);
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(
+      scopeVM(s, tile(s)).trigger!.sourceOffsetDb
+    );
   });
 });
 
