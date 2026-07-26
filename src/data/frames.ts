@@ -23,6 +23,20 @@ export interface DecodedSweep {
     values: Float64Array;
     phaseDeg: Float64Array | null;
   }[];
+  /**
+   * The x-axis unit, carried WITH the data (issue #27 review finding #1):
+   * "Hz" for a frequency sweep (THD-vs-frequency, FR), "dBFS" for a
+   * THD-vs-level sweep. Derived from the backend's authoritative
+   * `ThdSweepResult.swept` at decode time (see `wireToSweep`'s `xUnit`
+   * param) — NEVER re-derived later from the program's CURRENT params,
+   * which may have changed axis without a re-run, or gone entirely (a
+   * frozen ❄ memory trace, or the program deleted): either would strand
+   * the frame on the wrong axis (log Hz on negative dBFS values logs NaN).
+   * Optional only for frames that predate this field (a script-emitted
+   * sweep has no axis concept; an old saved doc) — chartvm.ts's
+   * `sweepXUnit` falls back to the program lookup only when this is unset.
+   */
+  xUnit?: "Hz" | "dBFS";
 }
 
 export interface TraceFrames {
@@ -107,7 +121,7 @@ export function wireToFd(f: Frame): DecodedFd | undefined {
   return { freqs: Float64Array.from(f.freqs), magDb: Float64Array.from(f.mag_db) };
 }
 
-export function wireToSweep(f: Frame): DecodedSweep | undefined {
+export function wireToSweep(f: Frame, xUnit?: "Hz" | "dBFS"): DecodedSweep | undefined {
   if (f.domain !== "sweep") return undefined;
   return {
     freqs: Float64Array.from(f.freqs),
@@ -116,5 +130,6 @@ export function wireToSweep(f: Frame): DecodedSweep | undefined {
       values: Float64Array.from(c.values),
       phaseDeg: c.phase_deg ? Float64Array.from(c.phase_deg) : null,
     })),
+    xUnit,
   };
 }

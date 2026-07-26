@@ -278,6 +278,15 @@ select.field--small {
   text-decoration: line-through;
 }
 
+/* A sweep trace whose OWN axis (Hz/dBFS) clashes with the tile's — excluded
+   from the plot, not just legend-hidden (issue #27 review finding #3). A
+   dashed underline reads as "present but not drawn", distinct from --off's
+   strikethrough (a deliberate legend hide); no layout shift either way. */
+.tile__trace--axis-mismatch .tile__trace-label {
+  text-decoration: underline dashed;
+  text-decoration-color: var(--ink-3);
+}
+
 .tile__dot {
   width: 8px;
   height: 8px;

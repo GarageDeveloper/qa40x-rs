@@ -65,6 +65,19 @@ function stubIpc(): { ipc: Ipc; log: string[]; release: () => void } {
         }));
         return { points, swept: "frequency" } as Commands[K]["result"];
       }
+      if (cmd === "measure_thd_vs_level") {
+        await gate;
+        const points = [-60, -30, 0].map((level_dbfs) => ({
+          frequency: 1000,
+          level_dbfs,
+          thd_percent: 1e-4,
+          thd_db: -120,
+          thd_n_percent: 3e-4,
+          thd_n_db: -110,
+          fundamental_dbfs: level_dbfs,
+        }));
+        return { points, swept: "level" } as Commands[K]["result"];
+      }
       return null as Commands[K]["result"];
     },
   };
@@ -159,18 +172,70 @@ describe("actions/programs — the device lock", () => {
     expect(sweep?.curves.map((c) => c.label)).toEqual(["Left", "Right"]);
   });
 
+  it("a THD level-axis program calls measure_thd_vs_level and lands level_dbfs as the sweep's x-axis (issue #27)", async () => {
+    const store = new Store(connectedStreamingState());
+    const { ipc, log, release } = stubIpc();
+    release();
+    const id = addProgram(store, "thd");
+    store.update("test/level-axis", (s) => {
+      const p = s.programs.byId[id];
+      if (p.kind !== "sweep") return s;
+      return {
+        ...s,
+        programs: {
+          ...s.programs,
+          byId: {
+            ...s.programs.byId,
+            [id]: {
+              ...p,
+              params: { ...p.params, axis: "level" as const, startDbfs: -60, endDbfs: 0, toneHz: 1000 },
+            },
+          },
+        },
+      };
+    });
+    await runProgram(store, ipc, id);
+    expect(log.filter((c) => c === "measure_thd_vs_level")).toHaveLength(1);
+    expect(log).not.toContain("measure_thd_vs_frequency");
+    const sweep = getFrames(id)?.sweep;
+    expect(sweep && Array.from(sweep.freqs)).toEqual([-60, -30, 0]);
+  });
+
   it("sweepLabel pins the e2e-visible default shape", () => {
     expect(
       sweepLabel({
         measurement: "fr",
+        axis: "frequency",
         channel: "left",
         startHz: 20,
         endHz: 20000,
         levelDbfs: -6,
+        toneHz: 1000,
+        startDbfs: -60,
+        endDbfs: 0,
         points: 30,
         durationS: 1,
         metric: "thd_db",
       })
     ).toBe("FR 20–20000 Hz");
+  });
+
+  it("sweepLabel names its own swept range for a THD level-axis sweep (issue #27)", () => {
+    expect(
+      sweepLabel({
+        measurement: "thd",
+        axis: "level",
+        channel: "left",
+        startHz: 20,
+        endHz: 20000,
+        levelDbfs: -6,
+        toneHz: 1000,
+        startDbfs: -60,
+        endDbfs: 0,
+        points: 30,
+        durationS: 1,
+        metric: "thd_db",
+      })
+    ).toBe("Sweep -60–0 dBFS");
   });
 });

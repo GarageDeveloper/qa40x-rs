@@ -126,6 +126,20 @@ export interface Commands {
     };
     result: ThdSweepResult;
   };
+  // THD vs level (issue #27): sweeps the stimulus level at a fixed tone
+  // frequency instead of sweeping frequency at a fixed level — same
+  // program lock / batched-capture plumbing as measure_thd_vs_frequency.
+  measure_thd_vs_level: {
+    args: {
+      startLevelDbfs: number;
+      endLevelDbfs: number;
+      numPoints: number;
+      frequencyHz: number;
+      outputChannel: Channel;
+      inputChannel: Channel;
+    };
+    result: ThdSweepResult;
+  };
   measure_frequency_response_multi: {
     args: {
       startFreq: number;

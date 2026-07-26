@@ -699,7 +699,15 @@ export function createTile(
         label: string;
         color: string;
         off: boolean;
+        /** This trace's OWN sweep axis (Hz/dBFS) differs from the tile's —
+         * excluded from the plot entirely (issue #27 review finding #3), not
+         * just legend-hidden. A discreet chip marker, no layout shift. */
+        axisMismatch: boolean;
       }
+      // Sweep tiles only: traces sweepVM omitted for an axis clash (a
+      // frequency sweep and a level sweep can't share one x-axis scale).
+      const sweepOmitted =
+        tile.kind === "sweep" ? new Set(sweepVM(s, tile).omitted) : new Set<TraceId>();
       const legendItems: LegendItem[] = [];
       for (const t of members) {
         const sweepFrames = tile.kind === "sweep" ? getFrames(t.id)?.sweep : undefined;
@@ -714,6 +722,7 @@ export function createTile(
               off:
                 tile.hidden.includes(t.id) ||
                 (tile.hiddenCurves[t.id] ?? []).includes(c.label),
+              axisMismatch: sweepOmitted.has(t.id),
             });
           });
         } else {
@@ -724,6 +733,7 @@ export function createTile(
             label: t.label,
             color: t.color,
             off: tile.hidden.includes(t.id),
+            axisMismatch: sweepOmitted.has(t.id),
           });
         }
       }
@@ -764,6 +774,11 @@ export function createTile(
           (node.children[0] as HTMLElement).style.backgroundColor = it.color;
           node.children[1].textContent = it.label;
           node.classList.toggle("tile__trace--off", it.off);
+          node.classList.toggle("tile__trace--axis-mismatch", it.axisMismatch);
+          const title = it.axisMismatch
+            ? "Different sweep axis (Hz vs dBFS) on this tile — not drawn"
+            : "Click to show/hide this curve";
+          if (node.title !== title) node.title = title;
         },
       });
 
@@ -863,6 +878,7 @@ export function createTile(
       } else if (tile.kind === "sweep" && sweep) {
         const vm = sweepVM(s, tile);
         sweep.setUnitLabel(vm.unitLabel);
+        sweep.setXUnit(vm.xUnit);
         sweep.setSeries(vm.series);
       }
 

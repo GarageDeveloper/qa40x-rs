@@ -16,7 +16,7 @@
 import type { FdUnit, TdUnit, TraceId } from "../../core/model";
 import type { TriggerState } from "../../gen";
 import { displayOffsetDb, displayScale } from "../../core/units";
-import { getFrames } from "../../data/frames";
+import { getFrames, type DecodedSweep } from "../../data/frames";
 import { getTriggerSnapshot, type TriggerSnapshot } from "../../data/triggered";
 import { chipSourceTraceId, shownTraces } from "./layout";
 import { tileTriggerSourceId, tileWindowSamples } from "./trigger";
@@ -188,6 +188,17 @@ export interface SweepSeriesVM {
 export interface SweepVM {
   series: SweepSeriesVM[];
   unitLabel: string;
+  /** X-axis unit: "Hz" for a frequency sweep (THD-vs-frequency or FR), or
+   * "dBFS" for a THD-vs-level sweep (issue #27) — the renderer switches its
+   * axis scale (log Hz vs linear dB) and tick/marker formatting on this.
+   * Fixed by the FIRST member trace with data; any other member whose OWN
+   * axis differs lands in `omitted` instead of `series` (a tile can't mix
+   * a log-Hz and a linear-dBFS x-axis on one plot). */
+  xUnit: "Hz" | "dBFS";
+  /** Member traces skipped because their sweep's x-axis unit doesn't match
+   * `xUnit` (issue #27 review finding #3) — tile.ts marks their legend chip
+   * instead of silently dropping them. */
+  omitted: TraceId[];
 }
 
 export const FD_UNIT_LABELS: Record<FdUnit, string> = {
@@ -277,19 +288,58 @@ function sweepUnitLabel(s: AppState, id: TraceId): string {
 }
 
 /**
+ * A sweep trace's X unit — read from the FRAME first (issue #27 review
+ * finding #1): `sweep.xUnit`, set at land time from the backend's OWN
+ * `swept` field (see `runSweep` in actions/programs.ts), survives a freeze
+ * (❄ copies the frame verbatim) and a save/reload (persisted alongside the
+ * frame, `persist.ts`'s `PersistedFrames.sweepXUnit`) even once the
+ * originating program is gone. The program-params lookup is only a
+ * fallback for frames that predate this field (a script-emitted sweep, or
+ * an old saved doc) — deriving it from the program's CURRENT params would
+ * relabel a landed Hz sweep the moment the dialog's axis is flipped to
+ * Level without a re-run (finding #4), and strand a level sweep's frozen /
+ * program-deleted trace back on "Hz" (log10 of a negative dBFS is NaN —
+ * the original bug report).
+ */
+function sweepXUnit(s: AppState, id: TraceId, sweep: DecodedSweep | undefined): "Hz" | "dBFS" {
+  if (sweep?.xUnit) return sweep.xUnit;
+  const p = s.programs.byId[id];
+  if (p?.kind === "sweep" && p.params.measurement === "thd" && p.params.axis === "level") {
+    return "dBFS";
+  }
+  return "Hz";
+}
+
+/**
  * Build a sweep tile's view-model: every member trace with a sweep frame,
  * one series per curve (multi-curve traces suffix the curve label). Values
  * are measurement units already — the renderer adds nothing.
+ *
+ * The tile's x-axis unit is fixed by the FIRST member with data (issue #27):
+ * a log-Hz frequency sweep and a linear-dBFS level sweep can't share one
+ * plot's scale, so a later member on the OTHER axis is omitted rather than
+ * drawn (NaN'd/garbled extents) — see finding #3.
  */
 export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
   const series: SweepSeriesVM[] = [];
+  const omitted: TraceId[] = [];
   let unitLabel = "dB";
+  let xUnit: "Hz" | "dBFS" = "Hz";
+  let xUnitFixed = false;
   for (const id of shownTraces(tile)) {
     const t = s.traces.byId[id];
     if (!t) continue;
     const sweep = getFrames(id)?.sweep;
     if (!sweep) continue;
-    if (series.length === 0) unitLabel = sweepUnitLabel(s, id);
+    const traceXUnit = sweepXUnit(s, id, sweep);
+    if (!xUnitFixed) {
+      unitLabel = sweepUnitLabel(s, id);
+      xUnit = traceXUnit;
+      xUnitFixed = true;
+    } else if (traceXUnit !== xUnit) {
+      omitted.push(id);
+      continue;
+    }
     const hiddenCurves = tile.hiddenCurves[id] ?? [];
     sweep.curves.forEach((c, i) => {
       if (hiddenCurves.includes(c.label)) return; // per-curve legend hide
@@ -306,7 +356,7 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
       });
     });
   }
-  return { series, unitLabel };
+  return { series, unitLabel, xUnit, omitted };
 }
 
 /** Scale + wrap one member's samples into a `TdSeriesVM` (shared by both the

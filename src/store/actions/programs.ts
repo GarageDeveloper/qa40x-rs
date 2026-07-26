@@ -48,9 +48,12 @@ import { toast } from "./ui";
 let nextProgId = 1;
 
 /** Auto-label for a sweep program, from its params (the e2e specs pin this
- * exact shape — "Sweep 20–20000 Hz"). */
+ * exact shape — "Sweep 20–20000 Hz"). A THD level-axis sweep (issue #27)
+ * labels its OWN swept range instead — "Sweep -60–0 dBFS". */
 export function sweepLabel(params: SweepProgramParams): string {
-  return `${params.measurement === "fr" ? "FR" : "Sweep"} ${params.startHz}–${params.endHz} Hz`;
+  if (params.measurement === "fr") return `FR ${params.startHz}–${params.endHz} Hz`;
+  if (params.axis === "level") return `Sweep ${params.startDbfs}–${params.endDbfs} dBFS`;
+  return `Sweep ${params.startHz}–${params.endHz} Hz`;
 }
 
 /** Add a program (+ its result trace under the same id); returns the id. */
@@ -245,6 +248,12 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
 
   let freqs: number[] = [];
   const curves: SweepCurve[] = [];
+  // The x-axis unit landed on the FRAME (issue #27 review finding #1), read
+  // from the backend's OWN `swept` field — never from the requested params,
+  // which can go stale (axis changed in the dialog without a re-run) or
+  // vanish entirely (frozen ❄ / program deleted) while the frame outlives
+  // them.
+  let xUnit: "Hz" | "dBFS" = "Hz";
   if (p.measurement === "fr") {
     const traces = await ipc.call("measure_frequency_response_multi", {
       startFreq: p.startHz,
@@ -271,15 +280,31 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
       p.channel === "both" ? ["Left", "Right"] : [wantR ? "Right" : "Left"];
     for (const ch of chans) {
       if (sweepCancel.has(id)) break;
-      const res = await ipc.call("measure_thd_vs_frequency", {
-        startFreq: p.startHz,
-        endFreq: p.endHz,
-        numPoints: p.points,
-        amplitudeDbfs: p.levelDbfs,
-        outputChannel: ch,
-        inputChannel: ch,
-      });
-      freqs = res.points.map((pt) => pt.frequency);
+      const res =
+        p.axis === "level"
+          ? await ipc.call("measure_thd_vs_level", {
+              startLevelDbfs: p.startDbfs,
+              endLevelDbfs: p.endDbfs,
+              numPoints: p.points,
+              frequencyHz: p.toneHz,
+              outputChannel: ch,
+              inputChannel: ch,
+            })
+          : await ipc.call("measure_thd_vs_frequency", {
+              startFreq: p.startHz,
+              endFreq: p.endHz,
+              numPoints: p.points,
+              amplitudeDbfs: p.levelDbfs,
+              outputChannel: ch,
+              inputChannel: ch,
+            });
+      // The sweep frame's x-axis is generic (freqs field, any swept
+      // quantity) — level_dbfs for a level-axis sweep, frequency otherwise.
+      // `res.swept` is the backend's OWN account of what it actually swept,
+      // not the request — the authoritative source for both the field pick
+      // and the unit landed on the frame.
+      xUnit = res.swept === "level" ? "dBFS" : "Hz";
+      freqs = res.points.map((pt) => (res.swept === "level" ? pt.level_dbfs : pt.frequency));
       curves.push({
         label: ch,
         values: res.points.map((pt) =>
@@ -298,7 +323,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
     toast(store, "info", `Sweep "${label}" stopped.`);
     return;
   }
-  const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame);
+  const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit);
   if (sweep) landProgramFrames(store, id, { sweep });
   toast(
     store,

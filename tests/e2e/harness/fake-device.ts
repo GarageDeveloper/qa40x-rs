@@ -559,6 +559,9 @@ export class FakeDevice {
       case "measure_thd_vs_frequency":
         this.assertConnected(cmd);
         return this.thdSweep(a);
+      case "measure_thd_vs_level":
+        this.assertConnected(cmd);
+        return this.thdLevelSweep(a);
 
       /* -- scripts: honestly refused, not silently faked -- */
       case "script_run":
@@ -683,6 +686,33 @@ export class FakeDevice {
       };
     });
     return { swept: "frequency", points };
+  }
+
+  /**
+   * A THD-vs-level sweep (issue #27): the sibling program, swept axis
+   * flipped — linear dBFS steps at a fixed tone. Same stub-numbers-only
+   * discipline as thdSweep: tests assert the lock/plumbing, never these
+   * values.
+   */
+  private async thdLevelSweep(a: Args): Promise<unknown> {
+    if (this.programGate) await this.programGate;
+    const n = Math.max(2, a.numPoints as number);
+    const start = a.startLevelDbfs as number;
+    const end = a.endLevelDbfs as number;
+    const freq = a.frequencyHz as number;
+    const points = Array.from({ length: n }, (_, i) => {
+      const level_dbfs = start + (end - start) * (i / (n - 1));
+      return {
+        frequency: freq,
+        level_dbfs,
+        thd_percent: 1e-4,
+        thd_db: -120,
+        thd_n_percent: 3e-4,
+        thd_n_db: -110,
+        fundamental_dbfs: level_dbfs,
+      };
+    });
+    return { swept: "level", points };
   }
 
   private store(kind: string): unknown[] {

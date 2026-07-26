@@ -43,7 +43,8 @@ function typeLabel(p: ProgramMeta): string {
   if (p.kind === "script") {
     return p.role === "measurement" ? "Script · measure" : "Script · plot";
   }
-  return p.params.measurement === "fr" ? "Freq response" : "THD vs freq";
+  if (p.params.measurement === "fr") return "Freq response";
+  return p.params.axis === "level" ? "THD vs level" : "THD vs freq";
 }
 
 function openDialogFor(

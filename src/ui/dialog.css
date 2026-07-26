@@ -84,3 +84,11 @@
   font-size: 11px;
   resize: vertical;
 }
+
+/* Plain documentation text within a form (e.g. the sweep dialog's
+   fixed-range capture note) — mirrors .gear__note. */
+.dialog__note {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin: 0;
+}
