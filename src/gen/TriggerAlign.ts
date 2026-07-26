@@ -12,7 +12,8 @@ export type TriggerAlign = { state: TriggerState,
  */
 index: number, 
 /**
- * Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`.
+ * Sub-sample residual in [0,1]: the crossing is at `index - 1 + frac`
+ * (closed at both ends — see `audio::trigger::refine_linear`).
  */
 frac: number, 
 /**

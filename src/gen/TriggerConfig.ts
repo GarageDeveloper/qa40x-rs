@@ -22,7 +22,12 @@ hysteresis_v: number | null,
  */
 pre_samples: number, 
 /**
- * Bumped by the UI to re-arm a `Single` shot (idempotent: only a
- * strictly larger value re-arms).
+ * Bumped (or otherwise changed) by the UI to re-arm a `Single` shot.
+ * The loop re-arms on ANY change from the last value it saw, not only
+ * an increase: a workspace load resets this to 0 in the frontend while
+ * the loop's own latch may already sit at a higher value from earlier
+ * Arm clicks, and that reset must still re-arm (issue #26 review #2) —
+ * a `>` comparison would leave the latch dead until the value happened
+ * to climb back past its old high-water mark.
  */
 arm_epoch: number, };

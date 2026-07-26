@@ -147,6 +147,44 @@ test("chip + Arm stay in the DOM across every trigger mode (no layout shift)", a
   }
 });
 
+test("trigger-source dropdown lists only the 4 hw endpoints, never a memory trace (review #9)", async ({ app }) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  // Freeze tile-2 (Input L): the ❄ copy joins BOTH the pool and the tile
+  // (freezeTile), so the tile now has a memory member alongside Input L.
+  await app.drv.click('[data-testid="tile-freeze-tile-2"]');
+
+  await app.drv.click('[data-testid="tile-gear-tile-2"]');
+  await app.drv.click('[data-testid="gear-tab-trigger"]');
+  const values = await app.drv.eval(
+    () =>
+      Array.from(
+        document.querySelectorAll('[data-testid="gear-trigger-source"] option')
+      ).map((o) => (o as HTMLOptionElement).value),
+    undefined as void
+  );
+  await app.closeDialog();
+
+  expect(values).toContain("auto");
+  expect(values).toContain("hw-in-left");
+  // No memory trace id (they're all "mem-N") ever appears — only "auto" and
+  // the hw endpoint ids can trigger.
+  expect(values.some((v) => v.startsWith("mem-"))).toBe(false);
+});
+
+test("chip updates from a gear change even while the stream is STOPPED (review #6)", async ({ app }) => {
+  // No addSine/playSine here — the stream is never started, so nothing ever
+  // pushes a new frame to drive the grid's usual re-feed trigger (a trace
+  // seq bump). The chip must still update from the config change alone: the
+  // grid's re-feed selector key must include `s.triggers` / `s.run.triggers`
+  // directly, not rely on frame traffic to notice them.
+  expect(await app.triggerChip("tile-2")).toBe("T off");
+  await app.setTileTrigger("tile-2", { mode: "auto", edge: "rising" });
+  expect(await app.triggerChip("tile-2")).toBe("T ▲ AUTO");
+});
+
 test("gear Trigger tab round-trips into per-endpoint and per-tile state", async ({ app }) => {
   await app.setTileTrigger("tile-2", {
     mode: "normal",

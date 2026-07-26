@@ -159,6 +159,39 @@ describe("tile trigger fields (Lot A, issue #26)", () => {
     expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(25);
   });
 
+  it("setTileTriggerPosition ignores non-finite values and clamps to [0,100] (review #1)", () => {
+    const store = makeStore();
+    setTileTriggerPosition(store, ipc, "tile-2", 40);
+    const before = store.get();
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      setTileTriggerPosition(store, ipc, "tile-2", bad);
+    }
+    expect(store.get()).toBe(before); // a true no-op, not just an unclamped store
+    expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(40);
+
+    setTileTriggerPosition(store, ipc, "tile-2", -10);
+    expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(0);
+    setTileTriggerPosition(store, ipc, "tile-2", 150);
+    expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(100);
+  });
+
+  it("setTileTriggerPosition opts.sync = false skips the stream sync (review #10)", () => {
+    const store = makeStore();
+    store.update("test/stream-on", (s) => ({ ...s, run: { ...s.run, streaming: true } }));
+    const calls: unknown[] = [];
+    const syncingIpc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        return Promise.resolve(null as never);
+      },
+    };
+    setTileTriggerPosition(store, syncingIpc, "tile-2", 33, { sync: false });
+    expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(33);
+    expect(calls).toHaveLength(0);
+    setTileTriggerPosition(store, syncingIpc, "tile-2", 34, { sync: true });
+    expect(calls).toHaveLength(1);
+  });
+
   it("setTileShowTriggerMarkers toggles the marker display, no stream sync", () => {
     const store = makeStore();
     setTileShowTriggerMarkers(store, "tile-2", false);

@@ -193,7 +193,7 @@ export type TriggerEdgePolarity = "rising" | "falling";
 export interface TriggerHit {
   /** First sample at/after the crossing. */
   index: number;
-  /** Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`. */
+  /** Sub-sample residual in [0,1]: the crossing is at `index - 1 + frac`. */
   frac: number;
 }
 
@@ -211,9 +211,12 @@ export function refineLinear(prev: number, cur: number, level: number): number {
  * index >= `from`. Single pass, `from` clamped to >= 1; `have_low`/`armed`
  * tracks whether a qualifying low(-hysteresis) sample has been seen yet;
  * `candidate` is a plain `level` crossing held until a later sample either
- * confirms it (clears the hysteresis band) or a false start re-arms the
- * search. The reported crossing is always the plain `level` crossing, found
- * BEFORE confirmation — alignment is independent of hysteresis width.
+ * confirms it (clears the hysteresis band), a false start re-arms the
+ * search, or a later, cleaner crossing of `level` REPLACES the candidate (a
+ * sub-hysteresis wiggle before the real edge must not win over the crossing
+ * that actually goes on to confirm). The reported crossing is always the
+ * plain `level` crossing of the (possibly replaced) candidate, found BEFORE
+ * confirmation — alignment is independent of hysteresis width.
  */
 export function findEdge(
   samples: ArrayLike<number>,
@@ -246,6 +249,11 @@ export function findEdge(
         // False start: dropped back to the low band without ever
         // confirming. `cur` itself re-arms.
         candidate = null;
+      } else if (prev < lvl && cur >= lvl) {
+        // A later, cleaner crossing of `level` while still pending:
+        // REPLACES the candidate, so the reported crossing is always the
+        // one on the FINAL run that clears `level + hysteresis`.
+        candidate = { index: i, frac: refineLinear(prev, cur, lvl) };
       }
       continue; // between lo and hi, unconfirmed: keep waiting
     }

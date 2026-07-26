@@ -20,6 +20,7 @@ import {
   sweepVM,
   triggerLevelFromDisplay,
   triggerLevelToDisplay,
+  triggerSourceOffsetDb,
 } from "./chartvm";
 
 const FREQS = Float64Array.from([100, 1000, 10000]);
@@ -250,12 +251,17 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   });
 
   /** A resolved-source state: tile-1 is a scope on Input L, trigger mode on,
-   * 480-sample window (10 ms @ 48 kHz), position 50 % ⇒ pre = 240. */
+   * 480-sample window (10 ms @ 48 kHz), position 50 % ⇒ pre = 240. fftSize
+   * matches `seedSnapshot`'s 1000-sample ramp (review #3: `scopeVM` now
+   * requires a held snapshot's own sample length to match the CURRENT
+   * fftSize, else it falls back to the live path — see the dedicated
+   * mismatch test below). */
   function stateWithTrigger(mode: "auto" | "normal" | "single" = "auto"): AppState {
     const s = stateWith([HW_TRACE_IDS.inputL], {
       [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
     });
     s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.acquisition.fftSize = 1000;
     tile(s).kind = "scope";
     tile(s).tdUnit = "v";
     tile(s).timeWindowMs = 10;
@@ -306,8 +312,52 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     expect(vm.series[0].samples.length).toBe(480);
     expect(vm.trigger).not.toBeNull();
     expect(vm.trigger!.frac).toBe(0.3);
-    expect(vm.trigger!.position).toBeCloseTo(240 / 480, 9);
+    // count = end - start = 480 (unclamped here), so the denominator is
+    // count - 1 = 479, NOT windowSamples (480) — this is what matches the
+    // canvas's own `displayCount() - 1` denominator in `xOf`, so the
+    // crossing at continuous sample `index - 1 + frac` lands exactly on the
+    // drawn marker (issue #26 reviews #4/#7; the old 240/480 pin put the
+    // marker very slightly off).
+    expect(vm.trigger!.position).toBeCloseTo(240 / 479, 9);
     expect(vm.trigger!.sourceId).toBe(HW_TRACE_IDS.inputL);
+  });
+
+  it("clamps pre to the trigger index so the slice never starts before sample 0 (review #4/#7)", () => {
+    seedSnapshot({ index: 100 });
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 100, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    // pre would be round(0.5*480) = 240, > index (100) ⇒ clamped to 100 ⇒
+    // start = 0, end = min(0+480,1000) = 480, count = 480.
+    const k = Math.pow(10, 20 / 20);
+    expect(vm.series[0].samples[0]).toBeCloseTo(0 * k, 9);
+    expect(vm.series[0].samples.length).toBe(480);
+    expect(vm.trigger!.position).toBeCloseTo(100 / 479, 9);
+  });
+
+  it("clamps the slice end to the snapshot length when the window would run past it (review #4/#7)", () => {
+    seedSnapshot({ index: 900 });
+    const s = stateWithTrigger();
+    tile(s).triggerPositionPct = 10; // pre = round(0.1*480) = 48
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 900, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    // start = 900 - 48 = 852; end = min(852+480, 1000) = 1000; count = 148.
+    expect(vm.series[0].samples.length).toBe(148);
+    expect(vm.trigger!.position).toBeCloseTo(48 / 147, 9);
+  });
+
+  it("a snapshot whose sample length no longer matches the current fftSize falls back to the live path (review #3)", () => {
+    seedTd(HW_TRACE_IDS.inputL, [0.1, 0.2]);
+    seedSnapshot(); // 1000-sample ramp, baked while fftSize was 1000
+    const s = stateWithTrigger("normal");
+    s.acquisition.fftSize = 2048; // the user changed FFT size while NORMAL held a picture
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 999, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger).toBeNull();
+    expect(Array.from(vm.series[0].samples)).toEqual([
+      0.1 * Math.pow(10, 20.81 / 20),
+      0.2 * Math.pow(10, 20.81 / 20),
+    ]);
   });
 
   it("levelDisplay converts the endpoint's level-volts via the SNAPSHOT offset, in v/mv/%FS", () => {
@@ -321,6 +371,15 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(500, 9);
     tile(s).tdUnit = "pctfs";
     expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(5, 9); // 0.5/10 × 100
+  });
+
+  it("sourceOffsetDb exposes the SNAPSHOT-baked offset, not the live trace offset (review #5)", () => {
+    seedSnapshot(); // baked offsetDb 20, distinct from the live 20.81
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "auto", index: 500, frac: 0 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger!.sourceOffsetDb).toBe(20);
+    expect(vm.trigger!.sourceOffsetDb).not.toBe(s.traces.byId[HW_TRACE_IDS.inputL].offsetDb);
   });
 
   it("held (waiting/stopped): trigger.held is true and the picture is the snapshot's", () => {
@@ -401,6 +460,48 @@ describe("triggerLevelToDisplay / triggerLevelFromDisplay", () => {
         expect(triggerLevelFromDisplay(display, unit, offsetDb)).toBeCloseTo(levelV, 9);
       }
     }
+  });
+});
+
+describe("triggerSourceOffsetDb (review #5)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  function stateWithTrigger(mode: "off" | "auto" | "normal" | "single" = "auto"): AppState {
+    const s = stateWith([HW_TRACE_IDS.inputL], {
+      [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
+    });
+    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.acquisition.fftSize = 1000;
+    tile(s).kind = "scope";
+    tile(s).timeWindowMs = 10;
+    tile(s).triggerPositionPct = 50;
+    s.triggers[HW_TRACE_IDS.inputL] = { mode, edge: "rising", levelV: 0.5, hystV: null, armEpoch: 0 };
+    return s;
+  }
+
+  it("no snapshot resolved (mode off, or none latched) ⇒ the trace's LIVE offset", () => {
+    const s = stateWithTrigger("off");
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20.81);
+  });
+
+  it("a resolved snapshot ⇒ the SNAPSHOT's baked offset, matching scopeVM's levelDisplay exactly", () => {
+    const s = stateWithTrigger();
+    putTriggerSnapshot(HW_TRACE_IDS.inputL, {
+      seq: 1,
+      state: "triggered",
+      index: 500,
+      frac: 0.3,
+      sampleRate: 48000,
+      samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
+      offsetDb: { [HW_TRACE_IDS.inputL]: 20 },
+    });
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20);
+    expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(
+      scopeVM(s, tile(s)).trigger!.sourceOffsetDb
+    );
   });
 });
 

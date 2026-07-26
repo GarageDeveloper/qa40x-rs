@@ -4,8 +4,11 @@
  * hysteresis are SHARED by every tile pointing its trigger source at the
  * same endpoint (plan §3.2 decision 2) — tile-local trigger fields
  * (source/position/markers) live in actions/layout.ts instead. Every setter
- * ends with `syncStream` (the layout-actions pattern): a running loop must
- * re-read the `TriggerRequest` selectors/trigger.ts::triggerRequest builds.
+ * that actually changes the store ends with `syncStream` by default (the
+ * layout-actions pattern): a running loop must re-read the `TriggerRequest`
+ * selectors/trigger.ts::triggerRequest builds. `setTriggerLevelV` accepts
+ * `opts.sync` for the canvas drag path (review #10); non-finite/garbage
+ * input is a true no-op — no store update, no sync (review #1).
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { TraceId } from "../../core/model";
@@ -34,7 +37,15 @@ export function setTriggerMode(
   endpointId: TraceId,
   mode: TriggerMode
 ): void {
-  patchTrigger(store, "trigger/mode", endpointId, (t) => (t.mode === mode ? t : { ...t, mode }));
+  patchTrigger(store, "trigger/mode", endpointId, (t) => {
+    if (t.mode === mode) return t;
+    // Re-selecting SINGLE must always start freshly armed. Without this, a
+    // `fired` latch left over from an EARLIER single session (the backend
+    // state is independent of whatever mode is currently displayed) makes
+    // the chip read "STOP" the instant SINGLE is picked again, before any
+    // new shot has actually fired (issue #26 review #8).
+    return mode === "single" ? { ...t, mode, armEpoch: t.armEpoch + 1 } : { ...t, mode };
+  });
   syncStream(store, ipc);
 }
 
@@ -48,34 +59,59 @@ export function setTriggerEdge(
   syncStream(store, ipc);
 }
 
+/**
+ * `opts.sync` (default true): whether to push the new config to the running
+ * stream immediately. A canvas drag calls this once per pointermove with
+ * `sync: false` (store-only — cheap) and once more with `sync: true` on
+ * pointerup (issue #26 review #10: an IPC round trip + full grid re-feed on
+ * every pointermove is wasteful and unnecessary until the drag settles).
+ */
 export function setTriggerLevelV(
   store: Store<AppState>,
   ipc: Ipc,
   endpointId: TraceId,
-  levelV: number
+  levelV: number,
+  opts: { sync?: boolean } = {}
 ): void {
+  // A non-finite value (a cleared/garbage gear field, a drag glitch) must
+  // never reach the wire: `validate_config` rejects the WHOLE stream config
+  // on a single bad trigger field, which would silently reject every LATER
+  // `stream_update` too (including play/stop) until the value is fixed —
+  // issue #26 review #1. Ignoring it here is a true no-op: no store update,
+  // no sync.
+  if (!Number.isFinite(levelV)) return;
   patchTrigger(store, "trigger/level", endpointId, (t) =>
     t.levelV === levelV ? t : { ...t, levelV }
   );
-  syncStream(store, ipc);
+  if (opts.sync ?? true) syncStream(store, ipc);
 }
 
 /** `hystV: null` = auto (2 % of the frame's own peak, floored at 1e-4 FS —
- * the backend's `evaluate_trigger` default). */
+ * the backend's `evaluate_trigger` default). Same choke-point discipline as
+ * `setTriggerLevelV` (review #1): a non-finite value is ignored outright, a
+ * finite negative one clamps to 0 (hysteresis has no meaningful sign) —
+ * `null` (auto) passes through untouched either way. */
 export function setTriggerHystV(
   store: Store<AppState>,
   ipc: Ipc,
   endpointId: TraceId,
   hystV: number | null
 ): void {
+  let next = hystV;
+  if (next !== null) {
+    if (!Number.isFinite(next)) return;
+    if (next < 0) next = 0;
+  }
   patchTrigger(store, "trigger/hyst", endpointId, (t) =>
-    t.hystV === hystV ? t : { ...t, hystV }
+    t.hystV === next ? t : { ...t, hystV: next }
   );
   syncStream(store, ipc);
 }
 
-/** Re-arm a SINGLE shot: bump `armEpoch`. Idempotent backend-side (only a
- * strictly larger value re-arms) — a duplicate click is harmless. */
+/** Re-arm a SINGLE shot: bump `armEpoch`. The backend re-arms on ANY change
+ * to `arm_epoch` (an increase OR a decrease — e.g. a workspace load resets
+ * it to 0 while the loop's own latch may sit higher, issue #26 review #2),
+ * so a duplicate click here is harmless: it just moves to a new value. */
 export function armSingle(store: Store<AppState>, ipc: Ipc, endpointId: TraceId): void {
   patchTrigger(store, "trigger/arm", endpointId, (t) => ({ ...t, armEpoch: t.armEpoch + 1 }));
   syncStream(store, ipc);

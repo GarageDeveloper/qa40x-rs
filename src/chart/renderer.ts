@@ -35,10 +35,14 @@ export interface SpectrumRenderer {
 /** The trigger drag callbacks (Lot A, issue #26): `onLevel` receives a
  * DISPLAY-unit value (the volts conversion happens in the tile, never in
  * the chart — plan §3.4); `onPosition` receives 0..1 of the window. Wired
- * ONCE per renderer instance (tile.ts, at renderer creation), not per frame. */
+ * ONCE per renderer instance (tile.ts, at renderer creation), not per frame.
+ * `done` is false on every intermediate pointermove and true exactly once,
+ * on pointerup — callers should only sync the value to the running stream
+ * (IPC + full grid re-feed) when `done` is true, and just update the store
+ * otherwise (review #10: a stream sync on every pointermove is wasteful). */
 export interface ScopeTriggerHandlers {
-  onLevel: (displayValue: number) => void;
-  onPosition: (position: number) => void;
+  onLevel: (displayValue: number, done: boolean) => void;
+  onPosition: (position: number, done: boolean) => void;
 }
 
 export interface ScopeRenderer {

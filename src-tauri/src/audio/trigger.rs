@@ -20,22 +20,31 @@ pub enum Edge {
 pub struct TriggerHit {
     /// First sample at/after the crossing.
     pub index: usize,
-    /// Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`.
+    /// Sub-sample residual in [0,1]: the crossing is at `index - 1 + frac`.
+    /// Reaches exactly 1.0 when the CONFIRMING/CROSSING sample itself sits
+    /// on `level` (`cur == level`) — see [`refine_linear`].
     pub frac: f32,
 }
 
 /// First Schmitt-qualified `edge` crossing of `level` at index ≥ `from`.
 ///
+/// `hysteresis` is a HALF-band: arming happens at `level - hysteresis`,
+/// confirmation at `level + hysteresis` — the full qualification band a
+/// candidate must clear is `2 * hysteresis` wide, not `hysteresis` itself.
+///
 /// Qualification (rising): the scan must first see a sample at/below
 /// `level - hysteresis` (armed), then the first `level` crossing after that
-/// becomes a CANDIDATE — held until a later sample clears `level +
-/// hysteresis` (confirmed → returned) or the signal falls back to
-/// `level - hysteresis` first (a false start → re-arm, keep scanning).
-/// The reported crossing is always the plain `level` crossing of the
-/// candidate, found BEFORE confirmation — hysteresis only decides WHETHER an
-/// edge qualifies, never WHERE it is, so `index`/`frac` are independent of
-/// hysteresis width. Falling is the mirror image (handled by negating the
-/// comparison polarity, not the buffer).
+/// becomes a CANDIDATE — held until a later sample either clears `level +
+/// hysteresis` (confirmed → returned), drops back to `level - hysteresis`
+/// (a false start → re-arm, keep scanning), or crosses `level` again while
+/// still pending (a cleaner/later crossing REPLACES the candidate — a
+/// sub-hysteresis wiggle before the real edge must not win over the crossing
+/// that actually goes on to confirm). The reported crossing is always the
+/// plain `level` crossing of the (possibly replaced) candidate, found BEFORE
+/// confirmation — hysteresis only decides WHETHER an edge qualifies, never
+/// WHERE it is, so `index`/`frac` are independent of hysteresis width.
+/// Falling is the mirror image (handled by negating the comparison polarity,
+/// not the buffer).
 ///
 /// Single pass, O(n). `from` is clamped to ≥ 1 (a crossing needs a `prev`
 /// sample); `hysteresis` is used as `.abs()`; `hysteresis == 0` degenerates
@@ -80,8 +89,17 @@ pub fn find_edge(
                 // False start: dropped back to the low band without ever
                 // confirming. `cur` itself re-arms.
                 candidate = None;
+            } else if prev < lvl && cur >= lvl {
+                // A later, cleaner crossing of `level` while still pending
+                // (the signal dipped back under `level` without ever
+                // reaching `lo`, then re-crossed): REPLACES the candidate,
+                // so a sub-hysteresis wiggle before the real edge can never
+                // outlive the crossing that actually goes on to confirm —
+                // the reported index/frac are always the ones on the FINAL
+                // run that clears `level + hysteresis`.
+                candidate = Some((i, refine_linear(prev, cur, lvl)));
             }
-            // else: between lo and hi, unconfirmed — keep waiting.
+            // else: still between lo and hi, unconfirmed — keep waiting.
             continue;
         }
 
@@ -106,11 +124,14 @@ pub fn find_edge(
     None
 }
 
-/// Linear sub-sample crossing fraction in [0,1) between `prev` and `cur`:
+/// Linear sub-sample crossing fraction in [0,1] between `prev` and `cur`:
 /// the fraction of the `prev → cur` interval at which the line through them
-/// equals `level`. Degenerates to 0.0 if `prev == cur` (no slope to
-/// interpolate along — shouldn't happen for a real crossing, but keeps the
-/// division safe).
+/// equals `level`. Closed at both ends: `prev == level` yields exactly 0.0
+/// (the crossing sits on the earlier sample) and `cur == level` yields
+/// exactly 1.0 (it sits on the later one) — `find_edge`'s `index - 1 + frac`
+/// contract needs both endpoints reachable. Degenerates to 0.0 if
+/// `prev == cur` (no slope to interpolate along — shouldn't happen for a
+/// real crossing, but keeps the division safe).
 pub fn refine_linear(prev: f32, cur: f32, level: f32) -> f32 {
     let d = cur - prev;
     if d.abs() < f32::EPSILON {
@@ -178,6 +199,10 @@ mod tests {
         // Crossing exactly on the EARLIER sample (prev == level) -> frac 0.0,
         // i.e. the crossing sits exactly at `index - 1`.
         assert_eq!(refine_linear(0.0, 1.0, 0.0), 0.0);
+        // Crossing exactly on the LATER sample (cur == level) -> frac 1.0,
+        // i.e. the crossing sits exactly at `index` — the contract is
+        // [0,1], NOT the half-open [0,1) the doc used to claim (review #12).
+        assert_eq!(refine_linear(-1.0, 0.0, 0.0), 1.0);
     }
 
     /// Test 3 — hysteresis rejects a straddling wiggle smaller than the band; the
@@ -192,6 +217,26 @@ mod tests {
         sig.extend_from_slice(&[-1.0, 1.0, 1.0]);
         let hit = find_edge(&sig, 0.0, 0.2, Edge::Rising, 0).expect("real edge found");
         assert_eq!(hit.index, 9);
+        assert_eq!(hit.frac, 0.5);
+    }
+
+    /// Test 3b (review #13) — a sub-hysteresis wiggle creates a PENDING
+    /// candidate that is never invalidated (never drops back to `lo`) before
+    /// the real edge arrives: the candidate must be REPLACED by the later,
+    /// cleaner crossing, so the reported index is the real edge's own level
+    /// crossing, not the first noise crossing that happened to create the
+    /// (stale) candidate.
+    #[test]
+    fn noise_replaces_pending_candidate_before_real_edge() {
+        // hyst = 0.2 -> lo = -0.2, hi = 0.2.
+        let sig = vec![-1.0f32, -1.0, -0.05, 0.05, -0.05, 0.05, 1.0, 1.0];
+        // i=3: prev=-0.05,cur=0.05 creates a candidate at index 3 (frac 0.5),
+        // never confirmed (cur never reaches hi) and never falls back to lo.
+        // i=5: prev=-0.05,cur=0.05 crosses `level` again while pending ->
+        // REPLACES the candidate with index 5 (frac 0.5).
+        // i=6: cur=1.0 >= hi -> confirms the index-5 candidate.
+        let hit = find_edge(&sig, 0.0, 0.2, Edge::Rising, 0).expect("edge found");
+        assert_eq!(hit.index, 5, "must report the FINAL run's crossing, not the first noise one");
         assert_eq!(hit.frac, 0.5);
     }
 

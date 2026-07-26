@@ -696,9 +696,12 @@ export class FakeDevice {
   /** One endpoint's trigger alignment this frame — mirrors stream.rs's
    * `evaluate_trigger`: level/hysteresis volts -> this frame's FS domain via
    * the SAME offset the frame's own trace uses (the twin of the offsets
-   * object below), a strictly-larger `arm_epoch` re-arms a SINGLE latch,
-   * and a fired SINGLE returns `stopped` without scanning. READS `samples`
-   * only — this never influences spectra/metrics (module-doc parity). */
+   * object below), ANY change in `arm_epoch` re-arms a SINGLE latch — not
+   * only an increase (a workspace load resets `arm_epoch` to 0 in the
+   * frontend while this fake's own latch may already sit higher — issue #26
+   * review #2) — and a fired SINGLE returns `stopped` without scanning.
+   * READS `samples` only — this never influences spectra/metrics
+   * (module-doc parity). */
   private evaluateTrigger(
     endpoint: string,
     cfg: TriggerConfigWire,
@@ -711,7 +714,7 @@ export class FakeDevice {
       cfg.hysteresis_v !== null ? cfg.hysteresis_v * toFs : autoHysteresis(samples, 0.02, 1e-4);
 
     const armedEpoch = this.triggerArmedEpoch[endpoint] ?? 0;
-    if (cfg.arm_epoch > armedEpoch) {
+    if (cfg.arm_epoch !== armedEpoch) {
       this.triggerArmedEpoch[endpoint] = cfg.arm_epoch;
       this.triggerFired[endpoint] = false;
     }

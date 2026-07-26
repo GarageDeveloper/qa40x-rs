@@ -32,6 +32,7 @@ import {
   TD_UNIT_LABELS,
   triggerLevelFromDisplay,
   triggerLevelToDisplay,
+  triggerSourceOffsetDb,
 } from "../../store/selectors/chartvm";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
@@ -230,6 +231,11 @@ export function openTileGearDialog(
     return t ? tileTriggerSourceId(store.get(), t) : null;
   };
 
+  // Only the 4 hw endpoints can ever trigger (the wire's `TriggerRequest` is
+  // keyed by `HW_TRACE_IDS.*` alone) — a memory/program/transform trace in
+  // this list would store dead settings the backend never reads, and the
+  // chip would lie forever ("T ▲ AUTO", never triggering) — issue #26
+  // review #9.
   const trigSourceSel = el("select.field", {
     "data-testid": "gear-trigger-source",
     onchange: (e: Event) =>
@@ -239,7 +245,10 @@ export function openTileGearDialog(
     el("option", { value: "auto" }, "Auto"),
     ...tile.traces
       .map((id) => s0.traces.byId[id])
-      .filter((t): t is NonNullable<typeof t> => !!t)
+      .filter(
+        (t): t is NonNullable<typeof t> =>
+          !!t && (t.source.kind === "hw_input" || t.source.kind === "hw_output")
+      )
       .map((t) => el("option", { value: t.id }, t.label))
   );
   trigSourceSel.value = tile.triggerSource;
@@ -284,13 +293,21 @@ export function openTileGearDialog(
       const t = s.layout.tiles[tileId];
       const sourceId = currentSourceId();
       if (!t || !sourceId) return;
-      const offsetDb = s.traces.byId[sourceId]?.offsetDb ?? null;
+      // The SAME offset scopeVM converts through (snapshot-baked when a
+      // picture is held, live otherwise) — reading the trace's live offset
+      // directly here could disagree with what the marker on the chart
+      // shows once a picture is held across a range change (review #5).
+      const offsetDb = triggerSourceOffsetDb(s, sourceId);
       const raw = Number((e.target as HTMLInputElement).value);
+      // A blank/garbage field parses to NaN — never dispatch it (review #1;
+      // `setTriggerLevelV` also guards this, this is defense in depth at
+      // the UI edge itself).
+      if (!Number.isFinite(raw)) return;
       setTriggerLevelV(store, ipc, sourceId, triggerLevelFromDisplay(raw, t.tdUnit, offsetDb));
     },
   });
   {
-    const offsetDb0 = trigSourceId0 ? (s0.traces.byId[trigSourceId0]?.offsetDb ?? null) : null;
+    const offsetDb0 = trigSourceId0 ? triggerSourceOffsetDb(s0, trigSourceId0) : null;
     trigLevelInput.value = String(triggerLevelToDisplay(trigSettings0.levelV, tile.tdUnit, offsetDb0));
   }
 
@@ -304,7 +321,13 @@ export function openTileGearDialog(
       const sourceId = currentSourceId();
       if (!sourceId) return;
       const raw = (e.target as HTMLInputElement).value;
-      setTriggerHystV(store, ipc, sourceId, raw === "" ? null : Number(raw));
+      if (raw === "") {
+        setTriggerHystV(store, ipc, sourceId, null); // "" = auto
+        return;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return; // never dispatch garbage (review #1)
+      setTriggerHystV(store, ipc, sourceId, n);
     },
   });
   if (trigSettings0.hystV !== null) trigHystInput.value = String(trigSettings0.hystV);
@@ -315,8 +338,11 @@ export function openTileGearDialog(
     max: "100",
     step: "any",
     "data-testid": "gear-trigger-position",
-    onchange: (e: Event) =>
-      setTileTriggerPosition(store, ipc, tileId, Number((e.target as HTMLInputElement).value)),
+    onchange: (e: Event) => {
+      const raw = Number((e.target as HTMLInputElement).value);
+      if (!Number.isFinite(raw)) return; // never dispatch garbage (review #1)
+      setTileTriggerPosition(store, ipc, tileId, raw);
+    },
   });
   trigPositionInput.value = String(tile.triggerPositionPct);
 
@@ -348,7 +374,12 @@ export function openTileGearDialog(
     el("label.gear__row", {}, el("span.gear__label", {}, "Mode"), trigModeSel),
     el("label.gear__row", {}, el("span.gear__label", {}, "Edge"), trigEdgeSel),
     el("label.gear__row", {}, trigLevelLabel, trigLevelInput),
-    el("label.gear__row", {}, el("span.gear__label", {}, "Hysteresis (V)"), trigHystInput),
+    el(
+      "label.gear__row",
+      {},
+      el("span.gear__label", {}, "Hysteresis (V, ± around level)"),
+      trigHystInput
+    ),
     el("label.gear__row", {}, el("span.gear__label", {}, "Position (%)"), trigPositionInput),
     el("label.gear__row", {}, trigMarkersBox, el("span", {}, "Show trigger markers")),
     el("div.gear__row", {}, trigArmBtn),

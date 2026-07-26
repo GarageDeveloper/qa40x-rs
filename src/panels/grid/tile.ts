@@ -43,6 +43,7 @@ import {
   spectrumVM,
   sweepVM,
   triggerLevelFromDisplay,
+  triggerSourceOffsetDb,
 } from "../../store/selectors/chartvm";
 import type { ScopeRenderer, SpectrumRenderer, SweepRenderer } from "../../chart/renderer";
 import { WrappedSpectrumChart } from "../../chart/spectrum";
@@ -448,21 +449,26 @@ export function createTile(
       // resolved here against the CURRENT store (not captured at wiring
       // time) since the tile's trigger source can change afterward.
       scope.setTriggerHandlers({
-        onLevel: (displayValue) => {
+        onLevel: (displayValue, done) => {
           const s = store.get();
           const tile = s.layout.tiles[tileId];
           const sourceId = tile ? tileTriggerSourceId(s, tile) : null;
           if (!tile || !sourceId) return;
-          const offsetDb = s.traces.byId[sourceId]?.offsetDb ?? null;
+          // The SAME offset scopeVM used to build the marker being dragged
+          // (snapshot-baked when a picture is held) — not the trace's live
+          // offset, which can differ after a range change and make the
+          // level jump on drop (review #5).
+          const offsetDb = triggerSourceOffsetDb(s, sourceId);
           setTriggerLevelV(
             store,
             ipc,
             sourceId,
-            triggerLevelFromDisplay(displayValue, tile.tdUnit, offsetDb)
+            triggerLevelFromDisplay(displayValue, tile.tdUnit, offsetDb),
+            { sync: done }
           );
         },
-        onPosition: (position) => {
-          setTileTriggerPosition(store, ipc, tileId, position * 100);
+        onPosition: (position, done) => {
+          setTileTriggerPosition(store, ipc, tileId, position * 100, { sync: done });
         },
       });
     } else {

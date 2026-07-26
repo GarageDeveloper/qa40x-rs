@@ -17,7 +17,7 @@ import type { FdUnit, TdUnit, TraceId } from "../../core/model";
 import type { TriggerState } from "../../gen";
 import { displayOffsetDb, displayScale } from "../../core/units";
 import { getFrames } from "../../data/frames";
-import { getTriggerSnapshot } from "../../data/triggered";
+import { getTriggerSnapshot, type TriggerSnapshot } from "../../data/triggered";
 import { chipSourceTraceId, shownTraces } from "./layout";
 import { tileTriggerSourceId, tileWindowSamples } from "./trigger";
 import {
@@ -79,7 +79,7 @@ export interface TdSeriesVM {
 export interface ScopeTriggerVM {
   sourceId: TraceId;
   state: TriggerState;
-  /** Sub-sample residual in [0,1) — the renderer's fractional x-shift. */
+  /** Sub-sample residual in [0,1] — the renderer's fractional x-shift. */
   frac: number;
   /** Y of the level marker, in the tile's display unit. */
   levelDisplay: number;
@@ -88,6 +88,14 @@ export interface ScopeTriggerVM {
   /** True for `waiting`/`stopped` — the picture is the last HELD snapshot,
    * not this frame's live capture (NORMAL/SINGLE holding). */
   held: boolean;
+  /** The converter offset actually used to build `levelDisplay` (the
+   * snapshot's OWN baked offset — the trigger object is only ever built once
+   * a snapshot is resolved, see `scopeVM`). A drag handler or a gear field
+   * that also converts `settings.levelV` must read THIS value, never the
+   * trace's live `offsetDb` — the two can differ after a range change while
+   * a picture is held, and reading two different offsets for "the same"
+   * conversion makes the marker jump (issue #26 review #5, #60-style). */
+  sourceOffsetDb: number | null;
 }
 
 export interface ScopeVM {
@@ -119,6 +127,44 @@ export function triggerLevelFromDisplay(
   offsetDb: number | null
 ): number {
   return (value * displayScale("v", offsetDb)) / displayScale(unit, offsetDb);
+}
+
+/**
+ * The trigger snapshot `scopeVM` (and `triggerSourceOffsetDb`) treat as
+ * "resolved" for `sourceId`: absent when the mode is off, no picture has
+ * latched yet, OR the held snapshot's own sample array no longer matches the
+ * CURRENT acquisition fftSize. A snapshot's arrays were captured at the
+ * fftSize in effect at latch time; if the user changes fftSize while
+ * NORMAL/SINGLE holds a picture, that stale buffer no longer lines up with
+ * the live acquisition — treat it as absent (falls back to the live,
+ * unaligned path) rather than slicing samples at the wrong time base
+ * (issue #26 review #3).
+ */
+function resolvedTriggerSnapshot(s: AppState, sourceId: TraceId): TriggerSnapshot | undefined {
+  const settings = s.triggers[sourceId] ?? DEFAULT_TRIGGER;
+  if (settings.mode === "off") return undefined;
+  const snap = getTriggerSnapshot(sourceId);
+  if (!snap) return undefined;
+  const held = snap.samples[sourceId];
+  if (!held || held.length !== s.acquisition.fftSize) return undefined;
+  return snap;
+}
+
+/**
+ * The offset `scopeVM` actually converts `sourceId`'s trigger level through:
+ * the HELD snapshot's own baked offset when one is resolved (mirrors
+ * `levelDisplay`'s exact conversion, #60-style — a live range change must
+ * never rescale a held picture), else the trace's current live offset. Any
+ * OTHER code converting the same endpoint's trigger level (a canvas drag
+ * handler, the gear level field) must read this, not `traces.byId[id]
+ * .offsetDb` directly — the two can disagree once a picture is held across a
+ * range change, which used to make the level marker jump (issue #26 review
+ * #5).
+ */
+export function triggerSourceOffsetDb(s: AppState, sourceId: TraceId): number | null {
+  const snap = resolvedTriggerSnapshot(s, sourceId);
+  if (snap) return snap.offsetDb[sourceId] ?? null;
+  return s.traces.byId[sourceId]?.offsetDb ?? null;
 }
 
 /** One curve of a swept measurement (a trace can carry several — e.g. a
@@ -294,34 +340,50 @@ function liveScopeSeries(s: AppState, tile: TileConfig): TdSeriesVM[] {
 }
 
 /**
- * Build a scope tile's view-model. With no trigger (mode off, or no aligned
- * picture latched yet): every member's OWN live td frame, scaled by its OWN
- * converter offset — `trigger: null`, byte-identical to the pre-Lot-A shape
- * (regression-pinned).
+ * Build a scope tile's view-model. With no trigger (mode off, no aligned
+ * picture latched yet, or a held picture whose fftSize no longer matches the
+ * live acquisition — review #3): every member's OWN live td frame, scaled by
+ * its OWN converter offset — `trigger: null`, byte-identical to the
+ * pre-Lot-A shape (regression-pinned).
  *
- * With a trigger on and a snapshot latched (data/triggered.ts): every hw
+ * With a trigger on and a snapshot resolved (data/triggered.ts): every hw
  * endpoint member is built from the SNAPSHOT's arrays (references, already
  * simultaneous with the trigger scan — all 4 hw channels share one capture),
- * sliced to `[start, start + windowSamples)` around the trigger index, and
- * scaled by the snapshot's OWN baked offset (never the live one — a range
- * change must not rescale a HELD waiting/stopped picture, #60-style). A
- * `memory`/`program` member keeps its own live, unsliced origin — it has its
- * own time base, not the synchronized hw capture the trigger indexes into.
+ * sliced to `[start, end)` around the trigger index — `start = index -
+ * preUsed` with `preUsed` clamped to `index` (never slices before sample 0)
+ * and `end` clamped to the snapshot's own length (never past the held
+ * buffer) — and scaled by the snapshot's OWN baked offset (never the live
+ * one — a range change must not rescale a HELD waiting/stopped picture,
+ * #60-style). A `memory`/`program` member keeps its own live, unsliced
+ * origin — it has its own time base, not the synchronized hw capture the
+ * trigger indexes into.
  */
 export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
   const unit = tile.tdUnit;
   const sourceId = tileTriggerSourceId(s, tile);
   const settings = sourceId ? (s.triggers[sourceId] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
-  const snap = sourceId && settings.mode !== "off" ? getTriggerSnapshot(sourceId) : undefined;
+  const snap = sourceId ? resolvedTriggerSnapshot(s, sourceId) : undefined;
 
   if (!sourceId || !snap) {
     return { series: liveScopeSeries(s, tile), unitLabel: TD_UNIT_LABELS[unit], trigger: null };
   }
 
+  // The canvas draws sample `i` at `(i - (frac - 1)) / (count - 1)` of the
+  // plot (canvas.ts's `xOf`, `count = displayCount()`), so the crossing at
+  // continuous sample `index - 1 + frac` lands exactly on the marker only
+  // when THIS selector's `position` (the marker's X, 0..1) uses the SAME
+  // `count - 1` denominator — `windowSamples` alone is wrong whenever the
+  // slice was clamped (see below). `preUsed` is clamped to `snap.index` so
+  // the slice never starts before sample 0; `end` is clamped to the
+  // snapshot's own length so it never reads past the held buffer (issue #26
+  // reviews #4/#7).
   const windowSamples = tileWindowSamples(s, tile);
-  const pre = Math.round((tile.triggerPositionPct / 100) * windowSamples);
-  const start = Math.max(0, snap.index - pre);
-  const end = start + windowSamples;
+  const rawPre = Math.round((tile.triggerPositionPct / 100) * windowSamples);
+  const preUsed = Math.min(rawPre, snap.index);
+  const start = snap.index - preUsed;
+  const snapshotLength = snap.samples[sourceId]?.length ?? 0;
+  const end = Math.min(start + windowSamples, snapshotLength);
+  const count = end - start;
 
   const series: TdSeriesVM[] = [];
   for (const id of shownTraces(tile)) {
@@ -340,13 +402,15 @@ export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
   }
 
   const state: TriggerState = s.run.triggers[sourceId]?.state ?? snap.state;
+  const sourceOffsetDb = snap.offsetDb[sourceId] ?? null;
   const trigger: ScopeTriggerVM = {
     sourceId,
     state,
     frac: snap.frac,
-    levelDisplay: triggerLevelToDisplay(settings.levelV, unit, snap.offsetDb[sourceId] ?? null),
-    position: windowSamples > 0 ? pre / windowSamples : 0,
+    levelDisplay: triggerLevelToDisplay(settings.levelV, unit, sourceOffsetDb),
+    position: preUsed / Math.max(1, count - 1),
     held: state === "waiting" || state === "stopped",
+    sourceOffsetDb,
   };
   return { series, unitLabel: TD_UNIT_LABELS[unit], trigger };
 }

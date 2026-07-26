@@ -164,8 +164,13 @@ pub struct TriggerConfig {
     pub hysteresis_v: Option<f32>,
     /// Pre-trigger depth the display needs; the search starts there.
     pub pre_samples: u32,
-    /// Bumped by the UI to re-arm a `Single` shot (idempotent: only a
-    /// strictly larger value re-arms).
+    /// Bumped (or otherwise changed) by the UI to re-arm a `Single` shot.
+    /// The loop re-arms on ANY change from the last value it saw, not only
+    /// an increase: a workspace load resets this to 0 in the frontend while
+    /// the loop's own latch may already sit at a higher value from earlier
+    /// Arm clicks, and that reset must still re-arm (issue #26 review #2) —
+    /// a `>` comparison would leave the latch dead until the value happened
+    /// to climb back past its old high-water mark.
     pub arm_epoch: u32,
 }
 
@@ -283,7 +288,8 @@ pub struct TriggerAlign {
     /// Trigger point: first sample at/after the crossing, in THIS frame's
     /// emitted (mid-sliced) buffer.
     pub index: u32,
-    /// Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`.
+    /// Sub-sample residual in [0,1]: the crossing is at `index - 1 + frac`
+    /// (closed at both ends — see `audio::trigger::refine_linear`).
     pub frac: f32,
     /// The threshold actually compared, in this frame's FS domain.
     pub level_fs: f32,
@@ -622,8 +628,9 @@ impl Analyzers {
 /// One endpoint's loop-owned trigger latch — mirrors [`Analyzers`]'s
 /// per-channel-not-per-device shape (issue #25: keyed per endpoint, never
 /// "the device"). `armed_epoch` tracks the last `arm_epoch` seen so a UI
-/// re-arm (idempotent bump) can be told apart from a config no-op;
-/// `fired` is the `Single`-mode latch.
+/// re-arm (ANY change — not only an increase, see `TriggerConfig::arm_epoch`'s
+/// doc) can be told apart from a config no-op; `fired` is the `Single`-mode
+/// latch.
 #[derive(Default)]
 struct EndpointTrigger {
     armed_epoch: u32,
@@ -661,10 +668,15 @@ fn evaluate_trigger(
         .map(|v| v * to_fs)
         .unwrap_or_else(|| crate::audio::auto_hysteresis(samples, 0.02, 1e-4));
 
-    // A strictly larger arm_epoch re-arms a Single latch (idempotent: the
-    // same or a smaller value is a no-op, so a replayed/duplicate config
-    // update never re-fires a shot).
-    if cfg.arm_epoch > st.armed_epoch {
+    // ANY change in arm_epoch re-arms a Single latch — not only an increase.
+    // A workspace load resets arm_epoch to 0 in the frontend while this
+    // loop's own `armed_epoch` may already sit higher (past Arm clicks in
+    // the same session); with a `>` comparison that reset would never
+    // re-arm, leaving Single clicks silently dead until arm_epoch happened
+    // to climb back past the old high-water mark (issue #26 review #2). The
+    // same value is still a no-op, so a replayed/duplicate config update
+    // never re-fires a shot.
+    if cfg.arm_epoch != st.armed_epoch {
         st.armed_epoch = cfg.arm_epoch;
         st.fired = false;
     }
@@ -1189,6 +1201,26 @@ mod tests {
         cfg.arm_epoch += 1;
         let third = evaluate_trigger(&cfg, &mut st, &samples, 0.0);
         assert_eq!(third.state, TriggerState::Triggered);
+    }
+
+    /// 9d (review #2) — a workspace load resets `arm_epoch` to 0 in the
+    /// frontend while the loop's own `armed_epoch` may already be higher
+    /// (past Arm clicks in the same session): the DECREASE must still
+    /// re-arm a fired Single latch, not just an increase.
+    #[test]
+    fn evaluate_trigger_rearms_on_any_epoch_change_not_just_increase() {
+        let cfg = TriggerConfig {
+            mode: TriggerMode::Single,
+            pre_samples: 0,
+            arm_epoch: 0,
+            ..default_trigger_cfg()
+        };
+        // Simulates the loop having already armed+fired at a higher epoch
+        // from earlier in the session, then the frontend's arm_epoch
+        // dropping back to 0 on a workspace load.
+        let mut st = EndpointTrigger { armed_epoch: 5, fired: true };
+        let align = evaluate_trigger(&cfg, &mut st, &one_edge_samples(), 0.0);
+        assert_eq!(align.state, TriggerState::Triggered);
     }
 
     /// Test 10 — Volts -> FS conversion uses the frame's own offset; hysteresis

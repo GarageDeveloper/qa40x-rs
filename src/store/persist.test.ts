@@ -12,6 +12,7 @@ import type { AppState, SweepProgram } from "./state";
 import { HW_TRACE_IDS, initialState } from "./state";
 import { migrate, snapshotWorkspace, WS_VERSION } from "./persist";
 import { applyWorkspaceDoc } from "./actions/workspace";
+import { getTriggerSnapshot, putTriggerSnapshot } from "../data/triggered";
 import { templates } from "./templates";
 import type { Ipc } from "../ipc/ipc";
 
@@ -96,6 +97,24 @@ describe("v5 document", () => {
     expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
     expect(dest.get().triggers[HW_TRACE_IDS.inputL]?.armEpoch).toBe(0);
     expect(dest.get().triggers[HW_TRACE_IDS.inputL]?.mode).toBe("single");
+  });
+
+  it("clears any HELD trigger snapshot on load (review #3: a stale picture must not survive under a reused trace id)", () => {
+    putTriggerSnapshot(HW_TRACE_IDS.inputL, {
+      seq: 1,
+      state: "triggered",
+      index: 10,
+      frac: 0,
+      sampleRate: 48000,
+      samples: { [HW_TRACE_IDS.inputL]: Float64Array.from([0, 1, 2]) },
+      offsetDb: { [HW_TRACE_IDS.inputL]: 0 },
+    });
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeDefined();
+
+    const dest = freshStore();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(dest.get()))))!;
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeUndefined();
   });
 
   it("every built-in template survives JSON + migrate and references real traces", () => {
