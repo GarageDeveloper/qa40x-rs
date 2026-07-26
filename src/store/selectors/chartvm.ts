@@ -14,17 +14,26 @@
  * curve (or scope volts) cannot move — the #51/#58/#60 invariant.
  */
 import type { FdUnit, TdUnit, TraceId } from "../../core/model";
+import type { TriggerState } from "../../gen";
 import { displayOffsetDb, displayScale } from "../../core/units";
 import { getFrames } from "../../data/frames";
-import { shownTraces } from "./layout";
+import { getTriggerSnapshot } from "../../data/triggered";
+import { chipSourceTraceId, shownTraces } from "./layout";
+import { tileTriggerSourceId, tileWindowSamples } from "./trigger";
 import {
+  DEFAULT_TRIGGER,
   isRatioTrace,
   traceCurveColor,
   type AppState,
   type TileConfig,
+  type TraceMeta,
 } from "../state";
 
 export { displayOffsetDb, displayScale };
+// Re-exported (not defined here) so panels/grid/tile.ts keeps importing it
+// from chartvm.ts — the real definition (selectors/layout.ts) is shared with
+// selectors/trigger.ts without chartvm.ts <-> trigger.ts becoming a cycle.
+export { chipSourceTraceId };
 
 export interface SeriesVM {
   id: TraceId;
@@ -55,23 +64,6 @@ export interface HarmonicMarkVM {
   magnitudeDbc: number;
 }
 
-/**
- * The trace a tile's readouts (chips, harmonic markers) follow: the explicit
- * chip source when it is still a member, else the first DRAWN trace with
- * data (a legend-hidden curve isn't what the user is reading).
- */
-export function chipSourceTraceId(tile: TileConfig): TraceId | null {
-  if (tile.chipSource !== "auto" && tile.traces.includes(tile.chipSource)) {
-    return tile.chipSource;
-  }
-  const drawn = shownTraces(tile);
-  for (const id of drawn) {
-    const f = getFrames(id);
-    if (f && (f.td || f.fd)) return id;
-  }
-  return drawn[0] ?? tile.traces[0] ?? null;
-}
-
 export interface TdSeriesVM {
   id: TraceId;
   label: string;
@@ -82,9 +74,51 @@ export interface TdSeriesVM {
   seq: number;
 }
 
+/** A scope tile's trigger overlay — null when the resolved source's trigger
+ * is off (or no aligned picture exists yet): today's shape, unchanged. */
+export interface ScopeTriggerVM {
+  sourceId: TraceId;
+  state: TriggerState;
+  /** Sub-sample residual in [0,1) — the renderer's fractional x-shift. */
+  frac: number;
+  /** Y of the level marker, in the tile's display unit. */
+  levelDisplay: number;
+  /** X of the trigger point, 0..1 of the displayed window. */
+  position: number;
+  /** True for `waiting`/`stopped` — the picture is the last HELD snapshot,
+   * not this frame's live capture (NORMAL/SINGLE holding). */
+  held: boolean;
+}
+
 export interface ScopeVM {
   series: TdSeriesVM[];
   unitLabel: string;
+  trigger: ScopeTriggerVM | null;
+}
+
+/** A level in level-volts of an endpoint's own converter (the wire
+ * `TriggerConfig.level_v` domain — see stream.rs's module doc) to/from the
+ * tile's td display unit, via the SAME per-converter offset the series
+ * itself scales by (`displayScale`'s "V" case is exactly volts-per-FS, so
+ * the ratio to another unit's scale cancels the offset for V/mV and folds
+ * in the %FS conversion — the twin of `level_fs = level_v * 10^(-off/20)`
+ * the backend applies, #60-style). */
+export function triggerLevelToDisplay(
+  levelV: number,
+  unit: TdUnit,
+  offsetDb: number | null
+): number {
+  return (levelV * displayScale(unit, offsetDb)) / displayScale("v", offsetDb);
+}
+
+/** Inverse of {@link triggerLevelToDisplay}: a tile-unit level back to the
+ * endpoint's own level-volts (what `setTriggerLevelV` sends). */
+export function triggerLevelFromDisplay(
+  value: number,
+  unit: TdUnit,
+  offsetDb: number | null
+): number {
+  return (value * displayScale("v", offsetDb)) / displayScale(unit, offsetDb);
 }
 
 /** One curve of a swept measurement (a trace can carry several — e.g. a
@@ -229,10 +263,24 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
   return { series, unitLabel };
 }
 
-/** Build a scope tile's view-model: every member trace with a td frame,
- * samples scaled to the tile's display unit by the trace's OWN converter
- * offset. */
-export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
+/** Scale + wrap one member's samples into a `TdSeriesVM` (shared by both the
+ * live and trigger-aligned paths of {@link scopeVM}). */
+function scaledTdSeries(
+  t: TraceMeta,
+  samples: Float64Array,
+  sampleRate: number,
+  unit: TdUnit,
+  offsetDb: number | null
+): TdSeriesVM {
+  const k = displayScale(unit, offsetDb);
+  const scaled = k === 1 ? samples : Float64Array.from(samples, (v) => v * k);
+  return { id: t.id, label: t.label, color: t.color, samples: scaled, sampleRate, seq: t.seq };
+}
+
+/** Every member trace's OWN live td frame, scaled by its OWN converter
+ * offset — today's (pre-trigger) shape, also the trigger-off / no-snapshot
+ * fallback. */
+function liveScopeSeries(s: AppState, tile: TileConfig): TdSeriesVM[] {
   const unit = tile.tdUnit;
   const series: TdSeriesVM[] = [];
   for (const id of shownTraces(tile)) {
@@ -240,17 +288,65 @@ export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
     if (!t) continue;
     const td = getFrames(id)?.td;
     if (!td) continue;
-    const k = displayScale(unit, t.offsetDb);
-    const samples =
-      k === 1 ? td.samples : Float64Array.from(td.samples, (v) => v * k);
-    series.push({
-      id,
-      label: t.label,
-      color: t.color,
-      samples,
-      sampleRate: td.sampleRate,
-      seq: t.seq,
-    });
+    series.push(scaledTdSeries(t, td.samples, td.sampleRate, unit, t.offsetDb));
   }
-  return { series, unitLabel: TD_UNIT_LABELS[unit] };
+  return series;
+}
+
+/**
+ * Build a scope tile's view-model. With no trigger (mode off, or no aligned
+ * picture latched yet): every member's OWN live td frame, scaled by its OWN
+ * converter offset — `trigger: null`, byte-identical to the pre-Lot-A shape
+ * (regression-pinned).
+ *
+ * With a trigger on and a snapshot latched (data/triggered.ts): every hw
+ * endpoint member is built from the SNAPSHOT's arrays (references, already
+ * simultaneous with the trigger scan — all 4 hw channels share one capture),
+ * sliced to `[start, start + windowSamples)` around the trigger index, and
+ * scaled by the snapshot's OWN baked offset (never the live one — a range
+ * change must not rescale a HELD waiting/stopped picture, #60-style). A
+ * `memory`/`program` member keeps its own live, unsliced origin — it has its
+ * own time base, not the synchronized hw capture the trigger indexes into.
+ */
+export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
+  const unit = tile.tdUnit;
+  const sourceId = tileTriggerSourceId(s, tile);
+  const settings = sourceId ? (s.triggers[sourceId] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
+  const snap = sourceId && settings.mode !== "off" ? getTriggerSnapshot(sourceId) : undefined;
+
+  if (!sourceId || !snap) {
+    return { series: liveScopeSeries(s, tile), unitLabel: TD_UNIT_LABELS[unit], trigger: null };
+  }
+
+  const windowSamples = tileWindowSamples(s, tile);
+  const pre = Math.round((tile.triggerPositionPct / 100) * windowSamples);
+  const start = Math.max(0, snap.index - pre);
+  const end = start + windowSamples;
+
+  const series: TdSeriesVM[] = [];
+  for (const id of shownTraces(tile)) {
+    const t = s.traces.byId[id];
+    if (!t) continue;
+    const own = t.source.kind === "memory" || t.source.kind === "program";
+    const aligned = !own ? snap.samples[id] : undefined;
+    if (aligned) {
+      const offsetDb = snap.offsetDb[id] ?? null;
+      series.push(scaledTdSeries(t, aligned.slice(start, end), snap.sampleRate, unit, offsetDb));
+      continue;
+    }
+    const td = getFrames(id)?.td;
+    if (!td) continue;
+    series.push(scaledTdSeries(t, td.samples, td.sampleRate, unit, t.offsetDb));
+  }
+
+  const state: TriggerState = s.run.triggers[sourceId]?.state ?? snap.state;
+  const trigger: ScopeTriggerVM = {
+    sourceId,
+    state,
+    frac: snap.frac,
+    levelDisplay: triggerLevelToDisplay(settings.levelV, unit, snap.offsetDb[sourceId] ?? null),
+    position: windowSamples > 0 ? pre / windowSamples : 0,
+    held: state === "waiting" || state === "stopped",
+  };
+  return { series, unitLabel: TD_UNIT_LABELS[unit], trigger };
 }

@@ -4,12 +4,18 @@
  * and the slot-building invariants ported from mixer.test.ts (M2: the
  * mixer.ts slot-building half must not drift in the port).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
+import type { TriggerAlign } from "../../gen";
+import type { DecodedFrame } from "../../ipc/stream";
+import { clearAllFrames } from "../../data/frames";
+import { clearTriggerSnapshots, getTriggerSnapshot } from "../../data/triggered";
 import type { PeriodicSource, ScriptSource, SourceMeta } from "../state";
 import { initialState } from "../state";
 import { HW_TRACE_IDS } from "../state";
+import { Store } from "../store";
 import {
   buildStreamConfig,
+  ingestFrame,
   levelToAmplitude,
   playedFrequencyHz,
   slotFromSource,
@@ -289,5 +295,142 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     const slot = slotFromSource(script, noSnap);
     expect(slot.source).toEqual({ kind: "script", source: "fn render(ctx) { [] }" });
     expect(slot.route).toBe("both");
+  });
+});
+
+describe("buildStreamConfig — triggers (Lot A, issue #26)", () => {
+  it("carries the triggerRequest projection", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    s.layout.tiles["tile-1"].kind = "scope";
+    s.layout.tiles["tile-1"].traces = [HW_TRACE_IDS.inputL];
+    s.triggers[HW_TRACE_IDS.inputL] = {
+      mode: "auto",
+      edge: "rising",
+      levelV: 0.1,
+      hystV: null,
+      armEpoch: 0,
+    };
+    const cfg = buildStreamConfig(s);
+    expect(cfg.triggers?.input_l).toMatchObject({ mode: "auto", edge: "rising", level_v: 0.1 });
+    expect(cfg.triggers?.input_r).toBeNull();
+  });
+
+  it("a trigger-only change does NOT touch averaging", () => {
+    const s = initialState();
+    s.acquisition.averaging = { mode: "power", count: 8 };
+    s.triggers[HW_TRACE_IDS.inputL] = {
+      mode: "single",
+      edge: "falling",
+      levelV: -0.2,
+      hystV: 0.02,
+      armEpoch: 5,
+    };
+    expect(buildStreamConfig(s).averaging).toEqual({ coherent: false, count: 8 });
+  });
+});
+
+describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #26)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  /** A minimal but fully-typed pushed frame, decoded-shape (bypasses
+   * decodeFrame — ingestFrame consumes DecodedFrame directly). */
+  function frame(over: {
+    inputL?: TriggerAlign | null;
+    inputR?: TriggerAlign | null;
+  }): DecodedFrame {
+    return {
+      seq: 1,
+      sampleRate: 48000,
+      input: {
+        l: { sampleRate: 48000, samples: Float64Array.from([0.1, 0.2, 0.3]) },
+        r: { sampleRate: 48000, samples: Float64Array.from([0.4, 0.5, 0.6]) },
+      },
+      output: null,
+      fd: { inputL: null, inputR: null, outputL: null, outputR: null },
+      metrics: { inputL: null, inputR: null, harmonicsL: null, harmonicsR: null },
+      mix: {
+        sigma_peak_dbv: null,
+        clip_input: "none",
+        clip_output: false,
+        fitted_output_range_dbv: 8,
+      },
+      offsets: { input_l: 20, input_r: 20, output_l: 0, output_r: 0, calibrated: true },
+      stats: { frames: 1, fps: 30, frame_ms: 33 },
+      errors: [],
+      trigger: {
+        inputL: over.inputL ?? null,
+        inputR: over.inputR ?? null,
+        outputL: null,
+        outputR: null,
+      },
+    };
+  }
+
+  const align = (state: TriggerAlign["state"], index: number, frac: number): TriggerAlign => ({
+    state,
+    index,
+    frac,
+    level_fs: 0,
+    hysteresis_fs: 0,
+  });
+
+  function freshStore() {
+    return new Store(initialState(), { freeze: true });
+  }
+
+  it("writes a snapshot on 'triggered' and mirrors run.triggers", () => {
+    const store = freshStore();
+    ingestFrame(store, frame({ inputL: align("triggered", 2, 0.5) }));
+    const snap = getTriggerSnapshot(HW_TRACE_IDS.inputL);
+    expect(snap).toBeDefined();
+    expect(snap!.state).toBe("triggered");
+    expect(snap!.index).toBe(2);
+    expect(snap!.frac).toBe(0.5);
+    expect(Array.from(snap!.samples[HW_TRACE_IDS.inputL])).toEqual([0.1, 0.2, 0.3]);
+    expect(snap!.offsetDb[HW_TRACE_IDS.inputL]).toBe(20);
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toEqual({
+      state: "triggered",
+      index: 2,
+      frac: 0.5,
+    });
+  });
+
+  it("writes a snapshot on 'auto' too", () => {
+    const store = freshStore();
+    ingestFrame(store, frame({ inputL: align("auto", 0, 0) }));
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeDefined();
+  });
+
+  it("leaves a PREVIOUS snapshot untouched on 'waiting'/'stopped'", () => {
+    const store = freshStore();
+    ingestFrame(store, frame({ inputL: align("triggered", 2, 0.5) }));
+    const latched = getTriggerSnapshot(HW_TRACE_IDS.inputL);
+
+    ingestFrame(store, frame({ inputL: align("waiting", 0, 0) }));
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBe(latched); // same object — not rewritten
+    // The live state still mirrors "waiting" — only the snapshot is held.
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputL].state).toBe("waiting");
+
+    ingestFrame(store, frame({ inputL: align("stopped", 0, 0) }));
+    expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBe(latched);
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputL].state).toBe("stopped");
+  });
+
+  it("an endpoint the frame doesn't report is absent from run.triggers", () => {
+    const store = freshStore();
+    ingestFrame(store, frame({ inputL: align("triggered", 1, 0) }));
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputR]).toBeUndefined();
+  });
+
+  it("run.triggers is replaced wholesale — a since-disabled endpoint drops out", () => {
+    const store = freshStore();
+    ingestFrame(store, frame({ inputL: align("triggered", 1, 0) }));
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeDefined();
+    ingestFrame(store, frame({})); // input_l no longer requested
+    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeUndefined();
   });
 });

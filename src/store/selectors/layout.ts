@@ -6,6 +6,7 @@
 import type { TraceId } from "../../core/model";
 import type { AppState, TileConfig } from "../state";
 import { patternTileCount } from "../state";
+import { getFrames } from "../../data/frames";
 
 /** The tiles the current pattern actually displays, in grid order. */
 export function visibleTiles(s: AppState): TileConfig[] {
@@ -24,6 +25,25 @@ export function shownTraces(tile: TileConfig): TraceId[] {
   return tile.hidden.length === 0
     ? tile.traces
     : tile.traces.filter((id) => !tile.hidden.includes(id));
+}
+
+/**
+ * The trace a tile's readouts (chips, harmonic markers) follow: the explicit
+ * chip source when it is still a member, else the first DRAWN trace with
+ * data (a legend-hidden curve isn't what the user is reading). Lives here
+ * (not chartvm.ts) so selectors/trigger.ts can share it without a cycle —
+ * chartvm.ts re-exports it for its existing callers (e.g. panels/grid/tile.ts).
+ */
+export function chipSourceTraceId(tile: TileConfig): TraceId | null {
+  if (tile.chipSource !== "auto" && tile.traces.includes(tile.chipSource)) {
+    return tile.chipSource;
+  }
+  const drawn = shownTraces(tile);
+  for (const id of drawn) {
+    const f = getFrames(id);
+    if (f && (f.td || f.fd)) return id;
+  }
+  return drawn[0] ?? tile.traces[0] ?? null;
 }
 
 /**

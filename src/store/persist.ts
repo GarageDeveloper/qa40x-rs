@@ -36,6 +36,7 @@ import type {
   TileConfig,
   TraceMeta,
   TracesState,
+  TriggerSettings,
 } from "./state";
 import {
   defaultTile,
@@ -78,6 +79,10 @@ export interface WorkspaceDoc {
   layout: LayoutState;
   /** Frozen ❄ memory-trace data, keyed by trace id. */
   refFrames: Record<TraceId, PersistedFrames>;
+  /** Per-endpoint trigger settings (Lot A, issue #26), keyed by
+   * `HW_TRACE_IDS.*`. `armEpoch` is normalized to 0 on save/load — a SINGLE
+   * arm is a live-session gesture, never a saved-bench fact. */
+  triggers: Record<TraceId, TriggerSettings>;
 }
 
 function framesToDoc(f: TraceFrames): PersistedFrames {
@@ -159,6 +164,11 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
     programsById[id] = { ...p, run: "idle", progress: null, startedAtMs: null };
   }
 
+  const triggers: Record<TraceId, TriggerSettings> = {};
+  for (const [id, t] of Object.entries(s.triggers)) {
+    triggers[id] = { ...t, armEpoch: 0 };
+  }
+
   return {
     version: WS_VERSION,
     name: s.workspace.name,
@@ -174,6 +184,7 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
       focus: null,
     },
     refFrames,
+    triggers,
   };
 }
 
@@ -603,6 +614,8 @@ export function importV4(ws: RawV4): WorkspaceDoc {
     programs,
     layout,
     refFrames,
+    // Not a v4 concept — the trigger arrives with Lot A (issue #26).
+    triggers: {},
   };
 }
 
@@ -637,9 +650,20 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   for (const tile of Object.values(doc.layout.tiles)) {
     if (typeof tile.showPhase !== "boolean") tile.showPhase = false;
     if (typeof tile.showHarmonics !== "boolean") tile.showHarmonics = false;
+    // Lot A (issue #26): a doc predating the trigger picks up the same
+    // defaults as a fresh tile (defaultTile in state.ts).
+    if (tile.triggerSource === undefined) tile.triggerSource = "auto";
+    if (typeof tile.triggerPositionPct !== "number") tile.triggerPositionPct = 50;
+    if (typeof tile.showTriggerMarkers !== "boolean") tile.showTriggerMarkers = true;
   }
   for (const prog of Object.values(doc.programs.byId)) {
     if (prog.startedAtMs === undefined) prog.startedAtMs = null;
+  }
+  if (!doc.triggers || typeof doc.triggers !== "object") doc.triggers = {};
+  // A SINGLE arm is a live-session gesture, never a saved-bench fact — any
+  // loaded doc (even a hand-edited one) starts unarmed.
+  for (const t of Object.values(doc.triggers)) {
+    if (t && typeof t === "object") t.armEpoch = 0;
   }
   return doc;
 }

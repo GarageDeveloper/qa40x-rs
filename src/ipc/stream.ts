@@ -11,6 +11,7 @@ import type {
   SlotError,
   StreamMsg,
   StreamStats,
+  TriggerAlign,
 } from "../gen";
 import type { Ipc } from "./ipc";
 import { TauriChannel } from "./ipc";
@@ -51,6 +52,15 @@ export interface DecodedFrame {
   offsets: LevelOffsetsDb;
   stats: StreamStats;
   errors: SlotError[];
+  /** Alignment-only scope trigger result per hw endpoint (null = that
+   * endpoint isn't triggered this frame — the `TriggerRequest` didn't ask,
+   * or the config is per-endpoint "off": stream.rs's `SpectraMsg` pattern). */
+  trigger: {
+    inputL: TriggerAlign | null;
+    inputR: TriggerAlign | null;
+    outputL: TriggerAlign | null;
+    outputR: TriggerAlign | null;
+  };
 }
 
 type WireFrame = Extract<StreamMsg, { type: "frame" }>;
@@ -87,6 +97,12 @@ export function decodeFrame(msg: WireFrame): DecodedFrame {
     offsets: msg.offsets,
     stats: msg.stats,
     errors: msg.errors,
+    trigger: {
+      inputL: msg.trigger.input_l,
+      inputR: msg.trigger.input_r,
+      outputL: msg.trigger.output_l,
+      outputR: msg.trigger.output_r,
+    },
   };
 }
 

@@ -268,3 +268,44 @@ export function setTileTimeWindow(
     t.timeWindowMs === timeWindowMs ? t : { ...t, timeWindowMs }
   );
 }
+
+/** Scope tiles: which endpoint's trigger this tile aligns to ("auto" =
+ * follow the chip source). Changes the `pre_samples` this tile asks for
+ * (selectors/trigger.ts::triggerPreSamples), so syncs the stream. */
+export function setTileTriggerSource(
+  store: Store<AppState>,
+  ipc: Ipc,
+  tileId: string,
+  triggerSource: "auto" | TraceId
+): void {
+  patchTile(store, "layout/trigger-source", tileId, (t) =>
+    t.triggerSource === triggerSource ? t : { ...t, triggerSource }
+  );
+  syncStream(store, ipc);
+}
+
+/** Trigger position as % of the displayed window — widens/narrows the
+ * `pre_samples` this tile needs, so syncs the stream. */
+export function setTileTriggerPosition(
+  store: Store<AppState>,
+  ipc: Ipc,
+  tileId: string,
+  triggerPositionPct: number
+): void {
+  patchTile(store, "layout/trigger-position", tileId, (t) =>
+    t.triggerPositionPct === triggerPositionPct ? t : { ...t, triggerPositionPct }
+  );
+  syncStream(store, ipc);
+}
+
+/** Display-only: draw the level/position marker handles (persisted with the
+ * tile, no backend effect). */
+export function setTileShowTriggerMarkers(
+  store: Store<AppState>,
+  tileId: string,
+  showTriggerMarkers: boolean
+): void {
+  patchTile(store, "layout/show-trigger-markers", tileId, (t) =>
+    t.showTriggerMarkers === showTriggerMarkers ? t : { ...t, showTriggerMarkers }
+  );
+}

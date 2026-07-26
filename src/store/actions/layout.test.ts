@@ -15,6 +15,9 @@ import {
   setFocusTile,
   setPattern,
   setTileKind,
+  setTileShowTriggerMarkers,
+  setTileTriggerPosition,
+  setTileTriggerSource,
   toggleTraceHidden,
 } from "./layout";
 import { shownTraces, visibleTiles } from "../selectors/layout";
@@ -130,5 +133,46 @@ describe("setTileKind", () => {
     expect(store.get().layout.tiles["tile-1"].measures).toEqual(["thd", "peakfreq"]);
     setTileKind(store, ipc, "tile-1", "scope");
     expect(store.get().layout.tiles["tile-1"].measures).toEqual(["rms", "peak"]);
+  });
+});
+
+describe("tile trigger fields (Lot A, issue #26)", () => {
+  it("boot default: 'auto' source, 50% position, markers on", () => {
+    const store = makeStore();
+    const tile = store.get().layout.tiles["tile-2"]; // the boot scope tile
+    expect(tile.triggerSource).toBe("auto");
+    expect(tile.triggerPositionPct).toBe(50);
+    expect(tile.showTriggerMarkers).toBe(true);
+  });
+
+  it("setTileTriggerSource sets the explicit endpoint", () => {
+    const store = makeStore();
+    setTileTriggerSource(store, ipc, "tile-2", HW_TRACE_IDS.inputR);
+    expect(store.get().layout.tiles["tile-2"].triggerSource).toBe(HW_TRACE_IDS.inputR);
+    setTileTriggerSource(store, ipc, "tile-2", "auto");
+    expect(store.get().layout.tiles["tile-2"].triggerSource).toBe("auto");
+  });
+
+  it("setTileTriggerPosition sets the % position", () => {
+    const store = makeStore();
+    setTileTriggerPosition(store, ipc, "tile-2", 25);
+    expect(store.get().layout.tiles["tile-2"].triggerPositionPct).toBe(25);
+  });
+
+  it("setTileShowTriggerMarkers toggles the marker display, no stream sync", () => {
+    const store = makeStore();
+    setTileShowTriggerMarkers(store, "tile-2", false);
+    expect(store.get().layout.tiles["tile-2"].showTriggerMarkers).toBe(false);
+    setTileShowTriggerMarkers(store, "tile-2", true);
+    expect(store.get().layout.tiles["tile-2"].showTriggerMarkers).toBe(true);
+  });
+
+  it("a non-existent tile id is a no-op", () => {
+    const store = makeStore();
+    const before = store.get();
+    setTileTriggerSource(store, ipc, "tile-nope", HW_TRACE_IDS.inputL);
+    setTileTriggerPosition(store, ipc, "tile-nope", 10);
+    setTileShowTriggerMarkers(store, "tile-nope", false);
+    expect(store.get().layout.tiles).toBe(before.layout.tiles);
   });
 });

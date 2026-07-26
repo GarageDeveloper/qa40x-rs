@@ -84,6 +84,7 @@ export function applyWorkspaceDoc(
     },
     layout: { ...doc.layout, focus: null },
     workspace: { name: doc.name, collapsed: [...doc.collapsed] },
+    triggers: doc.triggers,
   }));
 
   // A running stream keeps running and simply follows the new bench (its

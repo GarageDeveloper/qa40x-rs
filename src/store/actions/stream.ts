@@ -8,10 +8,12 @@ import type { MixerSlotDesc, StreamConfig } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
+import { putTriggerSnapshot } from "../../data/triggered";
 import type { Store } from "../store";
 import type { AppState, SourceMeta, TraceMeta } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
+import { triggerRequest } from "../selectors/trigger";
 import { toast } from "./ui";
 
 /** Snap a sine to the nearest FFT bin (v1 behavior: a bin-exact tone keeps
@@ -135,6 +137,7 @@ export function buildStreamConfig(s: AppState): StreamConfig {
     // M1: always auto-fit to the summed peak (a fixed-range UI lands with
     // the full output-range readout parity).
     output_range_dbv: null,
+    triggers: triggerRequest(s),
   };
 }
 
@@ -148,9 +151,10 @@ let ingestSeq = 0;
 /**
  * Ingest one pushed frame: write the frames cache FIRST, then bump seqs and
  * mirror the run/mix/offsets state in ONE store update. Charts pull the
- * arrays from the cache inside their select callbacks.
+ * arrays from the cache inside their select callbacks. Exported for tests
+ * only — production callers go through `startRun`'s `onFrame`.
  */
-function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
+export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
   const seq = ++ingestSeq;
   const off = frame.offsets;
   // Each endpoint buffers its OWN converter's offset — ADC for inputs, DAC
@@ -195,6 +199,48 @@ function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
   put(HW_TRACE_IDS.outputL, off.output_l, frame.output?.l, frame.fd.outputL);
   put(HW_TRACE_IDS.outputR, off.output_r, frame.output?.r, frame.fd.outputR);
 
+  // Trigger snapshot latching (plan §3.3): the 4 hw channels share ONE
+  // capture buffer, so whichever endpoint's alignment fired, its index/frac
+  // slices all of them consistently — the snapshot carries every channel,
+  // keyed by the endpoint that latched it. `waiting`/`stopped` write nothing
+  // (the previous snapshot, if any, keeps holding NORMAL/SINGLE's picture).
+  const snapSamples: Record<string, Float64Array> = {
+    [HW_TRACE_IDS.inputL]: frame.input.l.samples,
+    [HW_TRACE_IDS.inputR]: frame.input.r.samples,
+  };
+  if (frame.output) {
+    snapSamples[HW_TRACE_IDS.outputL] = frame.output.l.samples;
+    snapSamples[HW_TRACE_IDS.outputR] = frame.output.r.samples;
+  }
+  const snapOffsets: Record<string, number | null> = {
+    [HW_TRACE_IDS.inputL]: off.input_l,
+    [HW_TRACE_IDS.inputR]: off.input_r,
+    [HW_TRACE_IDS.outputL]: off.output_l,
+    [HW_TRACE_IDS.outputR]: off.output_r,
+  };
+  const runTriggers: AppState["run"]["triggers"] = {};
+  const endpoints: [string, DecodedFrame["trigger"]["inputL"]][] = [
+    [HW_TRACE_IDS.inputL, frame.trigger.inputL],
+    [HW_TRACE_IDS.inputR, frame.trigger.inputR],
+    [HW_TRACE_IDS.outputL, frame.trigger.outputL],
+    [HW_TRACE_IDS.outputR, frame.trigger.outputR],
+  ];
+  for (const [id, align] of endpoints) {
+    if (!align) continue;
+    runTriggers[id] = { state: align.state, index: align.index, frac: align.frac };
+    if (align.state === "triggered" || align.state === "auto") {
+      putTriggerSnapshot(id, {
+        seq,
+        state: align.state,
+        index: align.index,
+        frac: align.frac,
+        sampleRate: frame.sampleRate,
+        samples: snapSamples,
+        offsetDb: snapOffsets,
+      });
+    }
+  }
+
   store.update("stream/frame", (s) => {
     const byId = { ...s.traces.byId };
     for (const w of written) {
@@ -222,6 +268,9 @@ function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
         clip: { input: frame.mix.clip_input, output: frame.mix.clip_output },
         fittedOutputRangeDbv: frame.mix.fitted_output_range_dbv,
         slotErrors: frame.errors,
+        // Wholesale replace (not merge): an endpoint the current config no
+        // longer triggers must not keep showing a stale state.
+        triggers: runTriggers,
       },
       device: {
         ...s.device,
