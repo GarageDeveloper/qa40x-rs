@@ -147,6 +147,38 @@ test("chip + Arm stay in the DOM across every trigger mode (no layout shift)", a
   }
 });
 
+test("chip + Arm are hidden (not just DOM-present) on spectrum and sweep tiles", async ({ app }) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  // In-DOM-but-hidden is the invariant: the elements never leave the DOM
+  // (no layout shift), but only a scope tile may DISPLAY them. This pins
+  // the .tile__hidden CSS actually winning over .tile__trigwrap's own
+  // display rule (it silently lost before this test existed).
+  const visible = () =>
+    app.drv.eval(
+      () => {
+        const chip = document.querySelector('[data-testid="tile-trigger-tile-2"]');
+        const arm = document.querySelector('[data-testid="tile-trigger-arm-tile-2"]');
+        const shown = (n: Element | null) =>
+          n !== null && (n as HTMLElement).offsetParent !== null;
+        return { chip: shown(chip), arm: shown(arm), inDom: chip !== null && arm !== null };
+      },
+      undefined as void
+    );
+
+  expect(await visible()).toEqual({ chip: true, arm: true, inDom: true });
+
+  for (const kind of ["spectrum", "sweep"] as const) {
+    await app.setTileKind(kind, "tile-2");
+    expect(await visible()).toEqual({ chip: false, arm: false, inDom: true });
+  }
+
+  await app.setTileKind("scope", "tile-2");
+  expect(await visible()).toEqual({ chip: true, arm: true, inDom: true });
+});
+
 test("trigger-source dropdown lists only the 4 hw endpoints, never a memory trace (review #9)", async ({ app }) => {
   const id = await app.addSine();
   await app.playSine(id);
