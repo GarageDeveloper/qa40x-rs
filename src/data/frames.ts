@@ -12,7 +12,7 @@
  * helpers below are the ONE place cache typed-arrays meet that shape.
  */
 import type { TraceId } from "../core/model";
-import type { AnalysisResult, Frame, HarmonicMark } from "../gen";
+import type { AnalysisResult, Frame, HarmonicMark, ScopeMeasures } from "../gen";
 import type { DecodedFd, DecodedTd } from "../ipc/stream";
 
 /** A swept measurement's curves (THD vs freq, FR) in cache form. */
@@ -34,6 +34,9 @@ export interface TraceFrames {
   metrics?: AnalysisResult;
   /** Backend-located harmonic series (spectrum-tile markers, same frame). */
   harmonics?: HarmonicMark[];
+  /** Backend scope measurement suite + sliding stats (issue #26 lot B) —
+   * present only while the endpoint is in the stream's `MeasureRequest`. */
+  scope?: ScopeMeasures;
 }
 
 const cache = new Map<TraceId, TraceFrames>();
@@ -51,6 +54,7 @@ export function putFrames(
     sweep?: DecodedSweep;
     metrics?: AnalysisResult;
     harmonics?: HarmonicMark[];
+    scope?: ScopeMeasures;
   }
 ): boolean {
   const existing = cache.get(id);

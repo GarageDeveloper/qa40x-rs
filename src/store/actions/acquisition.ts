@@ -81,3 +81,17 @@ export function resetAveraging(store: Store<AppState>, ipc: Ipc): void {
   // period) — acknowledge the click immediately, like the legacy button.
   toast(store, "info", "Averaging & peak-hold reset — takes effect on the next frame.");
 }
+
+/**
+ * "Reset stats" (issue #26 lot B): the BACKEND drops every scope-measure
+ * sliding-stats window (all four endpoints), so the avg/min/max/σ tooltips
+ * restart from the next frame instead of purging the old signal over a
+ * full window length. The stats live in the stream task — the front never
+ * touches them, same contract as `resetAveraging`.
+ */
+export function resetMeasureStats(store: Store<AppState>, ipc: Ipc): void {
+  void ipc.call("stream_reset_measure_stats", {}).catch(() => {
+    // Idle stream (or none): nothing to reset backend-side — fine.
+  });
+  toast(store, "info", "Measurement stats reset — takes effect on the next frame.");
+}

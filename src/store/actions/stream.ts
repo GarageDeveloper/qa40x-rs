@@ -13,6 +13,7 @@ import type { Store } from "../store";
 import type { AppState, SourceMeta, TraceMeta } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
+import { measureRequest } from "../selectors/measures";
 import { triggerRequest } from "../selectors/trigger";
 import { toast } from "./ui";
 
@@ -138,6 +139,7 @@ export function buildStreamConfig(s: AppState): StreamConfig {
     // the full output-range readout parity).
     output_range_dbv: null,
     triggers: triggerRequest(s),
+    measures: measureRequest(s),
   };
 }
 
@@ -166,7 +168,8 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
     td: DecodedFrame["input"]["l"] | undefined,
     fd: DecodedFrame["fd"]["inputL"],
     metrics?: DecodedFrame["metrics"]["inputL"],
-    harmonics?: DecodedFrame["metrics"]["harmonicsL"]
+    harmonics?: DecodedFrame["metrics"]["harmonicsL"],
+    scope?: DecodedFrame["measures"]["inputL"]
   ): void => {
     if (!td && !fd) return; // e.g. Output endpoints in monitor mode
     if (
@@ -175,6 +178,7 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
         fd: fd ?? undefined,
         metrics: metrics ?? undefined,
         harmonics: harmonics ?? undefined,
+        scope: scope ?? undefined,
       })
     ) {
       written.push({ id, offsetDb, hasTd: !!td, hasFd: !!fd });
@@ -186,7 +190,8 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
     frame.input.l,
     frame.fd.inputL,
     frame.metrics.inputL,
-    frame.metrics.harmonicsL
+    frame.metrics.harmonicsL,
+    frame.measures.inputL
   );
   put(
     HW_TRACE_IDS.inputR,
@@ -194,10 +199,27 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
     frame.input.r,
     frame.fd.inputR,
     frame.metrics.inputR,
-    frame.metrics.harmonicsR
+    frame.metrics.harmonicsR,
+    frame.measures.inputR
   );
-  put(HW_TRACE_IDS.outputL, off.output_l, frame.output?.l, frame.fd.outputL);
-  put(HW_TRACE_IDS.outputR, off.output_r, frame.output?.r, frame.fd.outputR);
+  put(
+    HW_TRACE_IDS.outputL,
+    off.output_l,
+    frame.output?.l,
+    frame.fd.outputL,
+    undefined,
+    undefined,
+    frame.measures.outputL
+  );
+  put(
+    HW_TRACE_IDS.outputR,
+    off.output_r,
+    frame.output?.r,
+    frame.fd.outputR,
+    undefined,
+    undefined,
+    frame.measures.outputR
+  );
 
   // Trigger snapshot latching (plan §3.3): the 4 hw channels share ONE
   // capture buffer, so whichever endpoint's alignment fired, its index/frac

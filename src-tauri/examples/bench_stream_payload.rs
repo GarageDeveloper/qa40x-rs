@@ -15,9 +15,14 @@ use std::time::Instant;
 
 use tauri_app_lib::qa40x::types::AudioData;
 use tauri_app_lib::stream::{
-    ClipState, LevelOffsetsDb, MixStatus, SpectraMsg, StereoFrame, StreamFrame, StreamMetrics,
-    StreamMsg, StreamStats, TriggerMsg,
+    ClipState, LevelOffsetsDb, MeasuresMsg, MixStatus, ScopeMeasures, ScopeStat, SpectraMsg,
+    StereoFrame, StreamFrame, StreamMetrics, StreamMsg, StreamStats, TriggerMsg,
 };
+
+/// A representative fully-populated stat (value + full window).
+fn scope_stat(v: f64) -> ScopeStat {
+    ScopeStat { value: Some(v), avg: v, min: v * 0.99, max: v * 1.01, sd: v * 0.001, n: 100 }
+}
 
 /// Deterministic full-scale-ish samples with noisy mantissas — a constant or a
 /// pure sine serializes to unrealistically few digits and flatters JSON.
@@ -62,6 +67,21 @@ fn frame(n: usize) -> StreamMsg {
             harmonics_r: None,
         },
         trigger: TriggerMsg::default(),
+        // One populated endpoint: the bench exists to pin payload growth,
+        // and an all-None suite would pin the 0-cost case (review lot B #6).
+        // 7 stats × 6 numbers is the per-endpoint worst case.
+        measures: MeasuresMsg {
+            input_l: Some(ScopeMeasures {
+                vpp: scope_stat(0.710),
+                vmean: scope_stat(0.001),
+                rms_ac: scope_stat(0.251),
+                freq_hz: scope_stat(1000.488),
+                rise_s: scope_stat(296e-6),
+                fall_s: scope_stat(297e-6),
+                duty: scope_stat(0.5),
+            }),
+            ..MeasuresMsg::default()
+        },
         mix: MixStatus {
             sigma_peak_dbv: Some(-3.2),
             clip_input: ClipState::None,

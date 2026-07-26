@@ -8,6 +8,7 @@ import type {
   HarmonicMark,
   LevelOffsetsDb,
   MixStatus,
+  ScopeMeasures,
   SlotError,
   StreamMsg,
   StreamStats,
@@ -61,6 +62,15 @@ export interface DecodedFrame {
     outputL: TriggerAlign | null;
     outputR: TriggerAlign | null;
   };
+  /** Scope measurement suites per hw endpoint (issue #26 lot B; null =
+   * that endpoint isn't measured this frame — the `MeasureRequest` didn't
+   * ask, or an output endpoint in monitor mode). */
+  measures: {
+    inputL: ScopeMeasures | null;
+    inputR: ScopeMeasures | null;
+    outputL: ScopeMeasures | null;
+    outputR: ScopeMeasures | null;
+  };
 }
 
 type WireFrame = Extract<StreamMsg, { type: "frame" }>;
@@ -102,6 +112,12 @@ export function decodeFrame(msg: WireFrame): DecodedFrame {
       inputR: msg.trigger.input_r,
       outputL: msg.trigger.output_l,
       outputR: msg.trigger.output_r,
+    },
+    measures: {
+      inputL: msg.measures.input_l,
+      inputR: msg.measures.input_r,
+      outputL: msg.measures.output_l,
+      outputR: msg.measures.output_r,
     },
   };
 }

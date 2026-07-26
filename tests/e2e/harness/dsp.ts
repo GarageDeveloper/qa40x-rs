@@ -341,3 +341,312 @@ export function analyzeAudio(
     dc_offset: dc,
   };
 }
+
+/* ---- scope measurement suite (Lot B, issue #26) ----------------------
+ * An EXACT port of src-tauri/src/audio/scope_measure.rs — same crossing
+ * qualification (findEdge above), same Goertzel + iterative parabolic
+ * frequency refinement, same histogram base/top and 10-90 % transition
+ * scan — so the fake backend's readouts match what the real device would
+ * report for the same samples. Only the numeric domain differs (JS f64
+ * end-to-end vs the Rust f32 sample buffer).
+ */
+
+export interface ScopeValues {
+  vpp: number;
+  vmean: number;
+  rms_ac: number | null;
+  freq_hz: number | null;
+  rise_s: number | null;
+  fall_s: number | null;
+  duty: number | null;
+}
+
+/** Port of `crossing_hysteresis`: 2 % of the half-swing, floored at 1e-4. */
+function crossingHysteresis(vpp: number): number {
+  return Math.max((vpp / 2) * 0.02, 1e-4);
+}
+
+/** Port of `rising_crossings`: every Schmitt-qualified rising crossing of
+ * `level`, as sub-sample times (in samples) — repeated findEdge scans. */
+function risingCrossings(samples: ArrayLike<number>, level: number, hyst: number): number[] {
+  const times: number[] = [];
+  let from = 0;
+  let hit = findEdge(samples, level, hyst, "rising", from);
+  while (hit) {
+    times.push(hit.index - 1 + hit.frac);
+    from = hit.index + 1;
+    hit = findEdge(samples, level, hyst, "rising", from);
+  }
+  return times;
+}
+
+/** Port of `goertzel_power`: power at an arbitrary frequency. */
+function goertzelPower(windowed: Float64Array, sampleRate: number, freqHz: number): number {
+  const w = (2 * Math.PI * freqHz) / sampleRate;
+  const coeff = 2 * Math.cos(w);
+  let s1 = 0;
+  let s2 = 0;
+  for (let i = 0; i < windowed.length; i++) {
+    const s0 = windowed[i] + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+  return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+}
+
+/** Port of `refine_at`: one parabolic-interpolation descent on the
+ * Hann-windowed Goertzel log-power, one-bin start, halving spacing. */
+function refineAt(windowed: Float64Array, sampleRate: number, seedHz: number): number {
+  const n = windowed.length;
+  const nyquist = sampleRate / 2;
+  let f = seedHz;
+  let d = sampleRate / n;
+  for (let it = 0; it < 10; it++) {
+    const lo = Math.max(f - d, d * 1e-3);
+    const hi = Math.min(f + d, nyquist - d * 1e-3);
+    const p = (freq: number): number =>
+      Math.log(Math.max(goertzelPower(windowed, sampleRate, freq), 1e-300));
+    const pl = p(lo);
+    const pc = p(f);
+    const pr = p(hi);
+    const denom = pl - 2 * pc + pr;
+    if (denom < 0) {
+      const delta = Math.min(1, Math.max(-1, (0.5 * (pl - pr)) / denom));
+      f = Math.min(hi, Math.max(lo, f + delta * d));
+    } else if (pr > pl) {
+      f = hi;
+    } else {
+      f = lo;
+    }
+    d *= 0.5;
+  }
+  return f;
+}
+
+/** Port of `refine_frequency`: refineAt from the crossing seed, then the
+ * SUBHARMONIC check — a strong-odd-harmonics waveform seeds an integer
+ * multiple of the fundamental; comparing the power at f/2 and f/3 and
+ * re-refining from the stronger one recovers the true fundamental. */
+function refineFrequency(samples: ArrayLike<number>, sampleRate: number, seedHz: number): number {
+  const n = samples.length;
+  const nyquist = sampleRate / 2;
+  if (n < 8 || seedHz <= 0 || seedHz >= nyquist) return seedHz;
+  const windowed = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    windowed[i] = samples[i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+  }
+  const f1 = refineAt(windowed, sampleRate, seedHz);
+  const bin = sampleRate / n;
+  let best = f1;
+  let bestP = goertzelPower(windowed, sampleRate, f1);
+  for (const k of [2, 3]) {
+    const cand = f1 / k;
+    if (cand <= bin) continue;
+    if (goertzelPower(windowed, sampleRate, cand) > bestP) {
+      const fk = refineAt(windowed, sampleRate, cand);
+      const pk = goertzelPower(windowed, sampleRate, fk);
+      if (pk > bestP) {
+        best = fk;
+        bestP = pk;
+      }
+    }
+  }
+  return best;
+}
+
+/** Port of `base_top`: modes of the lower/upper halves of the histogram,
+ * ties resolving OUTWARD, and a non-modal half (no frank flat ≥ 8× the
+ * uniform per-bin count) falling back to that half's extreme — a
+ * triangle/sawtooth's flat histogram must not put "top" at mid-swing. */
+function baseTop(samples: ArrayLike<number>, min: number, max: number): [number, number] {
+  const BINS = 128;
+  const span = max - min;
+  const counts = new Array<number>(BINS).fill(0);
+  for (let i = 0; i < samples.length; i++) {
+    const idx = Math.floor(((samples[i] - min) / span) * BINS);
+    counts[Math.min(idx, BINS - 1)] += 1;
+  }
+  const binCenter = (i: number): number => min + ((i + 0.5) / BINS) * span;
+  const modalThreshold = (samples.length / BINS) * 8;
+  let loMode = 0;
+  for (let i = 0; i < BINS / 2; i++) if (counts[i] > counts[loMode]) loMode = i;
+  let hiMode = BINS - 1;
+  for (let i = BINS - 1; i >= BINS / 2; i--) if (counts[i] > counts[hiMode]) hiMode = i;
+  const base = counts[loMode] >= modalThreshold ? binCenter(loMode) : min;
+  const top = counts[hiMode] >= modalThreshold ? binCenter(hiMode) : max;
+  return [base, top];
+}
+
+/** Port of `mean_transition_s`: mean from→to crossing time, sub-sample at
+ * both ends, Schmitt-ARMED like the Rust twin — a candidate opens only
+ * once the signal has been seen at/below `fromLevel − hysteresis` (or the
+ * crossing's own `prev` proves it), so an idle input's noise floor can
+ * never fake a transition; a later `lo` crossing restarts the clock. */
+function meanTransitionS(
+  samples: ArrayLike<number>,
+  sampleRate: number,
+  fromLevel: number,
+  toLevel: number,
+  hysteresis: number,
+  direction: TriggerEdgePolarity
+): number | null {
+  const s = direction === "rising" ? 1 : -1;
+  const lo = s * fromLevel;
+  const hi = s * toLevel;
+  const h = Math.abs(hysteresis);
+  let armed = false;
+  let startT: number | null = null;
+  let sum = 0;
+  let count = 0;
+  for (let i = 1; i < samples.length; i++) {
+    const prev = s * samples[i - 1];
+    const cur = s * samples[i];
+    const crossUp = (level: number): number | null =>
+      prev < level && cur >= level ? i - 1 + (level - prev) / (cur - prev) : null;
+    const tLo = crossUp(lo);
+    if (tLo !== null) {
+      if (armed || prev <= lo - h || startT !== null) {
+        startT = tLo;
+        armed = false;
+      }
+    } else if (cur <= lo - h) {
+      armed = true;
+      startT = null;
+    } else if (startT !== null && cur < lo) {
+      startT = null;
+    }
+    const tHi = crossUp(hi);
+    if (startT !== null && tHi !== null) {
+      sum += tHi - startT;
+      count += 1;
+      startT = null;
+    }
+  }
+  return count > 0 ? sum / count / sampleRate : null;
+}
+
+/** Port of `measure_scope`: the lot-B per-frame measurement suite. */
+export function measureScope(samples: ArrayLike<number>, sampleRate: number): ScopeValues {
+  const none: ScopeValues = {
+    vpp: 0,
+    vmean: 0,
+    rms_ac: null,
+    freq_hz: null,
+    rise_s: null,
+    fall_s: null,
+    duty: null,
+  };
+  if (samples.length < 2 || sampleRate <= 0) return none;
+
+  let min = Infinity;
+  let max = -Infinity;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    min = Math.min(min, v);
+    max = Math.max(max, v);
+    sum += v;
+  }
+  const vmean = sum / samples.length;
+  const vpp = max - min;
+  if (!isFinite(vpp) || vpp <= 0) return { ...none, vpp: isFinite(vpp) ? vpp : NaN, vmean };
+
+  const hyst = crossingHysteresis(vpp);
+
+  let rmsAc: number | null = null;
+  let freqHz: number | null = null;
+  const meanCrossings = risingCrossings(samples, vmean, hyst);
+  if (meanCrossings.length >= 2) {
+    const tFirst = meanCrossings[0];
+    const tLast = meanCrossings[meanCrossings.length - 1];
+    const i0 = Math.ceil(tFirst);
+    const i1 = Math.min(Math.ceil(tLast), samples.length);
+    if (i1 > i0) {
+      let m = 0;
+      for (let i = i0; i < i1; i++) m += samples[i];
+      m /= i1 - i0;
+      let sq = 0;
+      for (let i = i0; i < i1; i++) sq += (samples[i] - m) * (samples[i] - m);
+      rmsAc = Math.sqrt(sq / (i1 - i0));
+    }
+    const cycles = meanCrossings.length - 1;
+    // Above ~0.45·fs the crossing seed itself degrades beyond what the
+    // 2-bin refinement can recover: report nothing (Rust twin's guard).
+    const seed = (cycles * sampleRate) / (tLast - tFirst);
+    freqHz = seed < 0.45 * sampleRate ? refineFrequency(samples, sampleRate, seed) : null;
+  }
+
+  let riseS: number | null = null;
+  let fallS: number | null = null;
+  let duty: number | null = null;
+  const [base, top] = baseTop(samples, min, max);
+  const amp = top - base;
+  if (amp > 0) {
+    const l10 = base + 0.1 * amp;
+    const l50 = base + 0.5 * amp;
+    const l90 = base + 0.9 * amp;
+    riseS = meanTransitionS(samples, sampleRate, l10, l90, hyst, "rising");
+    fallS = meanTransitionS(samples, sampleRate, l90, l10, hyst, "falling");
+    const midCrossings = risingCrossings(samples, l50, hyst);
+    if (midCrossings.length >= 2) {
+      const i0 = Math.ceil(midCrossings[0]);
+      const i1 = Math.min(Math.ceil(midCrossings[midCrossings.length - 1]), samples.length);
+      if (i1 > i0) {
+        let above = 0;
+        for (let i = i0; i < i1; i++) if (samples[i] > l50) above += 1;
+        duty = above / (i1 - i0);
+      }
+    }
+  }
+
+  return { vpp, vmean, rms_ac: rmsAc, freq_hz: freqHz, rise_s: riseS, fall_s: fallS, duty };
+}
+
+/** Port of `SlidingStats` + `scope_stat`: sliding window of the last `cap`
+ * readings with Welford statistics; an undefined reading leaves the window
+ * untouched. */
+export class SlidingStats {
+  private window: number[] = [];
+  constructor(private cap: number) {}
+
+  reset(): void {
+    this.window = [];
+  }
+
+  /** Feed a reading (if any) and report the wire `ScopeStat` shape. */
+  stat(value: number | null): {
+    value: number | null;
+    avg: number;
+    min: number;
+    max: number;
+    sd: number;
+    n: number;
+  } {
+    if (value !== null && isFinite(value)) {
+      if (this.window.length === this.cap) this.window.shift();
+      this.window.push(value);
+    }
+    if (this.window.length === 0) return { value: null, avg: 0, min: 0, max: 0, sd: 0, n: 0 };
+    let mean = 0;
+    let m2 = 0;
+    let min = Infinity;
+    let max = -Infinity;
+    this.window.forEach((v, i) => {
+      const delta = v - mean;
+      mean += delta / (i + 1);
+      m2 += delta * (v - mean);
+      min = Math.min(min, v);
+      max = Math.max(max, v);
+    });
+    const n = this.window.length;
+    const sd = n > 1 ? Math.sqrt(m2 / (n - 1)) : 0;
+    return {
+      value: value !== null && isFinite(value) ? value : null,
+      avg: mean,
+      min,
+      max,
+      sd,
+      n,
+    };
+  }
+}

@@ -79,6 +79,7 @@ export interface Commands {
   stream_stop: { args: Record<string, never>; result: null };
   stream_status: { args: Record<string, never>; result: boolean };
   stream_reset_averaging: { args: Record<string, never>; result: null };
+  stream_reset_measure_stats: { args: Record<string, never>; result: null };
   sweep_stop: { args: Record<string, never>; result: null };
 
   // Output-only mode (M2): the summed mix drives the DAC gap-free, no

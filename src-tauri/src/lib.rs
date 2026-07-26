@@ -551,6 +551,18 @@ async fn stream_reset_averaging(
     Ok(())
 }
 
+/// Drop every scope-measurement stats window (all four endpoints) so the
+/// avg/min/max/σ readouts restart from the next frame — the user's "Reset
+/// stats" after retuning the signal (issue #26 lot B). No-op when idle.
+#[tauri::command]
+async fn stream_reset_measure_stats(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    let ctl = { state.lock().await.stream.clone() };
+    ctl.reset_measure_stats();
+    Ok(())
+}
+
 /// Spawn the gap-free DAC loop: the buffer repeats until the stop flag is
 /// set. The caller has already stopped any previous loop and checked the
 /// connection; this flips the running/stop flags and detaches the task.
@@ -1169,6 +1181,7 @@ pub fn run() {
             stream_stop,
             stream_status,
             stream_reset_averaging,
+            stream_reset_measure_stats,
             sweep_stop,
             output_only_start,
             stop_generator,
