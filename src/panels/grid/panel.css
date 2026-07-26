@@ -268,6 +268,11 @@ select.field--small {
   color: var(--ink-2);
   cursor: pointer;
   user-select: none;
+  /* Constant transparent border so the axis-mismatch state below can turn
+   * it on without moving anything (no-layout-shift invariant). */
+  border: 1px dashed transparent;
+  border-radius: 999px;
+  padding: 0 6px;
 }
 
 .tile__trace--off {
@@ -276,6 +281,17 @@ select.field--small {
 
 .tile__trace--off .tile__trace-label {
   text-decoration: line-through;
+}
+
+/* A sweep trace whose OWN axis (Hz/dBFS) clashes with the tile's — excluded
+   from the plot, not just legend-hidden (issue #27 review finding #3). A
+   dashed underline reads as "present but not drawn", distinct from --off's
+   strikethrough (a deliberate legend hide); no layout shift either way. */
+/* A member whose X axis doesn't match the tile's (issue #27): the whole
+ * chip is outlined dashed in the warn tint — its curve is not drawn. */
+.tile__trace--axis-mismatch {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 .tile__dot {

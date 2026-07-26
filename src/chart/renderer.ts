@@ -63,6 +63,10 @@ export interface SweepRenderer {
   setSeries(series: SweepSeriesVM[]): void;
   /** Y-axis caption ("dB" / "%"). */
   setUnitLabel(label: string): void;
+  /** X-axis unit ("Hz" — log scale — or "dBFS" — linear scale, THD-vs-level,
+   * issue #27). Call before setSeries so a switch re-renders with the right
+   * axis semantics. */
+  setXUnit(unit: "Hz" | "dBFS"): void;
   /** ∠ phase overlay (FR sweeps carrying phase). */
   setShowPhase(on: boolean): void;
   destroy(): void;

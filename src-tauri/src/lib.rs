@@ -1085,6 +1085,64 @@ async fn measure_thd_vs_frequency(
     .await
 }
 
+/// event { done, total, level } per point so the UI can show progress.
+/// Sibling of `measure_thd_vs_frequency` (issue #27): sweeps the stimulus
+/// level at a FIXED tone frequency instead of sweeping frequency at a fixed
+/// level. Same one-stream batched capture, same `run_thd_batch` plumbing —
+/// only the swept axis differs ("level" vs "frequency").
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command: args map 1:1 to the UI form.
+async fn measure_thd_vs_level(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    start_level_dbfs: f32,
+    end_level_dbfs: f32,
+    num_points: usize,
+    frequency_hz: f32,
+    output_channel: qa40x::Channel,
+    input_channel: qa40x::Channel,
+) -> Result<audio::ThdSweepResult, String> {
+    let (device, running, stop, sweep_cancel) = {
+        let app_state = state.lock().await;
+        (
+            app_state.device.clone(),
+            app_state.generator_running.clone(),
+            app_state.generator_stop.clone(),
+            app_state.sweep_cancel.clone(),
+        )
+    };
+    ensure_generator_stopped(&running, &stop).await;
+    let device = device.lock().await;
+
+    let sr = device.get_config().await.sample_rate.as_hz() as f32;
+    let nyquist = sr / 2.0;
+    // Same fundamental ceiling as the frequency sweep: the 2nd harmonic must
+    // clear Nyquist for THD to be measurable at all.
+    let fmax = nyquist * 0.45;
+    let freq = frequency_hz.max(1.0).min(fmax);
+    let n = num_points.clamp(2, 200);
+    let levels = level_points(start_level_dbfs, end_level_dbfs, n);
+
+    info!(
+        "THD vs level: {:.1} Hz, {:.1}..{:.1} dBFS, {} points",
+        freq,
+        levels.first().copied().unwrap_or(0.0),
+        levels.last().copied().unwrap_or(0.0),
+        n
+    );
+
+    let pts_spec: Vec<(f32, f32)> = levels.into_iter().map(|lvl| (freq, lvl)).collect();
+    run_thd_batch(
+        &app,
+        &device,
+        pts_spec,
+        output_channel,
+        input_channel,
+        "level",
+        &sweep_cancel,
+    )
+    .await
+}
 
 // ---- Test plans (reusable measurement recipes) ----
 
@@ -1194,6 +1252,7 @@ pub fn run() {
             last_telemetry,
             measure_frequency_response_multi,
             measure_thd_vs_frequency,
+            measure_thd_vs_level,
             firmware::extract_firmware_from_exe,
             firmware::extract_firmware_from_setup,
             firmware::list_qa40x_releases,
@@ -1254,4 +1313,102 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+/// Ascending dB level sequence for a THD-vs-level sweep: `n` points spanning
+/// `start_dbfs`..`end_dbfs`, clamped to the digital-full-scale ceiling
+/// [-80, 0] dBFS. Extracted from `measure_thd_vs_level` (issue #27 review
+/// finding #2) so its edge cases are directly testable:
+///
+/// - order-independent: a descending request (`end < start`, e.g. "sweep
+///   down from 0 to -40") is SWAPPED to ascending rather than crushed —
+///   the old code forced `hi >= lo` by clamping `hi` up towards `lo`
+///   (mirroring the frequency sweep's `lo * 1.01` guard), which silently
+///   replaced the requested span with a near-zero one (or, when
+///   `start > end` by a lot, inverted it into a vertical/degenerate one).
+///   The chart only needs the x-axis ascending, not the request order
+///   preserved, so swapping keeps the full requested span;
+/// - NaN in either bound is ABSORBED, not propagated: `.max()`/`.min()`
+///   return the non-NaN operand (finding #6) — unlike `f32::clamp`, which
+///   returns NaN unchanged when its `self` is NaN (only panics on a NaN
+///   *bound*), so a NaN `self` used to poison the whole sweep;
+/// - `n == 1` returns a single point (`lo`) instead of dividing by
+///   `n - 1 == 0` — unreachable through the command today (`num_points`
+///   is clamped to >= 2 first) but pinned here so a future refactor can't
+///   quietly reintroduce the panic.
+fn level_points(start_dbfs: f32, end_dbfs: f32, n: usize) -> Vec<f32> {
+    // NOT `.clamp()`: clippy's manual_clamp lint wants that rewrite, but its
+    // own note says why it's wrong HERE — "clamp returns NaN if the input is
+    // NaN". `.max().min()` is the whole point: it ABSORBS a NaN bound
+    // (returns the other, non-NaN operand) instead of propagating it
+    // (finding #6).
+    #[allow(clippy::manual_clamp)]
+    let clamp = |v: f32| v.max(-80.0).min(0.0);
+    let mut lo = clamp(start_dbfs);
+    let mut hi = clamp(end_dbfs);
+    if hi < lo {
+        std::mem::swap(&mut lo, &mut hi);
+    }
+    if n <= 1 {
+        return vec![lo];
+    }
+    (0..n)
+        .map(|i| lo + (hi - lo) * i as f32 / (n - 1) as f32)
+        .collect()
+}
+
+#[cfg(test)]
+mod level_points_tests {
+    use super::level_points;
+
+    #[test]
+    fn ascending_request_is_unchanged() {
+        assert_eq!(level_points(-60.0, 0.0, 5), vec![-60.0, -45.0, -30.0, -15.0, 0.0]);
+    }
+
+    #[test]
+    fn descending_request_is_swapped_not_crushed() {
+        // The exact bug report: start=-6, end=-60 must NOT collapse to a
+        // ~0.1 dB span around -6 — it must span the full 54 dB, ascending.
+        assert_eq!(
+            level_points(-6.0, -60.0, 5),
+            vec![-60.0, -46.5, -33.0, -19.5, -6.0]
+        );
+    }
+
+    #[test]
+    fn start_zero_end_very_negative_is_not_a_vertical_line() {
+        // The second bug report: start=0, end=-40 used to collapse to
+        // lo == hi == 0 (a degenerate flat/vertical sweep).
+        let pts = level_points(0.0, -40.0, 5);
+        assert_eq!(pts, vec![-40.0, -30.0, -20.0, -10.0, 0.0]);
+        assert!(pts[0] < pts[4], "must be a real, non-degenerate span");
+    }
+
+    #[test]
+    fn equal_bounds_are_a_legitimate_flat_sweep() {
+        // Not a bug: the user asked for one level, n times.
+        assert_eq!(level_points(-6.0, -6.0, 5), vec![-6.0; 5]);
+    }
+
+    #[test]
+    fn out_of_range_bounds_clamp_to_the_dbfs_ceiling() {
+        assert_eq!(level_points(10.0, -100.0, 3), vec![-80.0, -40.0, 0.0]);
+    }
+
+    #[test]
+    fn n_equals_one_returns_a_single_point_without_dividing_by_zero() {
+        assert_eq!(level_points(-60.0, 0.0, 1), vec![-60.0]);
+        assert_eq!(level_points(-60.0, 0.0, 0), vec![-60.0]); // n=0 degrades the same way
+    }
+
+    #[test]
+    fn nan_in_either_bound_is_absorbed_to_the_clamp_floor_not_propagated() {
+        let pts = level_points(f32::NAN, -6.0, 3);
+        assert_eq!(pts, vec![-80.0, -43.0, -6.0]);
+        assert!(pts.iter().all(|v| v.is_finite()), "no NaN must survive");
+
+        let pts2 = level_points(-6.0, f32::NAN, 3);
+        assert_eq!(pts2, vec![-80.0, -43.0, -6.0]);
+    }
 }

@@ -66,6 +66,12 @@ export interface PersistedFrames {
   td?: Frame;
   fd?: Frame;
   sweep?: Frame;
+  /** The sweep's x-axis unit (issue #27 review finding #1) — travels WITH
+   * the frame (`DecodedSweep.xUnit`), not re-derived from the program on
+   * load (a frozen ❄ memory trace has none, and program params can go
+   * stale). Absent for pre-#27 docs — `docToFrames` leaves it undefined and
+   * chartvm.ts's `sweepXUnit` falls back to "Hz". */
+  sweepXUnit?: "Hz" | "dBFS";
 }
 
 export interface WorkspaceDoc {
@@ -113,6 +119,7 @@ function framesToDoc(f: TraceFrames): PersistedFrames {
         phase_deg: c.phaseDeg ? Array.from(c.phaseDeg) : null,
       })),
     };
+    if (f.sweep.xUnit) out.sweepXUnit = f.sweep.xUnit;
   }
   return out;
 }
@@ -126,7 +133,7 @@ export function docToFrames(p: PersistedFrames): {
   return {
     td: p.td ? wireToTd(p.td) : undefined,
     fd: p.fd ? wireToFd(p.fd) : undefined,
-    sweep: p.sweep ? wireToSweep(p.sweep) : undefined,
+    sweep: p.sweep ? wireToSweep(p.sweep, p.sweepXUnit) : undefined,
   };
 }
 
@@ -331,10 +338,16 @@ function importSweepParams(params: Record<string, unknown>): SweepProgramParams 
   const metric = str(params.metric, "thd_db");
   return {
     measurement,
+    // Legacy (v4) sweeps predate the level axis (issue #27) — every one of
+    // them was a frequency sweep.
+    axis: "frequency",
     channel: c === "right" || c === "both" ? c : "left",
     startHz: num(params.start, DEFAULT_SWEEP_PARAMS.startHz),
     endHz: num(params.end, DEFAULT_SWEEP_PARAMS.endHz),
     levelDbfs: num(params.level, DEFAULT_SWEEP_PARAMS.levelDbfs),
+    toneHz: DEFAULT_SWEEP_PARAMS.toneHz,
+    startDbfs: DEFAULT_SWEEP_PARAMS.startDbfs,
+    endDbfs: DEFAULT_SWEEP_PARAMS.endDbfs,
     points: num(params.points, DEFAULT_SWEEP_PARAMS.points),
     durationS: num(params.duration, DEFAULT_SWEEP_PARAMS.durationS),
     metric:
@@ -658,6 +671,15 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   }
   for (const prog of Object.values(doc.programs.byId)) {
     if (prog.startedAtMs === undefined) prog.startedAtMs = null;
+    // Issue #27: a v5 doc saved before the level axis existed picks up the
+    // frequency-axis defaults (every sweep it could have saved WAS one).
+    if (prog.kind === "sweep") {
+      const params = prog.params as Partial<SweepProgramParams>;
+      if (params.axis === undefined) params.axis = "frequency";
+      if (params.toneHz === undefined) params.toneHz = DEFAULT_SWEEP_PARAMS.toneHz;
+      if (params.startDbfs === undefined) params.startDbfs = DEFAULT_SWEEP_PARAMS.startDbfs;
+      if (params.endDbfs === undefined) params.endDbfs = DEFAULT_SWEEP_PARAMS.endDbfs;
+    }
   }
   if (!doc.triggers || typeof doc.triggers !== "object") doc.triggers = {};
   // A SINGLE arm is a live-session gesture, never a saved-bench fact — any

@@ -10,7 +10,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { clearAllFrames, putFrames } from "../../data/frames";
 import { clearTriggerSnapshots, putTriggerSnapshot } from "../../data/triggered";
 import { initialState, type AppState, type TileConfig } from "../state";
-import { HW_TRACE_IDS } from "../state";
+import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS } from "../state";
 import { DBU_OVER_DBV_DB } from "../../core/units";
 import {
   displayOffsetDb,
@@ -651,5 +651,252 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
     const vm = sweepVM(s, s.layout.tiles["tile-1"]);
     expect(vm.series.map((x) => x.label)).toEqual(["Sweep Right"]);
     expect(vm.series[0].color).toBe(rightColor); // color keyed by curve INDEX
+  });
+
+  it("a THD level-axis program's sweep reports xUnit dBFS (issue #27) — read from the FRAME, not just the program", () => {
+    putFrames("prog-2", 1, {
+      sweep: {
+        freqs: Float64Array.from([-60, -30, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        xUnit: "dBFS",
+      },
+    });
+    const s = initialState();
+    s.traces.order.push("prog-2");
+    s.traces.byId["prog-2"] = {
+      id: "prog-2",
+      label: "Sweep",
+      color: "#9a6ee2",
+      source: { kind: "program" },
+      domains: ["sweep"],
+      seq: 1,
+      offsetDb: null,
+    };
+    s.programs.order.push("prog-2");
+    s.programs.byId["prog-2"] = {
+      id: "prog-2",
+      kind: "sweep",
+      run: "idle",
+      progress: null,
+      startedAtMs: null,
+      params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
+    };
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["prog-2"];
+
+    expect(sweepVM(s, t).xUnit).toBe("dBFS");
+  });
+
+  it("review finding #1: a level sweep's xUnit survives the program being GONE (frozen ❄ / deleted) — no NaN-axis regression", () => {
+    // The exact bug: freeze (or delete the program) drops the programs.byId
+    // entry the OLD code read xUnit from; the frame itself must still know
+    // it's a level sweep, or the chart falls back to a log-Hz axis and
+    // Math.log10(-60) → NaN.
+    putFrames("mem-1", 1, {
+      sweep: {
+        freqs: Float64Array.from([-60, -30, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        xUnit: "dBFS",
+      },
+    });
+    const s = initialState();
+    s.traces.order.push("mem-1");
+    s.traces.byId["mem-1"] = {
+      id: "mem-1",
+      label: "Sweep ❄1",
+      color: "#9a6ee2",
+      source: { kind: "memory", frozenFrom: "prog-2" },
+      domains: ["sweep"],
+      seq: 1,
+      offsetDb: null,
+    };
+    // Deliberately NO s.programs.byId["mem-1"] and NO s.programs.byId["prog-2"]
+    // — a memory trace is never itself a program, and the original program
+    // may have been deleted too.
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["mem-1"];
+
+    expect(sweepVM(s, t).xUnit).toBe("dBFS");
+  });
+
+  it("a frame with no xUnit (predates issue #27 — a script-emitted sweep, or an old save) falls back to the program's axis, else Hz", () => {
+    putFrames("prog-3", 1, {
+      sweep: {
+        freqs: Float64Array.from([-60, -30, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        // no xUnit
+      },
+    });
+    const s = initialState();
+    s.traces.order.push("prog-3");
+    s.traces.byId["prog-3"] = {
+      id: "prog-3",
+      label: "Sweep",
+      color: "#9a6ee2",
+      source: { kind: "program" },
+      domains: ["sweep"],
+      seq: 1,
+      offsetDb: null,
+    };
+    s.programs.order.push("prog-3");
+    s.programs.byId["prog-3"] = {
+      id: "prog-3",
+      kind: "sweep",
+      run: "idle",
+      progress: null,
+      startedAtMs: null,
+      params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
+    };
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["prog-3"];
+    expect(sweepVM(s, t).xUnit).toBe("dBFS"); // falls back to the program
+
+    // No frame xUnit AND no program entry at all — genuinely nothing to
+    // read the axis from, defaults to Hz.
+    const noProgVm = sweepVM(s, { ...t, traces: [] });
+    expect(noProgVm.xUnit).toBe("Hz");
+  });
+
+  it("review finding #4: flipping the dialog's axis WITHOUT re-running leaves the landed frame's xUnit untouched (no stale relabel)", () => {
+    // The frame landed as a Hz (frequency-axis) sweep...
+    putFrames("prog-4", 1, {
+      sweep: {
+        freqs: Float64Array.from([20, 1000, 20000]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        xUnit: "Hz",
+      },
+    });
+    const s = initialState();
+    s.traces.order.push("prog-4");
+    s.traces.byId["prog-4"] = {
+      id: "prog-4",
+      label: "Sweep 20–20000 Hz",
+      color: "#9a6ee2",
+      source: { kind: "program" },
+      domains: ["sweep"],
+      seq: 1,
+      offsetDb: null,
+    };
+    s.programs.order.push("prog-4");
+    // ...then the user opens the gear, flips axis to "level", and Applies —
+    // WITHOUT pressing Run again. The program's params now say "level"; the
+    // landed frame is still the old Hz data.
+    s.programs.byId["prog-4"] = {
+      id: "prog-4",
+      kind: "sweep",
+      run: "idle",
+      progress: null,
+      startedAtMs: null,
+      params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
+    };
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["prog-4"];
+
+    // Must still read Hz — the axis the DATA was actually swept over, not
+    // the dialog's current (not-yet-run) setting.
+    expect(sweepVM(s, t).xUnit).toBe("Hz");
+  });
+
+  it("review finding #3: a tile mixing a frequency sweep and a level sweep omits the second axis instead of NaN-ing the plot", () => {
+    putFrames("prog-freq", 1, {
+      sweep: {
+        freqs: Float64Array.from([20, 1000, 20000]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -110, -90]), phaseDeg: null }],
+        xUnit: "Hz",
+      },
+    });
+    putFrames("prog-level", 1, {
+      sweep: {
+        freqs: Float64Array.from([-60, -30, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        xUnit: "dBFS",
+      },
+    });
+    const s = initialState();
+    for (const id of ["prog-freq", "prog-level"]) {
+      s.traces.order.push(id);
+      s.traces.byId[id] = {
+        id,
+        label: id,
+        color: "#9a6ee2",
+        source: { kind: "program" },
+        domains: ["sweep"],
+        seq: 1,
+        offsetDb: null,
+      };
+    }
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["prog-freq", "prog-level"];
+
+    const vm = sweepVM(s, t);
+    // The tile's axis is fixed by the FIRST member (Hz) — the level sweep
+    // is entirely excluded, not drawn on a mismatched scale.
+    expect(vm.xUnit).toBe("Hz");
+    expect(vm.series.map((x) => x.id)).toEqual(["prog-freq"]);
+    expect(vm.omitted).toEqual(["prog-level"]);
+
+    // Reversed membership order: whichever lands FIRST wins the axis: this
+    // time the level sweep is drawn and the Hz one is omitted.
+    const reversed = sweepVM(s, { ...t, traces: ["prog-level", "prog-freq"] });
+    expect(reversed.xUnit).toBe("dBFS");
+    expect(reversed.series.map((x) => x.id)).toEqual(["prog-level"]);
+    expect(reversed.omitted).toEqual(["prog-freq"]);
+  });
+
+  it("a SINGLE trace re-run level → frequency → level tracks the CURRENT frame every render — no stale axis carried over from a previous call (tile.ts calls sweepVM fresh on every render)", () => {
+    // Same program/trace id re-run three times with the axis flipped each
+    // time — sweepVM has no cross-call cache, so each call must reflect
+    // only the frame that's in the cache RIGHT NOW.
+    const s = initialState();
+    s.traces.order.push("prog-hot");
+    s.traces.byId["prog-hot"] = {
+      id: "prog-hot",
+      label: "Sweep",
+      color: "#9a6ee2",
+      source: { kind: "program" },
+      domains: ["sweep"],
+      seq: 1,
+      offsetDb: null,
+    };
+    const t = s.layout.tiles["tile-1"];
+    t.kind = "sweep";
+    t.traces = ["prog-hot"];
+
+    putFrames("prog-hot", 1, {
+      sweep: {
+        freqs: Float64Array.from([-60, -30, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -100, -80]), phaseDeg: null }],
+        xUnit: "dBFS",
+      },
+    });
+    expect(sweepVM(s, t).xUnit).toBe("dBFS");
+    expect(Array.from(sweepVM(s, t).series[0].x)).toEqual([-60, -30, 0]);
+
+    putFrames("prog-hot", 2, {
+      sweep: {
+        freqs: Float64Array.from([20, 1000, 20000]),
+        curves: [{ label: "Left", values: Float64Array.from([-120, -110, -90]), phaseDeg: null }],
+        xUnit: "Hz",
+      },
+    });
+    expect(sweepVM(s, t).xUnit).toBe("Hz");
+    expect(Array.from(sweepVM(s, t).series[0].x)).toEqual([20, 1000, 20000]);
+
+    putFrames("prog-hot", 3, {
+      sweep: {
+        freqs: Float64Array.from([-40, -20, 0]),
+        curves: [{ label: "Left", values: Float64Array.from([-118, -98, -78]), phaseDeg: null }],
+        xUnit: "dBFS",
+      },
+    });
+    expect(sweepVM(s, t).xUnit).toBe("dBFS");
+    expect(Array.from(sweepVM(s, t).series[0].x)).toEqual([-40, -20, 0]);
+    // Never omitted — a single-trace tile has nothing to clash against.
+    expect(sweepVM(s, t).omitted).toEqual([]);
   });
 });

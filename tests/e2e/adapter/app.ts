@@ -888,6 +888,19 @@ export class AppV2 {
     }, undefined as void);
   }
 
+  /** Whether the dialog row containing a field (by its data-testid) is
+   * hidden — the sweep dialog toggles rows with `.u-hidden` depending on
+   * measurement/axis (issue #27's frequency-axis vs level-axis fields). */
+  async dialogRowHidden(fieldTestid: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { fieldTestid: string }) => {
+        const field = document.querySelector(`[data-testid="${a.fieldTestid}"]`);
+        return field?.closest(".dialog__row")?.classList.contains("u-hidden") ?? true;
+      },
+      { fieldTestid }
+    );
+  }
+
   /** Close any open dialog (Escape — the dialogs all listen for it). */
   async closeDialog(): Promise<void> {
     await this.drv.eval(
@@ -966,6 +979,23 @@ export class AppV2 {
     );
   }
 
+  /** A trace's current display label (e.g. the sweep program's auto-label). */
+  async traceLabel(id: string): Promise<string | null> {
+    return this.drv.eval(
+      (a: { id: string }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              state(): { traces: { byId: Record<string, { label: string }> } };
+            };
+          }
+        ).qa40xV2Debug;
+        return dbg.state().traces.byId[a.id]?.label ?? null;
+      },
+      { id }
+    );
+  }
+
   /** The domains a pool trace currently carries (td/fd/sweep). */
   async traceDomains(id: string): Promise<string[]> {
     return this.drv.eval(
@@ -983,10 +1013,14 @@ export class AppV2 {
     );
   }
 
-  /** The sweep view-model of a tile, summarized (label + point count). */
+  /** The sweep view-model of a tile, summarized (label + point count + the
+   * x-axis unit — "Hz" for a frequency sweep, "dBFS" for a THD-vs-level
+   * sweep, issue #27 — and its first/last x values). */
   async sweepSeries(
     tileId?: string
-  ): Promise<{ label: string; points: number; unit: string }[]> {
+  ): Promise<
+    { label: string; points: number; unit: string; xUnit: string; xFirst: number; xLast: number }[]
+  > {
     return this.drv.eval(
       (a: { tileId?: string }) => {
         const dbg = (
@@ -994,6 +1028,7 @@ export class AppV2 {
             qa40xV2Debug: {
               sweepVM(id?: string): {
                 unitLabel: string;
+                xUnit: string;
                 series: { label: string; x: Float64Array }[];
               };
             };
@@ -1004,6 +1039,9 @@ export class AppV2 {
           label: s.label,
           points: s.x.length,
           unit: vm.unitLabel,
+          xUnit: vm.xUnit,
+          xFirst: s.x[0],
+          xLast: s.x[s.x.length - 1],
         }));
       },
       { tileId }

@@ -247,14 +247,26 @@ export interface SourcesState {
 /* ------------------------------------------------------------------ */
 
 /** Parameters of a swept measurement program (v1 SweepParams): THD vs
- * frequency (point sweep) or frequency response (chirp). */
+ * frequency (point sweep), THD vs level (issue #27, same point sweep with
+ * the swept axis flipped), or frequency response (chirp). */
 export interface SweepProgramParams {
   measurement: "thd" | "fr";
+  /** THD only: the swept axis — "frequency" (log-spaced, constant level) or
+   * "level" (linear dB steps at a fixed tone). FR has no axis choice: a
+   * chirp is inherently a frequency sweep. */
+  axis: "frequency" | "level";
   channel: "left" | "right" | "both";
   startHz: number;
   endHz: number;
-  /** Stimulus level in dBFS (the sweep drives the DAC directly). */
+  /** Stimulus level in dBFS (the sweep drives the DAC directly). Constant
+   * level for a frequency-axis THD sweep or an FR sweep; unused when
+   * axis === "level" (see startDbfs/endDbfs instead). */
   levelDbfs: number;
+  /** THD level-axis only: fixed tone frequency (Hz) swept over level. */
+  toneHz: number;
+  /** THD level-axis only: sweep bounds in dBFS. */
+  startDbfs: number;
+  endDbfs: number;
   /** THD only: number of tone points. */
   points: number;
   /** FR only: chirp length in seconds. */
@@ -265,10 +277,17 @@ export interface SweepProgramParams {
 
 export const DEFAULT_SWEEP_PARAMS: SweepProgramParams = {
   measurement: "thd",
+  axis: "frequency",
   channel: "left",
   startHz: 20,
   endHz: 20000,
   levelDbfs: -6,
+  toneHz: 1000,
+  startDbfs: -60,
+  // -6, not 0 (issue #27 review finding #5): 0 dBFS clips a typical
+  // loopback — the frequency sweep's `levelDbfs` default is -6 for the
+  // exact same reason, and `run_thd_batch` clamps to 0 (no headroom left).
+  endDbfs: -6,
   points: 30,
   durationS: 1,
   metric: "thd_db",

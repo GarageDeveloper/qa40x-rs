@@ -38,7 +38,7 @@ const store = new Store(initialState());
     const tile = tileId
       ? s.layout.tiles[tileId]
       : visibleTiles(s).find((t) => t.kind === "sweep");
-    return tile ? sweepVM(s, tile) : { series: [], unitLabel: "" };
+    return tile ? sweepVM(s, tile) : { series: [], unitLabel: "", xUnit: "Hz" as const, omitted: [] };
   },
 };
 

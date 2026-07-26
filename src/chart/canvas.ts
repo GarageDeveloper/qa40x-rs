@@ -95,6 +95,13 @@ export function formatHz(f: number): string {
   return `${f >= 100 ? f.toFixed(1) : f.toFixed(2)} Hz`;
 }
 
+/** THD-vs-level sweep's X-axis value (issue #27) — a plain signed dBFS
+ * number, no log/kilo formatting (unlike frequency, level has no "k" scale). */
+export function formatDbfs(v: number): string {
+  if (!isFinite(v)) return "--";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(1)} dBFS`;
+}
+
 /** Short tick label: 20, 100, 1k, 20k */
 function tickHz(f: number): string {
   if (f >= 1000) {
@@ -563,12 +570,20 @@ function drawLogXAxis(
   }
 }
 
+/** Default linear-axis tick label: frequency (Hz/k), the original caller's
+ * (SpectrumChart's linear-Hz mode) format. `labelFmt` overrides it for other
+ * linear quantities — e.g. the THD-vs-level sweep's dBFS axis (issue #27). */
+function defaultLinTickLabel(v: number): string {
+  return v >= 1000 && Number.isInteger(v / 1000) ? `${v / 1000}k` : tickHz(Math.round(v));
+}
+
 function drawLinXAxis(
   ctx: CanvasRenderingContext2D,
   plot: Rect,
   fMin: number,
   fMax: number,
-  xOf: (f: number) => number
+  xOf: (f: number) => number,
+  labelFmt: (v: number) => string = defaultLinTickLabel
 ): void {
   const step = niceStep(fMax - fMin, 8);
   ctx.lineWidth = 1;
@@ -590,7 +605,7 @@ function drawLinXAxis(
   for (let v = start; v <= fMax + step * 0.01; v += step) {
     const x = xOf(v);
     if (x < plot.x - 2 || x > plot.x + plot.w + 2) continue;
-    const label = v >= 1000 && Number.isInteger(v / 1000) ? `${v / 1000}k` : tickHz(Math.round(v));
+    const label = labelFmt(v);
     const half = ctx.measureText(label).width / 2;
     const cx = Math.max(plot.x + half - 6, Math.min(plot.x + plot.w - half + 6, x));
     if (cx - half < lastRight + 8) continue;
@@ -654,6 +669,10 @@ interface MarkerReadout {
   valueDb: number;
   valueText: string;
   extraText?: string;
+  /** "level" formats `freq` as a signed dBFS number (linear axis, no octave
+   * delta) instead of a frequency (THD-vs-level sweep, issue #27). Absent /
+   * "freq" keeps the original Hz + octave-delta formatting. */
+  xUnit?: "freq" | "level";
 }
 
 /**
@@ -1239,7 +1258,7 @@ abstract class InteractiveLogChart extends BaseChart {
       name.textContent = slot === 0 ? "A" : "B";
       const freq = document.createElement("span");
       freq.className = "mk-freq";
-      freq.textContent = formatHz(r.freq);
+      freq.textContent = r.xUnit === "level" ? formatDbfs(r.freq) : formatHz(r.freq);
       const val = document.createElement("span");
       val.className = "mk-val";
       val.textContent = r.extraText ? `${r.valueText}  ${r.extraText}` : r.valueText;
@@ -1254,10 +1273,16 @@ abstract class InteractiveLogChart extends BaseChart {
       name.textContent = "Δ";
       const freq = document.createElement("span");
       freq.className = "mk-freq";
-      const oct = octaves(reads[0].freq, reads[1].freq);
-      freq.textContent = `${formatHz(Math.abs(reads[1].freq - reads[0].freq))}  ${
-        isFinite(oct) ? `${oct >= 0 ? "+" : ""}${oct.toFixed(2)} oct` : ""
-      }`;
+      if (reads[0].xUnit === "level") {
+        // A level delta has no octave notion — plain signed dB.
+        const dd = reads[1].freq - reads[0].freq;
+        freq.textContent = `${dd >= 0 ? "+" : ""}${dd.toFixed(1)} dB`;
+      } else {
+        const oct = octaves(reads[0].freq, reads[1].freq);
+        freq.textContent = `${formatHz(Math.abs(reads[1].freq - reads[0].freq))}  ${
+          isFinite(oct) ? `${oct >= 0 ? "+" : ""}${oct.toFixed(2)} oct` : ""
+        }`;
+      }
       const val = document.createElement("span");
       val.className = "mk-val";
       const dd = reads[1].valueDb - reads[0].valueDb;
@@ -1310,6 +1335,10 @@ export class FrequencyResponseChart extends InteractiveLogChart {
   private readonly fixedRange: [number, number] = [-80, 20];
   /** Y-axis unit caption (e.g. "dB", "%"); reflects the plotted quantity. */
   private yUnit = "dB";
+  /** X-axis semantic (issue #27): "frequency" — log Hz, octave marker deltas
+   * (THD-vs-frequency / FR, the original shape) — or "level" — linear dBFS,
+   * plain dB deltas (THD-vs-level). Drives `xScale` (inherited) too. */
+  private xKind: "frequency" | "level" = "frequency";
 
   constructor(container: HTMLElement) {
     super(container, "Run a sweep to plot the response");
@@ -1320,6 +1349,17 @@ export class FrequencyResponseChart extends InteractiveLogChart {
   setYUnit(unit: string): void {
     if (unit === this.yUnit) return;
     this.yUnit = unit;
+    this.render();
+  }
+
+  /** Set the X-axis semantic — "frequency" (log Hz) or "level" (linear
+   * dBFS, THD-vs-level, issue #27). The old viewport doesn't carry over
+   * across a kind switch (its units just changed meaning). */
+  setXKind(kind: "frequency" | "level"): void {
+    if (kind === this.xKind) return;
+    this.xKind = kind;
+    this.xScale = kind === "level" ? "linear" : "log";
+    this.viewLog = null;
     this.render();
   }
 
@@ -1429,6 +1469,7 @@ export class FrequencyResponseChart extends InteractiveLogChart {
       valueDb: m,
       valueText: `${m.toFixed(2)} dB`,
       extraText: extra,
+      xUnit: this.xKind === "level" ? "level" : "freq",
     };
   }
 
@@ -1443,17 +1484,26 @@ export class FrequencyResponseChart extends InteractiveLogChart {
     const { plot } = this;
     if (plot.w < 40 || plot.h < 40) return;
 
-    let fMin = Math.max(1, d.frequencies[0]);
+    // "level" (issue #27) is a linear dBFS axis: no Hz floor-at-1, and the
+    // full extent is stored RAW (fwd()/inv() are identity in linear mode) —
+    // "frequency" keeps the original log10(Hz) extent.
+    const isLevel = this.xKind === "level";
+    let fMin = isLevel ? d.frequencies[0] : Math.max(1, d.frequencies[0]);
     let fMax = d.frequencies[d.frequencies.length - 1];
     for (const o of this.overlays) {
       if (o.frequencies.length) {
-        fMin = Math.min(fMin, Math.max(1, o.frequencies[0]));
+        fMin = Math.min(fMin, isLevel ? o.frequencies[0] : Math.max(1, o.frequencies[0]));
         fMax = Math.max(fMax, o.frequencies[o.frequencies.length - 1]);
       }
     }
-    fMax = Math.max(fMin * 1.01, fMax);
-    this.fullLogMin = Math.log10(fMin);
-    this.fullLogMax = Math.log10(fMax);
+    if (fMax <= fMin) fMax = isLevel ? fMin + 1 : fMin * 1.01;
+    if (isLevel) {
+      this.fullLogMin = fMin;
+      this.fullLogMax = fMax;
+    } else {
+      this.fullLogMin = Math.log10(fMin);
+      this.fullLogMax = Math.log10(fMax);
+    }
 
     if (this.scaleMode === "fixed") {
       [this.fullYMin, this.fullYMax] = this.fixedRange;
@@ -1485,7 +1535,11 @@ export class FrequencyResponseChart extends InteractiveLogChart {
     const step = niceStep(this.yMax - this.yMin, 6);
 
     drawPlotBackdrop(ctx, plot);
-    drawLogXAxis(ctx, plot, Math.pow(10, this.logMin), Math.pow(10, this.logMax), this.xOf);
+    if (isLevel) {
+      drawLinXAxis(ctx, plot, this.logMin, this.logMax, this.xOf, formatDbfs);
+    } else {
+      drawLogXAxis(ctx, plot, Math.pow(10, this.logMin), Math.pow(10, this.logMax), this.xOf);
+    }
     drawDbYAxis(ctx, plot, this.yMin, this.yMax, step, this.yOf, this.yUnit);
 
     // Phase axis (right, fixed -180..180 in 90 degree steps).
@@ -1661,7 +1715,7 @@ export class FrequencyResponseChart extends InteractiveLogChart {
         rows.push({ key: o.color, label: `Phase${tag}`, value: `${o.phases[j].toFixed(1)}°` });
       }
     }
-    drawReadout(ctx, x, yMag, this.plot, formatHz(f), rows);
+    drawReadout(ctx, x, yMag, this.plot, this.xKind === "level" ? formatDbfs(f) : formatHz(f), rows);
   }
 }
 
