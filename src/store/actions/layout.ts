@@ -215,18 +215,26 @@ export function setFocusTile(store: Store<AppState>, tileId: string | null): voi
   );
 }
 
-export function setTileMeasures(store: Store<AppState>, tileId: string, measures: string[]): void {
+export function setTileMeasures(
+  store: Store<AppState>,
+  ipc: Ipc,
+  tileId: string,
+  measures: string[]
+): void {
   patchTile(store, "layout/measures", tileId, (t) => ({ ...t, measures: [...measures] }));
+  syncStream(store, ipc); // suite chips drive the backend MeasureRequest
 }
 
 export function setTileChipSource(
   store: Store<AppState>,
+  ipc: Ipc,
   tileId: string,
   chipSource: "auto" | TraceId
 ): void {
   patchTile(store, "layout/chip-source", tileId, (t) =>
     t.chipSource === chipSource ? t : { ...t, chipSource }
   );
+  syncStream(store, ipc); // the measured endpoint may have changed
 }
 
 export function setTileAxis(

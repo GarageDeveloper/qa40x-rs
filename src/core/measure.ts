@@ -7,7 +7,7 @@
  * unit through the measured trace's OWN converter offset (v1 printed raw
  * dBFS everywhere; a scope in volts now reads its chips in volts too).
  */
-import type { AnalysisResult, FrameMeasures } from "../gen";
+import type { AnalysisResult, FrameMeasures, ScopeMeasures, ScopeStat } from "../gen";
 import type { FdUnit, TdUnit } from "./model";
 import { db, displayOffsetDb, displayScale, formatVrms } from "./units";
 
@@ -15,6 +15,9 @@ import { db, displayOffsetDb, displayScale, formatVrms } from "./units";
 export interface ChipContext {
   measures: FrameMeasures | null;
   metrics: AnalysisResult | null;
+  /** Backend scope measurement suite + sliding stats (issue #26 lot B) —
+   * null while the endpoint isn't in the stream's `MeasureRequest`. */
+  scope: ScopeMeasures | null;
   /** The measured trace's own converter dBFS→dBV offset (null until known
    * — level chips then fall back to the converter-relative dBFS). */
   offsetDb: number | null;
@@ -71,6 +74,70 @@ export interface MeasureDef {
   /** A display string, or "—" when the value is unavailable (frame missing,
    * or its backend measurement hasn't landed yet). */
   format: (ctx: ChipContext) => string;
+  /** Sliding-window statistics line for the chip tooltip (scope measurement
+   * suite, issue #26 lot B) — null when no reading is in the window yet. */
+  statsTooltip?: (ctx: ChipContext) => string | null;
+}
+
+/* ---- scope measurement suite (issue #26 lot B) ----------------------- */
+
+/** A linear FS-domain level in the tile's td unit, with an explicit suffix
+ * ("Vpp", "Vrms", "V"…): %FS mode stays in %FS, volts go through the
+ * measured trace's own converter offset with an adaptive SI prefix; raw
+ * "FS" while the offset is unknown (a dB reading of a Vpp makes no sense,
+ * unlike the RMS/Peak chips' dBFS fallback). */
+function fmtScopeLevel(ctx: ChipContext, linearFs: number, suffix: string): string {
+  if (ctx.tdUnit === "pctfs") return `${(linearFs * 100).toPrecision(3)} %FS`;
+  if (ctx.offsetDb === null) return `${linearFs.toPrecision(3)} FS`;
+  const v = linearFs * displayScale("v", ctx.offsetDb);
+  const a = Math.abs(v);
+  const [scaled, prefix] =
+    a >= 1 || a === 0 ? [v, ""] : a >= 1e-3 ? [v * 1e3, "m"] : a >= 1e-6 ? [v * 1e6, "µ"] : [v * 1e9, "n"];
+  return `${scaled.toPrecision(3)} ${prefix}${suffix}`;
+}
+
+/** A frequency with DSO-grade digits (the backend refines to ~0.005 Hz on
+ * long windows — a rounded "1 kHz" would throw that away). */
+function fmtScopeHz(f: number): string {
+  const decimals = f < 100 ? 4 : f < 10_000 ? 3 : 2;
+  return `${f.toFixed(decimals)} Hz`;
+}
+
+/** A time in seconds with an adaptive SI prefix (ms / µs / ns). */
+function fmtScopeSeconds(t: number): string {
+  const a = Math.abs(t);
+  const [scaled, prefix] =
+    a >= 1 || a === 0 ? [t, ""] : a >= 1e-3 ? [t * 1e3, "m"] : a >= 1e-6 ? [t * 1e6, "µ"] : [t * 1e9, "n"];
+  return `${scaled.toPrecision(3)} ${prefix}s`;
+}
+
+/** One suite chip: value from this frame's `ScopeStat`, stats tooltip from
+ * its sliding window (`n == 0` = nothing measured yet — no tooltip). */
+function scopeDef(
+  key: string,
+  label: string,
+  desc: string,
+  pick: (m: ScopeMeasures) => ScopeStat,
+  fmt: (ctx: ChipContext, v: number) => string
+): MeasureDef {
+  return {
+    key,
+    label,
+    desc,
+    domain: "td",
+    format: (ctx) => {
+      const stat = ctx.scope ? pick(ctx.scope) : null;
+      return stat && stat.value !== null ? fmt(ctx, stat.value) : "—";
+    },
+    statsTooltip: (ctx) => {
+      const stat = ctx.scope ? pick(ctx.scope) : null;
+      if (!stat || stat.n === 0) return null;
+      return (
+        `avg ${fmt(ctx, stat.avg)} · min ${fmt(ctx, stat.min)} · max ${fmt(ctx, stat.max)}` +
+        ` · σ ${fmt(ctx, stat.sd)} · n=${stat.n}`
+      );
+    },
+  };
 }
 
 export const MEASURES: MeasureDef[] = [
@@ -132,12 +199,59 @@ export const MEASURES: MeasureDef[] = [
   },
   // Backend harmonic metrics — input endpoints only (the stream analyzes
   // captured channels; an ideal stimulus has no distortion to measure).
+  // Scope measurement suite (issue #26 lot B) — backend-computed per
+  // endpoint with sliding-window stats on the chip tooltip. The values ride
+  // the stream frame (data/frames.ts `scope`), not `measure_frames`.
+  scopeDef("vpp", "Vpp", "Peak-to-peak amplitude", (m) => m.vpp, (ctx, v) =>
+    fmtScopeLevel(ctx, v, "Vpp")
+  ),
+  scopeDef("vmean", "Vmean", "Mean level (DC) of the frame", (m) => m.vmean, (ctx, v) => {
+    if (ctx.tdUnit === "pctfs") return `${(v * 100).toPrecision(3)} %FS`;
+    if (ctx.offsetDb === null) return `${(v * 1e3).toPrecision(3)} mFS`;
+    return `${(v * displayScale("v", ctx.offsetDb) * 1e3).toPrecision(3)} mV`;
+  }),
+  scopeDef(
+    "acrms",
+    "AC RMS",
+    "AC-coupled RMS over whole periods (crossing to crossing)",
+    (m) => m.rms_ac,
+    (ctx, v) => fmtScopeLevel(ctx, v, "Vrms")
+  ),
+  scopeDef(
+    "freq",
+    "Freq",
+    "Fundamental frequency (crossing seed, Goertzel-refined)",
+    (m) => m.freq_hz,
+    (_ctx, v) => fmtScopeHz(v)
+  ),
+  scopeDef("rise", "Rise", "Mean 10–90 % rise time", (m) => m.rise_s, (_ctx, v) =>
+    fmtScopeSeconds(v)
+  ),
+  scopeDef("fall", "Fall", "Mean 90–10 % fall time", (m) => m.fall_s, (_ctx, v) =>
+    fmtScopeSeconds(v)
+  ),
+  scopeDef("duty", "Duty", "Time above the 50 % level, whole periods", (m) => m.duty, (_ctx, v) =>
+    `${(v * 100).toFixed(1)} %`
+  ),
   { key: "thd", label: "THD", desc: "Total harmonic distortion", domain: "fd", format: ({ metrics }) => (metrics ? pct(metrics.thd) : "—") },
   { key: "thddb", label: "THD (dB)", desc: "THD relative, in dB", domain: "fd", format: ({ metrics }) => (metrics ? percentToDb(metrics.thd) : "—") },
   { key: "thdn", label: "THD+N", desc: "THD + noise, in dB", domain: "fd", format: ({ metrics }) => (metrics ? percentToDb(metrics.thd_n) : "—") },
   { key: "snr", label: "SNR", desc: "Signal-to-noise ratio", domain: "fd", format: ({ metrics }) => (metrics ? dbMetric(metrics.snr) : "—") },
   { key: "sinad", label: "SINAD", desc: "Signal to noise+distortion", domain: "fd", format: ({ metrics }) => (metrics ? dbMetric(metrics.sinad) : "—") },
 ];
+
+/** The chip keys served by the backend scope measurement suite — the keys
+ * whose presence on a visible tile puts its chip-source endpoint into the
+ * stream's `MeasureRequest` (selectors/measures.ts). */
+export const SCOPE_MEASURE_KEYS: ReadonlySet<string> = new Set([
+  "vpp",
+  "vmean",
+  "acrms",
+  "freq",
+  "rise",
+  "fall",
+  "duty",
+]);
 
 export function measureByKey(key: string): MeasureDef | undefined {
   return MEASURES.find((m) => m.key === key);

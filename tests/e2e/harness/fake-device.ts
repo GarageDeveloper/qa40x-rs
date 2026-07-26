@@ -26,7 +26,15 @@
  *   absolute level that was actually driven when it was captured.
  */
 
-import { analyzeAudio, analyzeSpectrum, autoHysteresis, findEdge, processFft } from "./dsp";
+import {
+  analyzeAudio,
+  analyzeSpectrum,
+  autoHysteresis,
+  findEdge,
+  measureScope,
+  processFft,
+  SlidingStats,
+} from "./dsp";
 import { inputDbvOffsetDb, syntheticLoopbackProvider, type FrameProvider } from "./frames";
 
 /* ---- mirrors of the frontend/backend wire types ---------------------- */
@@ -88,6 +96,16 @@ interface TriggerRequestWire {
   output_r: TriggerConfigWire | null;
 }
 
+/** Mirrors `MeasureRequest` (stream.rs, lot B) — which endpoints get the
+ * scope measurement suite. Optional on the wire like the backend's
+ * `#[serde(default)]`: an older config without it means all-off. */
+interface MeasureRequestWire {
+  input_l: boolean;
+  input_r: boolean;
+  output_l: boolean;
+  output_r: boolean;
+}
+
 interface StreamConfigWire {
   buffer_size: number;
   slots: MixSlotDesc[];
@@ -96,6 +114,7 @@ interface StreamConfigWire {
   spectra: { input_l: boolean; input_r: boolean; output_l: boolean; output_r: boolean };
   output_range_dbv: number | null;
   triggers: TriggerRequestWire;
+  measures?: MeasureRequestWire;
 }
 
 /** Under mockIPC invoke args are not serialized: the live Tauri `Channel`
@@ -237,6 +256,10 @@ export class FakeDevice {
    * #25's e2e twin). */
   private triggerArmedEpoch: Record<string, number> = {};
   private triggerFired: Record<string, boolean> = {};
+  /** Per-endpoint, per-measure sliding stats (lot B) — mirrors stream.rs's
+   * `MeasureStates`: one bank PER ENDPOINT, dropped when the endpoint
+   * leaves the request (a re-enable restarts the history). */
+  private measureStats: Record<string, Record<string, SlidingStats>> = {};
 
   constructor(private provider: FrameProvider = syntheticLoopbackProvider()) {}
 
@@ -430,6 +453,7 @@ export class FakeDevice {
         // only `stream_update` on an already-running loop must NOT reset).
         this.triggerArmedEpoch = {};
         this.triggerFired = {};
+        this.measureStats = {};
         // ~8 fps: fast enough for the specs, slow enough to stay honest
         // about per-frame work in a browser context.
         this.streamTimer = setInterval(() => this.streamFrame(), 120);
@@ -743,6 +767,36 @@ export class FakeDevice {
     };
   }
 
+  /** One endpoint's measurement suite this frame — mirrors stream.rs's
+   * `MeasureStates::ingest` + `EndpointMeasureStats`: measure, feed each
+   * metric's sliding window, report value + stats. `samples === null`
+   * (unrequested, or an output in monitor mode) drops the endpoint's bank
+   * and reports null, so a re-enable restarts the statistics. */
+  private measureEndpoint(
+    endpoint: string,
+    samples: number[] | null,
+    sampleRate: number
+  ): Record<string, unknown> | null {
+    if (!samples) {
+      delete this.measureStats[endpoint];
+      return null;
+    }
+    const MEASURE_STATS_WINDOW = 100;
+    const bank = (this.measureStats[endpoint] ??= {});
+    const v = measureScope(samples, sampleRate);
+    const stat = (key: string, value: number | null): unknown =>
+      (bank[key] ??= new SlidingStats(MEASURE_STATS_WINDOW)).stat(value);
+    return {
+      vpp: stat("vpp", v.vpp),
+      vmean: stat("vmean", v.vmean),
+      rms_ac: stat("rms_ac", v.rms_ac),
+      freq_hz: stat("freq_hz", v.freq_hz),
+      rise_s: stat("rise_s", v.rise_s),
+      fall_s: stat("fall_s", v.fall_s),
+      duty: stat("duty", v.duty),
+    };
+  }
+
   /**
    * One v2 stream frame, mirroring the backend loop's order: render the mix
    * (level-volts) → fit the output range to the summed peak ({+8,+18} with
@@ -903,6 +957,16 @@ export class FakeDevice {
         tone && trig.output_r ? this.evaluateTrigger("output_r", trig.output_r, right, offsetOutputDb) : null,
     };
 
+    // ---- scope measurement suite (lot B — same read-only, non-gating
+    // contract as the trigger scan above) -------------------------------
+    const meas = cfg.measures ?? { input_l: false, input_r: false, output_l: false, output_r: false };
+    const measures = {
+      input_l: this.measureEndpoint("input_l", meas.input_l ? cap.left : null, sr),
+      input_r: this.measureEndpoint("input_r", meas.input_r ? cap.right : null, sr),
+      output_l: this.measureEndpoint("output_l", meas.output_l && tone ? left : null, sr),
+      output_r: this.measureEndpoint("output_r", meas.output_r && tone ? right : null, sr),
+    };
+
     this.streamSeq += 1;
     ch.onmessage({
       type: "frame",
@@ -912,6 +976,7 @@ export class FakeDevice {
       spectra,
       metrics,
       trigger,
+      measures,
       mix: {
         sigma_peak_dbv: sigmaPeakDbv,
         clip_input: clipInput,

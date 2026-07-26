@@ -316,6 +316,21 @@ describe("buildStreamConfig — triggers (Lot A, issue #26)", () => {
     expect(cfg.triggers?.input_r).toBeNull();
   });
 
+  it("carries the measureRequest projection (lot B)", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    s.layout.tiles["tile-1"].kind = "scope";
+    s.layout.tiles["tile-1"].traces = [HW_TRACE_IDS.inputL];
+    s.layout.tiles["tile-1"].measures = ["freq", "vpp"];
+    const cfg = buildStreamConfig(s);
+    expect(cfg.measures).toEqual({
+      input_l: true,
+      input_r: false,
+      output_l: false,
+      output_r: false,
+    });
+  });
+
   it("a trigger-only change does NOT touch averaging", () => {
     const s = initialState();
     s.acquisition.averaging = { mode: "power", count: 8 };
@@ -367,6 +382,7 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
         outputL: null,
         outputR: null,
       },
+      measures: { inputL: null, inputR: null, outputL: null, outputR: null },
     };
   }
 

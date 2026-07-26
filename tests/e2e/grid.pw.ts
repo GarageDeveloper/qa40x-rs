@@ -68,10 +68,13 @@ test("measure chips carry backend values, TS only formats", async ({ app }) => {
   expect(thd).not.toBe("—");
 
   // "All" adds every measurement in one gesture (and disables ＋ once full).
+  // 18 = the 11 original chips + the 7-strong scope measurement suite
+  // (Vpp/Vmean/AC RMS/Freq/Rise/Fall/Duty — Lot B, issue #26); keep in sync
+  // with MEASURES in src/core/measure.ts.
   await app.setSelect("tile-chip-add-tile-1", "__all__");
   await expect
     .poll(async () => Object.keys(await app.tileChips()).length, { timeout: 5000 })
-    .toBe(11);
+    .toBe(18);
   expect(
     await app.drv.eval(
       () =>

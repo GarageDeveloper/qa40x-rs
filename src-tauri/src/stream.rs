@@ -38,7 +38,10 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel as IpcChannel;
 use tokio::sync::Mutex;
 
-use crate::audio::{AnalysisResult, AudioAnalyzer, SpectrumAnalyzer, SpectrumConfig, WindowFunction};
+use crate::audio::{
+    measure_scope, AnalysisResult, AudioAnalyzer, ScopeValues, SlidingStats, SpectrumAnalyzer,
+    SpectrumConfig, WindowFunction,
+};
 use crate::mixer::{
     auto_output_range, fit_range_with_hysteresis, scale_mix_to_range, ClipLatch, MixerSlotDesc,
     Mixer, SlotError, RANGE_DOWN_HYSTERESIS_DB,
@@ -186,6 +189,19 @@ pub struct TriggerRequest {
     pub output_r: Option<TriggerConfig>,
 }
 
+/// Which endpoints get the scope measurement suite this frame (issue #26
+/// lot B) — the `SpectraRequest` pattern again: the frontend asks only for
+/// endpoints some visible tile's readouts actually measure, the loop skips
+/// the rest entirely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct MeasureRequest {
+    pub input_l: bool,
+    pub input_r: bool,
+    pub output_l: bool,
+    pub output_r: bool,
+}
+
 /// The stream loop's configuration. `stream_update` swaps it atomically; the
 /// loop reads a fresh snapshot every frame.
 #[derive(Clone, Debug, Deserialize, ts_rs::TS)]
@@ -210,6 +226,12 @@ pub struct StreamConfig {
     #[serde(default)]
     #[ts(as = "Option<_>", optional)]
     pub triggers: TriggerRequest,
+    /// Per-endpoint scope measurement request (issue #26 lot B). Same
+    /// old-client compatibility contract as `triggers`: absent JSON = no
+    /// measurements, byte-identical old behavior.
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub measures: MeasureRequest,
 }
 
 /// One stereo digital-full-scale buffer (the summed stimulus actually sent).
@@ -307,6 +329,51 @@ pub struct TriggerMsg {
     pub output_r: Option<TriggerAlign>,
 }
 
+/// One scope measurement + its sliding-window statistics (issue #26 lot B).
+/// `value` is THIS frame's reading (`None` = undefined on this frame — no
+/// qualified crossings / no complete transition — never a fake 0); the
+/// stats cover the last [`MEASURE_STATS_WINDOW`] frames that DID read.
+/// `n == 0` means no reading has landed in the window yet: `avg`/`min`/
+/// `max`/`sd` are then meaningless zeros the frontend must not display.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ScopeStat {
+    pub value: Option<f64>,
+    pub avg: f64,
+    pub min: f64,
+    pub max: f64,
+    /// Sample standard deviation over the window (0 for a single reading).
+    pub sd: f64,
+    pub n: u32,
+}
+
+/// One endpoint's scope measurement suite for the frame. Level metrics are
+/// in the endpoint's own converter FS domain (the frontend converts through
+/// that endpoint's [`LevelOffsetsDb`] entry, like the traces themselves);
+/// times are seconds, `freq_hz` Hz, `duty` a 0..1 ratio.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ScopeMeasures {
+    pub vpp: ScopeStat,
+    pub vmean: ScopeStat,
+    pub rms_ac: ScopeStat,
+    pub freq_hz: ScopeStat,
+    pub rise_s: ScopeStat,
+    pub fall_s: ScopeStat,
+    pub duty: ScopeStat,
+}
+
+/// Per-endpoint measurement suites for the frame — the `SpectraMsg` pattern.
+/// An endpoint the config didn't request is `None`.
+#[derive(Clone, Copy, Debug, Default, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct MeasuresMsg {
+    pub input_l: Option<ScopeMeasures>,
+    pub input_r: Option<ScopeMeasures>,
+    pub output_l: Option<ScopeMeasures>,
+    pub output_r: Option<ScopeMeasures>,
+}
+
 /// Captured-input level state, judged backend-side from the frame's peak
 /// (latched ~100 ms like the clip dots so transients stay visible):
 /// `Near` = within 1 dB of full scale (measurements start degrading),
@@ -360,6 +427,10 @@ pub struct StreamFrame {
     /// Alignment-only scope trigger result (module doc: never gates
     /// `captured`/`spectra`/`metrics` above).
     pub trigger: TriggerMsg,
+    /// Scope measurement suites for the requested endpoints (issue #26
+    /// lot B) — reads the emitted buffers only, same non-gating rule as
+    /// `trigger`.
+    pub measures: MeasuresMsg,
     pub mix: MixStatus,
     pub offsets: LevelOffsetsDb,
     pub stats: StreamStats,
@@ -487,6 +558,7 @@ impl StreamControl {
                 },
                 output_range_dbv: None,
                 triggers: TriggerRequest::default(),
+                measures: MeasureRequest::default(),
             })),
             avg_reset: Arc::new(AtomicBool::new(false)),
         }
@@ -646,6 +718,150 @@ struct TriggerStates {
     input_r: EndpointTrigger,
     output_l: EndpointTrigger,
     output_r: EndpointTrigger,
+}
+
+/// How many recent readings each measurement's sliding statistics cover
+/// (~4 s at the fastest cadence, minutes at big FFT sizes — a DSO-style
+/// "recent history", not an all-time accumulator).
+const MEASURE_STATS_WINDOW: usize = 100;
+
+/// One endpoint's loop-owned sliding statistics — one window PER MEASURE
+/// (a frequency reading must never blend into a Vpp window), one struct
+/// PER ENDPOINT (issue #25's per-endpoint discipline, like
+/// [`EndpointTrigger`]).
+struct EndpointMeasureStats {
+    vpp: SlidingStats,
+    vmean: SlidingStats,
+    rms_ac: SlidingStats,
+    freq_hz: SlidingStats,
+    rise_s: SlidingStats,
+    fall_s: SlidingStats,
+    duty: SlidingStats,
+}
+
+impl Default for EndpointMeasureStats {
+    fn default() -> Self {
+        let w = || SlidingStats::new(MEASURE_STATS_WINDOW);
+        Self {
+            vpp: w(),
+            vmean: w(),
+            rms_ac: w(),
+            freq_hz: w(),
+            rise_s: w(),
+            fall_s: w(),
+            duty: w(),
+        }
+    }
+}
+
+/// Feed one window with this frame's reading (if any) and report the
+/// [`ScopeStat`] wire value. An undefined reading (`None`) leaves the
+/// window untouched — the stats keep describing the frames that DID read.
+fn scope_stat(window: &mut SlidingStats, value: Option<f64>) -> ScopeStat {
+    if let Some(v) = value {
+        window.push(v);
+    }
+    match window.snapshot() {
+        Some(s) => ScopeStat {
+            value: value.filter(|v| v.is_finite()),
+            avg: s.avg,
+            min: s.min,
+            max: s.max,
+            sd: s.sd,
+            n: s.n,
+        },
+        None => ScopeStat { value: None, avg: 0.0, min: 0.0, max: 0.0, sd: 0.0, n: 0 },
+    }
+}
+
+impl EndpointMeasureStats {
+    /// Ingest one frame's values into the seven windows → the wire suite.
+    fn ingest(&mut self, v: &ScopeValues) -> ScopeMeasures {
+        ScopeMeasures {
+            vpp: scope_stat(&mut self.vpp, Some(v.vpp)),
+            vmean: scope_stat(&mut self.vmean, Some(v.vmean)),
+            rms_ac: scope_stat(&mut self.rms_ac, v.rms_ac),
+            freq_hz: scope_stat(&mut self.freq_hz, v.freq_hz),
+            rise_s: scope_stat(&mut self.rise_s, v.rise_s),
+            fall_s: scope_stat(&mut self.fall_s, v.fall_s),
+            duty: scope_stat(&mut self.duty, v.duty),
+        }
+    }
+
+    fn reset(&mut self) {
+        for w in [
+            &mut self.vpp,
+            &mut self.vmean,
+            &mut self.rms_ac,
+            &mut self.freq_hz,
+            &mut self.rise_s,
+            &mut self.fall_s,
+            &mut self.duty,
+        ] {
+            w.reset();
+        }
+    }
+}
+
+/// The four endpoints' measurement statistics (`TriggerStates`' twin).
+#[derive(Default)]
+struct MeasureStates {
+    input_l: EndpointMeasureStats,
+    input_r: EndpointMeasureStats,
+    output_l: EndpointMeasureStats,
+    output_r: EndpointMeasureStats,
+}
+
+impl MeasureStates {
+    /// Build the frame's [`MeasuresMsg`] from the per-frame values. An
+    /// endpoint with no values this frame (not requested, or an output in
+    /// monitor mode) reports `None` AND drops its window — when the suite
+    /// comes back the statistics restart instead of blending a stale
+    /// history into the new signal.
+    fn ingest(&mut self, values: &[Option<ScopeValues>; 4]) -> MeasuresMsg {
+        fn one(st: &mut EndpointMeasureStats, v: &Option<ScopeValues>) -> Option<ScopeMeasures> {
+            match v {
+                Some(v) => Some(st.ingest(v)),
+                None => {
+                    st.reset();
+                    None
+                }
+            }
+        }
+        MeasuresMsg {
+            input_l: one(&mut self.input_l, &values[0]),
+            input_r: one(&mut self.input_r, &values[1]),
+            output_l: one(&mut self.output_l, &values[2]),
+            output_r: one(&mut self.output_r, &values[3]),
+        }
+    }
+}
+
+/// The requested endpoints' per-frame scope measurements — pure values, the
+/// loop owns the statistics. READS the emitted buffers only, same
+/// non-gating contract as `evaluate_trigger`: `analyze_frame` never sees
+/// any of this. An output endpoint in monitor mode (no stimulus) yields
+/// `None` — there is nothing to measure, not a zero.
+fn measure_endpoints(
+    req: &MeasureRequest,
+    captured: &AudioData,
+    stimulus: Option<&StereoFrame>,
+    sample_rate: u32,
+) -> [Option<ScopeValues>; 4] {
+    let fs = sample_rate as f64;
+    let m = |on: bool, samples: Option<&[f32]>| {
+        if on {
+            samples.map(|s| measure_scope(s, fs))
+        } else {
+            None
+        }
+    };
+    [
+        m(req.input_l, Some(&captured.left_channel)),
+        m(req.input_r, Some(&captured.right_channel)),
+        m(req.output_l, stimulus.map(|s| s.left.as_slice())),
+        m(req.output_r, stimulus.map(|s| s.right.as_slice())),
+    ]
 }
 
 /// Evaluate one endpoint's trigger against its already-emitted buffer.
@@ -852,6 +1068,7 @@ async fn run_stream_loop(
     let mut near_in = ClipLatch::default();
     let mut clip_out = ClipLatch::default();
     let mut trigger_states = TriggerStates::default();
+    let mut measure_states = MeasureStates::default();
     let mut last_slots_key = String::new();
     let mut last_averaging: Option<StreamAveraging> = None;
     let mut seq: u64 = 0;
@@ -1065,7 +1282,7 @@ async fn run_stream_loop(
         // being emitted reflects the click (~one frame period sooner than
         // waiting for the next top-of-loop check).
         let reset_now = ctl.avg_reset.swap(false, Ordering::SeqCst);
-        let analysis = {
+        let (analysis, scope_values) = {
             let analyzers = analyzers.clone();
             let config = config.clone();
             let captured = captured.clone();
@@ -1078,12 +1295,26 @@ async fn run_stream_loop(
                         if reset_now {
                             a.reset_accumulation();
                         }
-                        analyze_frame(&mut a, &config, &captured, stimulus.as_ref(), sample_rate)
+                        let analysis =
+                            analyze_frame(&mut a, &config, &captured, stimulus.as_ref(), sample_rate);
+                        // Scope measurement suite (lot B): same blocking
+                        // thread (a Goertzel refinement over a 1M frame is
+                        // real CPU), computed AFTER — and independently of —
+                        // `analyze_frame` (its output never feeds this, this
+                        // never feeds it; the pinned non-interference rule).
+                        let values = measure_endpoints(
+                            &config.measures,
+                            &captured,
+                            stimulus.as_ref(),
+                            sample_rate,
+                        );
+                        (analysis, values)
                     })
             })
             .await
             .map_err(|e| format!("analysis task failed: {e}"))??
         };
+        let measures = measure_states.ingest(&scope_values);
         clip_in.report(analysis.input_peak >= input_clip_threshold, now_ms());
         near_in.report(analysis.input_peak >= input_near_threshold, now_ms());
 
@@ -1100,6 +1331,7 @@ async fn run_stream_loop(
             spectra: analysis.spectra,
             metrics: analysis.metrics,
             trigger,
+            measures,
             mix: MixStatus {
                 sigma_peak_dbv,
                 clip_input: if clip_in.is_lit(now_ms()) {
@@ -1252,6 +1484,7 @@ mod tests {
             spectra: SpectraRequest { input_l: false, input_r: false, output_l: false, output_r: false },
             output_range_dbv: None,
             triggers: TriggerRequest::default(),
+            measures: MeasureRequest::default(),
         }
     }
 
@@ -1299,6 +1532,10 @@ mod tests {
         config_with_trigger.triggers.input_l = Some(default_trigger_cfg());
         config_with_trigger.triggers.output_r =
             Some(TriggerConfig { mode: TriggerMode::Single, ..default_trigger_cfg() });
+        // The lot-B measures request must be exactly as inert here as the
+        // trigger request: `analyze_frame` never reads either field.
+        config_with_trigger.measures =
+            MeasureRequest { input_l: true, input_r: true, output_l: true, output_r: true };
 
         let mut analyzers_a = Analyzers::new();
         let out_a = analyze_frame(&mut analyzers_a, &config_no_trigger, &captured, Some(&stimulus), 48_000);
@@ -1308,5 +1545,109 @@ mod tests {
         assert_eq!(format!("{:?}", out_a.spectra), format!("{:?}", out_b.spectra));
         assert_eq!(format!("{:?}", out_a.metrics), format!("{:?}", out_b.metrics));
         assert_eq!(out_a.input_peak, out_b.input_peak);
+    }
+
+    /* ---- lot B: scope measurement suite ------------------------------- */
+
+    fn sine_frame(n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 997.0 * i as f32 / 48_000.0).sin())
+            .collect()
+    }
+
+    /// Test 13 — `measure_endpoints` computes exactly the requested
+    /// endpoints, and an output endpoint in monitor mode (no stimulus)
+    /// yields `None`, never a fake zero measurement.
+    #[test]
+    fn measure_endpoints_respects_request_and_monitor_mode() {
+        let captured = AudioData {
+            left_channel: sine_frame(4096),
+            right_channel: sine_frame(4096),
+            sample_rate: 48_000,
+        };
+        let req = MeasureRequest { input_l: true, input_r: false, output_l: true, output_r: true };
+
+        // Monitor mode: no stimulus — both output endpoints must be None
+        // even though requested.
+        let vals = measure_endpoints(&req, &captured, None, 48_000);
+        assert!(vals[0].is_some());
+        assert!(vals[1].is_none(), "input_r wasn't requested");
+        assert!(vals[2].is_none(), "output_l has no stimulus in monitor mode");
+        assert!(vals[3].is_none());
+
+        // Tone mode: the requested outputs measure the stimulus.
+        let stim = StereoFrame { left: sine_frame(4096), right: sine_frame(4096) };
+        let vals = measure_endpoints(&req, &captured, Some(&stim), 48_000);
+        assert!(vals[2].is_some());
+        let out_l = vals[2].unwrap();
+        assert!((out_l.vpp - 1.0).abs() < 5e-3, "vpp {}", out_l.vpp);
+        assert!((out_l.freq_hz.unwrap() - 997.0).abs() < 0.5);
+    }
+
+    /// Test 14 — `MeasureStates`: statistics slide across frames, an
+    /// undefined reading leaves its window untouched (value None, stats
+    /// keep their n), and an unrequested endpoint drops its window so a
+    /// re-enable restarts the history.
+    #[test]
+    fn measure_states_slide_and_reset_on_unrequest() {
+        let mut st = MeasureStates::default();
+
+        let frame = |vpp: f64, freq: Option<f64>| ScopeValues {
+            vpp,
+            vmean: 0.0,
+            rms_ac: None,
+            freq_hz: freq,
+            rise_s: None,
+            fall_s: None,
+            duty: None,
+        };
+
+        let m1 = st.ingest(&[Some(frame(1.0, Some(1000.0))), None, None, None]);
+        let il = m1.input_l.expect("input_l requested");
+        assert_eq!(il.vpp.value, Some(1.0));
+        assert_eq!(il.vpp.n, 1);
+        assert_eq!(il.vpp.sd, 0.0);
+        assert!(m1.input_r.is_none());
+
+        let m2 = st.ingest(&[Some(frame(3.0, None)), None, None, None]);
+        let il = m2.input_l.unwrap();
+        assert_eq!(il.vpp.n, 2);
+        assert_eq!(il.vpp.avg, 2.0);
+        assert_eq!((il.vpp.min, il.vpp.max), (1.0, 3.0));
+        // freq had no reading this frame: value None, window still n=1 from
+        // the previous frame (stats describe the frames that DID read).
+        assert_eq!(il.freq_hz.value, None);
+        assert_eq!(il.freq_hz.n, 1);
+        assert_eq!(il.freq_hz.avg, 1000.0);
+        // rise never read: n = 0 marks its stats as meaningless.
+        assert_eq!(il.rise_s.n, 0);
+
+        // Unrequest input_l for one frame: its window drops…
+        let m3 = st.ingest(&[None, None, None, None]);
+        assert!(m3.input_l.is_none());
+        // …so a re-enable restarts the statistics from scratch.
+        let m4 = st.ingest(&[Some(frame(5.0, None)), None, None, None]);
+        let il = m4.input_l.unwrap();
+        assert_eq!(il.vpp.n, 1);
+        assert_eq!(il.vpp.avg, 5.0);
+        assert_eq!(il.freq_hz.n, 0);
+    }
+
+    /// Test 15 — an old/minimal client's JSON without the `measures` key
+    /// deserializes to the all-off default (the `triggers` compatibility
+    /// contract, extended).
+    #[test]
+    fn stream_config_json_without_measures_defaults_off() {
+        let json = r#"{
+            "buffer_size": 8192,
+            "slots": [],
+            "window": "hann",
+            "averaging": { "coherent": false, "count": 1 },
+            "spectra": { "input_l": false, "input_r": false, "output_l": false, "output_r": false },
+            "output_range_dbv": null
+        }"#;
+        let cfg: StreamConfig = serde_json::from_str(json).expect("deserializes");
+        assert_eq!(cfg.measures, MeasureRequest::default());
+        assert!(!cfg.measures.input_l);
     }
 }

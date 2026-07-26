@@ -462,6 +462,20 @@ export class AppV2 {
     );
   }
 
+  /** A tile chip's tooltip (title attribute) — carries the sliding-window
+   * stats line for the scope measurement suite (issue #26 lot B). */
+  async tileChipTitle(tileId: string, key: string): Promise<string> {
+    return this.drv.eval(
+      (a: { tileId: string; key: string }) =>
+        (
+          document.querySelector(
+            `[data-testid="tile-chip-${a.tileId}-${a.key}"]`
+          ) as HTMLElement | null
+        )?.title ?? "",
+      { tileId, key }
+    );
+  }
+
   /** Drag one tile onto another by the handle (pointer-event sequence —
    * the app reorders on pointerdown → move → up, not HTML5 DnD, which the
    * Tauri macOS webview swallows). */

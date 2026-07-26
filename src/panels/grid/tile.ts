@@ -330,6 +330,7 @@ export function createTile(
     onchange: (e: Event) =>
       setTileChipSource(
         store,
+        ipc,
         tileId,
         (e.target as HTMLSelectElement).value as "auto" | TraceId
       ),
@@ -343,12 +344,13 @@ export function createTile(
       if (tile && key === "__all__") {
         setTileMeasures(
           store,
+          ipc,
           tileId,
           // Every chip, keeping the already-shown ones' order first.
           [...tile.measures, ...MEASURES.map((m) => m.key).filter((k) => !tile.measures.includes(k))]
         );
       } else if (tile && key && !tile.measures.includes(key)) {
-        setTileMeasures(store, tileId, [...tile.measures, key]);
+        setTileMeasures(store, ipc, tileId, [...tile.measures, key]);
       }
       (e.target as HTMLSelectElement).value = "";
     },
@@ -815,6 +817,7 @@ export function createTile(
                   if (cur) {
                     setTileMeasures(
                       store,
+                      ipc,
                       tileId,
                       cur.measures.filter((k) => k !== m.key)
                     );
@@ -904,6 +907,7 @@ export function createTile(
         measures:
           srcId && frames ? measuresFor(ipc, srcId, frames.seq, refeed) : null,
         metrics: frames?.metrics ?? null,
+        scope: frames?.scope ?? null,
         offsetDb: (srcId ? s.traces.byId[srcId]?.offsetDb : null) ?? null,
         tdUnit: tile.tdUnit,
         fdUnit: tile.fdUnit,
@@ -913,6 +917,14 @@ export function createTile(
         const def = key ? measureByKey(key) : undefined;
         const valueNode = chip.querySelector(".tile__chip-value");
         if (def && valueNode) valueNode.textContent = def.format(ctx);
+        // Sliding-window stats ride the tooltip (issue #26 lot B) — text
+        // only, the chip itself never changes size (no-layout-shift rule).
+        if (def?.statsTooltip) {
+          const stats = def.statsTooltip(ctx);
+          (chip as HTMLElement).title = stats
+            ? `${def.desc}\n${stats}\n— click to remove`
+            : `${def.desc} — click to remove`;
+        }
       }
     },
 
