@@ -98,6 +98,21 @@ describe("setTriggerMode (review #8)", () => {
     expect(store.get().triggers[HW_TRACE_IDS.inputL]?.mode).toBe("single");
   });
 
+  it("arming raises trigArmPending so the highlight covers the in-flight-frame gap", () => {
+    const { store, ipc } = makeStreamingStore();
+    setTriggerMode(store, ipc, HW_TRACE_IDS.inputL, "single");
+    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+
+    // Clear it by hand (the ingestFrame side is pinned in stream.test.ts),
+    // then a plain Arm click must raise it again.
+    store.update("test/settle", (s) => ({
+      ...s,
+      run: { ...s.run, trigArmPending: {} },
+    }));
+    armSingle(store, ipc, HW_TRACE_IDS.inputL);
+    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+  });
+
   it("switching between non-single modes never touches armEpoch", () => {
     const { store, ipc } = makeStreamingStore();
     setTriggerMode(store, ipc, HW_TRACE_IDS.inputL, "auto");

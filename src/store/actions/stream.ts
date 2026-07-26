@@ -225,9 +225,14 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
     [HW_TRACE_IDS.outputL, frame.trigger.outputL],
     [HW_TRACE_IDS.outputR, frame.trigger.outputR],
   ];
+  // A `stopped` report may come from the in-flight frame captured under the
+  // PRE-re-arm config — any other state proves the current config's scan
+  // ran, and settles a pending Arm (RunState.trigArmPending).
+  const armSettled: string[] = [];
   for (const [id, align] of endpoints) {
     if (!align) continue;
     runTriggers[id] = { state: align.state, index: align.index, frac: align.frac };
+    if (align.state !== "stopped") armSettled.push(id);
     if (align.state === "triggered" || align.state === "auto") {
       putTriggerSnapshot(id, {
         seq,
@@ -271,6 +276,11 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
         // Wholesale replace (not merge): an endpoint the current config no
         // longer triggers must not keep showing a stale state.
         triggers: runTriggers,
+        trigArmPending: armSettled.length
+          ? Object.fromEntries(
+              Object.entries(s.run.trigArmPending).filter(([k]) => !armSettled.includes(k))
+            )
+          : s.run.trigArmPending,
       },
       device: {
         ...s.device,

@@ -233,6 +233,7 @@ export function mountGridPanel(
         // selector (issue #26 review #6).
         s.triggers,
         s.run.triggers,
+        s.run.trigArmPending,
       ]),
     () => {
       const s = store.get();

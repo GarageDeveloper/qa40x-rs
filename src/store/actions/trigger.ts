@@ -37,14 +37,25 @@ export function setTriggerMode(
   endpointId: TraceId,
   mode: TriggerMode
 ): void {
-  patchTrigger(store, "trigger/mode", endpointId, (t) => {
-    if (t.mode === mode) return t;
+  store.update("trigger/mode", (s) => {
+    const cur = s.triggers[endpointId] ?? DEFAULT_TRIGGER;
+    if (cur.mode === mode) return s;
     // Re-selecting SINGLE must always start freshly armed. Without this, a
     // `fired` latch left over from an EARLIER single session (the backend
     // state is independent of whatever mode is currently displayed) makes
     // the chip read "STOP" the instant SINGLE is picked again, before any
-    // new shot has actually fired (issue #26 review #8).
-    return mode === "single" ? { ...t, mode, armEpoch: t.armEpoch + 1 } : { ...t, mode };
+    // new shot has actually fired (issue #26 review #8). The arm-pending
+    // flag keeps the Arm highlight truthful until a frame proves the
+    // re-armed scan ran (see RunState.trigArmPending).
+    const toSingle = mode === "single";
+    const next = toSingle ? { ...cur, mode, armEpoch: cur.armEpoch + 1 } : { ...cur, mode };
+    return {
+      ...s,
+      triggers: { ...s.triggers, [endpointId]: next },
+      run: toSingle
+        ? { ...s.run, trigArmPending: { ...s.run.trigArmPending, [endpointId]: true } }
+        : s.run,
+    };
   });
   syncStream(store, ipc);
 }
@@ -113,6 +124,13 @@ export function setTriggerHystV(
  * it to 0 while the loop's own latch may sit higher, issue #26 review #2),
  * so a duplicate click here is harmless: it just moves to a new value. */
 export function armSingle(store: Store<AppState>, ipc: Ipc, endpointId: TraceId): void {
-  patchTrigger(store, "trigger/arm", endpointId, (t) => ({ ...t, armEpoch: t.armEpoch + 1 }));
+  store.update("trigger/arm", (s) => {
+    const cur = s.triggers[endpointId] ?? DEFAULT_TRIGGER;
+    return {
+      ...s,
+      triggers: { ...s.triggers, [endpointId]: { ...cur, armEpoch: cur.armEpoch + 1 } },
+      run: { ...s.run, trigArmPending: { ...s.run.trigArmPending, [endpointId]: true } },
+    };
+  });
   syncStream(store, ipc);
 }

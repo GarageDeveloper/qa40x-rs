@@ -118,6 +118,13 @@ export interface RunState {
    * (data/triggered.ts). Endpoints the current config doesn't trigger are
    * simply absent. */
   triggers: Record<TraceId, { state: TriggerState; index: number; frac: number }>;
+  /** Endpoints with a SINGLE re-arm in flight: set by armSingle/mode→single,
+   * cleared by the first frame whose trigger state proves the re-armed scan
+   * ran (`waiting`/`triggered`/`auto`). Bridges the gap where the in-flight
+   * frame — captured under the OLD config — still reports `stopped`: at
+   * 1M-FFT frame rates that gap is a visible fraction of a second, and the
+   * Arm highlight must cover it. */
+  trigArmPending: Record<TraceId, boolean>;
   /**
    * Output-only session mode (M2, v1 #49): playing sources drive the DAC
    * gap-free with NO capture — for feeding an external DUT. A property of
@@ -631,6 +638,7 @@ export function initialState(): AppState {
       generatorRunning: false,
       programLock: null,
       triggers: {},
+      trigArmPending: {},
     },
     traces: initialTraces(),
     sources: initialSources(),

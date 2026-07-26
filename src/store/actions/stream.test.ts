@@ -420,6 +420,23 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
     expect(store.get().run.triggers[HW_TRACE_IDS.inputL].state).toBe("stopped");
   });
 
+  it("a pending Arm survives a stale 'stopped' frame and settles on any other state", () => {
+    const store = freshStore();
+    store.update("test/arm", (s) => ({
+      ...s,
+      run: { ...s.run, trigArmPending: { [HW_TRACE_IDS.inputL]: true } },
+    }));
+
+    // The in-flight frame captured under the PRE-re-arm config still says
+    // "stopped" — the pending flag (and the Arm highlight) must hold.
+    ingestFrame(store, frame({ inputL: align("stopped", 0, 0) }));
+    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+
+    // First frame proving the re-armed scan ran settles it.
+    ingestFrame(store, frame({ inputL: align("waiting", 0, 0) }));
+    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBeUndefined();
+  });
+
   it("an endpoint the frame doesn't report is absent from run.triggers", () => {
     const store = freshStore();
     ingestFrame(store, frame({ inputL: align("triggered", 1, 0) }));
