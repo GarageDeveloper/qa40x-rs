@@ -116,8 +116,12 @@
   max-width: 90px;
 }
 
+/* Utility hide toggled from tile.ts per tile kind. !important because it
+ * must beat any later same-specificity display rule (.tile__trigwrap's
+ * inline-flex, defined below, silently won otherwise — the scope trigger
+ * chip stayed visible on sweep/spectrum tiles). */
 .tile__hidden {
-  display: none;
+  display: none !important;
 }
 
 .field--small {
