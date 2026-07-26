@@ -185,6 +185,49 @@ test("chip updates from a gear change even while the stream is STOPPED (review #
   expect(await app.triggerChip("tile-2")).toBe("T ▲ AUTO");
 });
 
+test("the chip's quick menu sets mode and edge without opening the gear", async ({ app }) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  await app.clickTriggerChip("tile-2");
+  expect(await app.triggerMenuOpen("tile-2")).toBe(true);
+  await app.clickTriggerMenuItem("tile-2", "mode-normal");
+  expect(await app.triggerMenuOpen("tile-2")).toBe(false);
+
+  await app.clickTriggerChip("tile-2");
+  await app.clickTriggerMenuItem("tile-2", "edge-falling");
+
+  const s = await app.drv.eval(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: {
+            state(): { triggers: Record<string, { mode: string; edge: string }> };
+          };
+        }
+      ).qa40xV2Debug.state().triggers,
+    undefined as void
+  );
+  expect(s["hw-in-left"].mode).toBe("normal");
+  expect(s["hw-in-left"].edge).toBe("falling");
+  expect(await app.triggerChip("tile-2")).toContain("▼");
+});
+
+test("right-clicking the chip opens the settings straight on the Trigger tab", async ({ app }) => {
+  await app.contextClickTriggerChip("tile-2");
+  // The dialog is open AND the Trigger pane is the visible one (its mode
+  // select is in the DOM without any tab click).
+  const paneShown = await app.drv.eval(
+    () =>
+      document.querySelector('[data-testid="gear-dialog"]') !== null &&
+      document.querySelector('[data-testid="gear-trigger-mode"]') !== null,
+    undefined as void
+  );
+  expect(paneShown).toBe(true);
+  await app.closeDialog();
+});
+
 test("gear Trigger tab round-trips into per-endpoint and per-tile state", async ({ app }) => {
   await app.setTileTrigger("tile-2", {
     mode: "normal",

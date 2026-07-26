@@ -25,7 +25,12 @@ import {
   toggleCurveHidden,
   toggleTraceHidden,
 } from "../../store/actions/layout";
-import { armSingle, setTriggerLevelV } from "../../store/actions/trigger";
+import {
+  armSingle,
+  setTriggerEdge,
+  setTriggerLevelV,
+  setTriggerMode,
+} from "../../store/actions/trigger";
 import { shownTraces } from "../../store/selectors/layout";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
@@ -143,14 +148,110 @@ export function createTile(
     },
   });
   // Scope trigger chip + Arm (Lot A, issue #26): ALWAYS in the DOM (hidden
-  // for non-scope kinds via tile__hidden, same mechanism as timeSel) — only
-  // the chip's text and the Arm button's disabled state change with the
-  // resolved endpoint's mode/edge/state (no-layout-shift invariant).
+  // for non-scope kinds via tile__hidden on the wrapper, same mechanism as
+  // timeSel) — only the chip's text and the Arm button's disabled state
+  // change with the resolved endpoint's mode/edge/state (no-layout-shift
+  // invariant). The chip is a control: click opens the quick trigger menu,
+  // right-click jumps straight to the ⚙ Trigger tab.
+  const TRIG_MODES: { value: TriggerMode; label: string }[] = [
+    { value: "off", label: "Off" },
+    { value: "auto", label: "Auto" },
+    { value: "normal", label: "Normal" },
+    { value: "single", label: "Single" },
+  ];
+  const TRIG_EDGES: { value: TriggerEdge; label: string }[] = [
+    { value: "rising", label: "Rising ▲" },
+    { value: "falling", label: "Falling ▼" },
+  ];
+  const trigMenu = el("div.tile__trigmenu", {
+    "data-testid": `tile-trigmenu-${tileId}`,
+  });
+  trigMenu.hidden = true;
+  // Rebuilt on every open: mode/edge belong to the RESOLVED endpoint (shared
+  // by every tile showing it), so the checkmarks must reflect the store, not
+  // a build-time snapshot.
+  const rebuildTrigMenu = (): void => {
+    const s = store.get();
+    const tile = s.layout.tiles[tileId];
+    if (!tile) return;
+    const sourceId = tileTriggerSourceId(s, tile);
+    const cur = (sourceId ? s.triggers[sourceId] : undefined) ?? DEFAULT_TRIGGER;
+    const item = (
+      testid: string,
+      label: string,
+      active: boolean,
+      onPick: () => void
+    ): HTMLElement => {
+      const btn = el(
+        "button.tile__trigmenu-item",
+        {
+          type: "button",
+          "data-testid": testid,
+          disabled: !sourceId,
+          onclick: () => {
+            trigMenu.hidden = true;
+            onPick();
+          },
+        },
+        (active ? "✓ " : "") + label
+      );
+      btn.classList.toggle("tile__trigmenu-item--active", active);
+      return btn;
+    };
+    trigMenu.replaceChildren(
+      el("div.tile__trigmenu-head", {}, "Mode"),
+      ...TRIG_MODES.map((m) =>
+        item(`tile-trigmenu-${tileId}-mode-${m.value}`, m.label, cur.mode === m.value, () => {
+          if (sourceId) setTriggerMode(store, ipc, sourceId, m.value);
+        })
+      ),
+      el("div.tile__trigmenu-head", {}, "Edge"),
+      ...TRIG_EDGES.map((e2) =>
+        item(`tile-trigmenu-${tileId}-edge-${e2.value}`, e2.label, cur.edge === e2.value, () => {
+          if (sourceId) setTriggerEdge(store, ipc, sourceId, e2.value);
+        })
+      ),
+      el(
+        "button.tile__trigmenu-item",
+        {
+          type: "button",
+          "data-testid": `tile-trigmenu-${tileId}-settings`,
+          onclick: () => {
+            trigMenu.hidden = true;
+            openTileGearDialog(store, ipc, tileId, "trigger");
+          },
+        },
+        "Settings…"
+      )
+    );
+  };
   const trigChip = el(
-    "span.tile__trig",
-    { "data-testid": `tile-trigger-${tileId}`, title: "Scope trigger state" },
+    "button.tile__trig",
+    {
+      type: "button",
+      "data-testid": `tile-trigger-${tileId}`,
+      title: "Scope trigger — click: quick menu, right-click: settings",
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        const willOpen = trigMenu.hidden;
+        if (willOpen) rebuildTrigMenu();
+        trigMenu.hidden = !willOpen;
+        if (willOpen) {
+          document.addEventListener("click", () => (trigMenu.hidden = true), {
+            once: true,
+            capture: true,
+          });
+        }
+      },
+      oncontextmenu: (e: Event) => {
+        e.preventDefault();
+        trigMenu.hidden = true;
+        openTileGearDialog(store, ipc, tileId, "trigger");
+      },
+    },
     "T off"
   );
+  const trigWrap = el("span.tile__trigwrap", {}, trigChip, trigMenu);
   const armBtn = el(
     "button.btn.btn--small",
     {
@@ -300,7 +401,7 @@ export function createTile(
       kindSel,
       unitSel,
       timeSel,
-      trigChip,
+      trigWrap,
       armBtn,
       el("span.tile__spacer"),
       addSel,
@@ -533,7 +634,7 @@ export function createTile(
       // gear value joins the preset list as its own option).
       const isScope = tile.kind === "scope";
       timeSel.classList.toggle("tile__hidden", !isScope);
-      trigChip.classList.toggle("tile__hidden", !isScope);
+      trigWrap.classList.toggle("tile__hidden", !isScope);
       armBtn.classList.toggle("tile__hidden", !isScope);
       if (isScope) {
         const win = tile.timeWindowMs;

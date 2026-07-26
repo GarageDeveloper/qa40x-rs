@@ -657,6 +657,41 @@ export class AppV2 {
     return this.drv.text(`[data-testid="tile-trigger-${tileId}"]`);
   }
 
+  /** Left-click the trigger chip (toggles its quick menu). */
+  async clickTriggerChip(tileId: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigger-${tileId}"]`);
+  }
+
+  /** Whether the chip's quick trigger menu is open. */
+  async triggerMenuOpen(tileId: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { sel: string }) => {
+        const menu = document.querySelector(a.sel) as HTMLElement | null;
+        return menu !== null && !menu.hidden;
+      },
+      { sel: `[data-testid="tile-trigmenu-${tileId}"]` }
+    );
+  }
+
+  /** Click a quick-menu item: `mode-auto`, `edge-falling`, `settings`, ... */
+  async clickTriggerMenuItem(tileId: string, item: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigmenu-${tileId}-${item}"]`);
+  }
+
+  /** Right-click the trigger chip — jumps straight to the ⚙ Trigger tab. */
+  async contextClickTriggerChip(tileId: string): Promise<void> {
+    await this.drv.eval(
+      (a: { sel: string }) => {
+        document
+          .querySelector(a.sel)!
+          .dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true })
+          );
+      },
+      { sel: `[data-testid="tile-trigger-${tileId}"]` }
+    );
+  }
+
   /** Click a tile's Arm button (re-)arms a SINGLE shot. */
   async armTrigger(tileId: string): Promise<void> {
     await this.drv.click(`[data-testid="tile-trigger-arm-${tileId}"]`);

@@ -37,10 +37,13 @@ import {
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
 
+export type GearTab = "graph" | "traces" | "axis" | "trigger";
+
 export function openTileGearDialog(
   store: Store<AppState>,
   ipc: Ipc,
-  tileId: string
+  tileId: string,
+  initialTab: GearTab = "graph"
 ): void {
   const s0 = store.get();
   const tile = s0.layout.tiles[tileId];
@@ -414,7 +417,7 @@ export function openTileGearDialog(
       )
     )
   );
-  showTab(0);
+  showTab(Math.max(0, tabs.findIndex((t) => t.testid === `gear-tab-${initialTab}`)));
 
   const handle = openDialog({
     title: "Graph settings",
