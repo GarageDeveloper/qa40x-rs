@@ -34,13 +34,13 @@ import type {
   ProgramMeta,
   SweepProgramParams,
   TraceMeta,
+  WowFlutterProgramResult,
 } from "../state";
 import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 import { toast } from "./ui";
-import { WOW_FLUTTER_LOCK_ID } from "./wowflutter";
 
 /* ------------------------------------------------------------------ */
 /* Definitions                                                         */
@@ -48,11 +48,21 @@ import { WOW_FLUTTER_LOCK_ID } from "./wowflutter";
 
 let nextProgId = 1;
 
+/** "FR" / "W&F" / "Sweep" — the short noun a sweep program's toasts and
+ * cancellation messages use, generalized over `measurement`. */
+function sweepKindLabel(p: SweepProgramParams): string {
+  if (p.measurement === "fr") return "FR";
+  if (p.measurement === "wowflutter") return "W&F";
+  return "Sweep";
+}
+
 /** Auto-label for a sweep program, from its params (the e2e specs pin this
  * exact shape — "Sweep 20–20000 Hz"). A THD level-axis sweep (issue #27)
- * labels its OWN swept range instead — "Sweep -60–0 dBFS". */
+ * labels its OWN swept range instead — "Sweep -60–0 dBFS"; wow & flutter
+ * labels its reference tone — "W&F 3150 Hz". */
 export function sweepLabel(params: SweepProgramParams): string {
   if (params.measurement === "fr") return `FR ${params.startHz}–${params.endHz} Hz`;
+  if (params.measurement === "wowflutter") return `W&F ${params.wowReferenceHz} Hz`;
   if (params.axis === "level") return `Sweep ${params.startDbfs}–${params.endDbfs} dBFS`;
   return `Sweep ${params.startHz}–${params.endHz} Hz`;
 }
@@ -60,7 +70,7 @@ export function sweepLabel(params: SweepProgramParams): string {
 /** Add a program (+ its result trace under the same id); returns the id. */
 export function addProgram(
   store: Store<AppState>,
-  kind: "thd" | "fr" | "script"
+  kind: "thd" | "fr" | "wowflutter" | "script"
 ): string {
   const s = store.get();
   let id = `prog-${nextProgId++}`;
@@ -83,7 +93,19 @@ export function addProgram(
           run: "idle",
           progress: null,
           startedAtMs: null,
-          params: { ...DEFAULT_SWEEP_PARAMS, measurement: kind },
+          params: {
+            ...DEFAULT_SWEEP_PARAMS,
+            measurement: kind,
+            // A 1 s capture (the shared default, fine for FR's chirp) barely
+            // covers 4 cycles of a 4 Hz wow — 4 s gives a meaningfully
+            // averaged reading (the original one-shot dialog's own default).
+            ...(kind === "wowflutter" ? { durationS: 4 } : {}),
+          },
+          // Always present from creation (like `startedAtMs` above), even
+          // for thd/fr where it's never meaningful — NOT left `undefined`,
+          // which `persist.ts`'s migrate() would then add as `null` on the
+          // very first load and break the save→load digest round-trip.
+          wowResult: null,
         };
   const label =
     program.kind === "sweep" ? sweepLabel(program.params) : `Script ${nextProgId - 1}`;
@@ -151,7 +173,14 @@ function setTraceLabel(store: Store<AppState>, id: string, label: string): void 
 }
 
 /** Reconfigure a sweep program; the label follows the params until the user
- * renames it by hand (a name left at the old auto-label stays auto). */
+ * renames it by hand (a name left at the old auto-label stays auto).
+ *
+ * Converting INTO wow & flutter (issue #28 second-pass review finding #8)
+ * from THD/FR carries over whatever `durationS` those measurements had —
+ * their shared default is 1 s, which barely covers 4 cycles of a 4 Hz wow.
+ * Bump it to 4 s on the conversion itself, same as a fresh wowflutter
+ * program gets from `addProgram` — but only if the user hasn't already
+ * dialed in something longer (never overwrite an explicit choice). */
 export function configureSweepProgram(
   store: Store<AppState>,
   id: string,
@@ -160,14 +189,20 @@ export function configureSweepProgram(
   const prog = store.get().programs.byId[id];
   if (prog?.kind !== "sweep") return;
   const oldAuto = sweepLabel(prog.params);
+  const convertingToWowFlutter =
+    cfg.params.measurement === "wowflutter" && prog.params.measurement !== "wowflutter";
+  const params: SweepProgramParams =
+    convertingToWowFlutter && cfg.params.durationS < 2
+      ? { ...cfg.params, durationS: 4 }
+      : { ...cfg.params };
   patchProgram(store, "programs/configure-sweep", id, (p) =>
-    p.kind === "sweep" ? { ...p, params: { ...cfg.params } } : p
+    p.kind === "sweep" ? { ...p, params } : p
   );
   const custom = cfg.label.trim();
   setTraceLabel(
     store,
     id,
-    custom === "" || custom === oldAuto ? sweepLabel(cfg.params) : custom
+    custom === "" || custom === oldAuto ? sweepLabel(params) : custom
   );
 }
 
@@ -192,7 +227,6 @@ export function configureScriptProgram(
 export function programLockReason(s: AppState): string | null {
   const id = s.run.programLock;
   if (id === null) return null;
-  if (id === WOW_FLUTTER_LOCK_ID) return 'measurement "Wow & flutter" is running';
   const label = s.traces.byId[id]?.label ?? "program";
   return `measurement "${label}" is running`;
 }
@@ -238,7 +272,12 @@ function landProgramFrames(
   });
 }
 
-/** Run a THD-vs-freq / FR sweep through the existing backend programs. */
+/** Run a THD-vs-freq/level, FR, or wow & flutter "sweep" through the
+ * existing backend programs. Wow & flutter (issue #28 second pass) isn't
+ * swept in the usual sense — one capture, one deviation spectrum — but its
+ * result is exactly a curve (modulation rate Hz vs % deviation), so it
+ * lands through the SAME sweep-frame path as THD/FR: freezable, comparable,
+ * persisted, no bespoke rendering. */
 async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<void> {
   const prog = store.get().programs.byId[id];
   if (prog?.kind !== "sweep") return;
@@ -246,16 +285,23 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
   const label = store.get().traces.byId[id]?.label ?? id;
   const wantL = p.channel === "left" || p.channel === "both";
   const wantR = p.channel === "right" || p.channel === "both";
-  toast(store, "info", `${p.measurement === "fr" ? "FR" : "Sweep"} "${label}" started…`);
+  toast(store, "info", `${sweepKindLabel(p)} "${label}" started…`);
 
   let freqs: number[] = [];
   const curves: SweepCurve[] = [];
-  // The x-axis unit landed on the FRAME (issue #27 review finding #1), read
-  // from the backend's OWN `swept` field — never from the requested params,
-  // which can go stale (axis changed in the dialog without a re-run) or
-  // vanish entirely (frozen ❄ / program deleted) while the frame outlives
-  // them.
-  let xUnit: "Hz" | "dBFS" = "Hz";
+  // The x/y-axis units landed on the FRAME (issue #27 review finding #1,
+  // issue #28 second-pass review finding #5), read from the backend's OWN
+  // account — never from the requested params, which can go stale (axis
+  // changed in the dialog without a re-run) or vanish entirely (frozen ❄ /
+  // program deleted) while the frame outlives them. "rateHz" (finding #3)
+  // is wow & flutter's OWN x-axis, distinct from stimulus "Hz".
+  let xUnit: "Hz" | "dBFS" | "rateHz" = "Hz";
+  let yUnit: "dB" | "%" = "dB";
+  // Wow & flutter's scalar readout (weighted/unweighted %, peak, static
+  // offset) — not a point on the curve, landed on the program itself
+  // alongside the frame (review point 4).
+  let wowResult: WowFlutterProgramResult | null = null;
+
   if (p.measurement === "fr") {
     const traces = await ipc.call("measure_frequency_response_multi", {
       startFreq: p.startHz,
@@ -276,6 +322,36 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
         phase_deg: tr.data.phases,
       });
     }
+  } else if (p.measurement === "wowflutter") {
+    const outCh: "Left" | "Right" = p.wowOutputChannel === "right" ? "Right" : "Left";
+    const inCh: "Left" | "Right" = p.wowInputChannel === "right" ? "Right" : "Left";
+    const res = await ipc.call("measure_wow_flutter", {
+      referenceFreq: p.wowReferenceHz,
+      durationSecs: p.durationS,
+      outputChannel: outCh,
+      inputChannel: inCh,
+      generate: p.wowGenerate,
+    });
+    // "rateHz", not "Hz": a DIFFERENT quantity (modulation rate, not
+    // stimulus frequency) with its own axis floor (findings #3/#7) — never
+    // shares an axis with an actual frequency sweep sharing a tile.
+    xUnit = "rateHz";
+    yUnit = "%";
+    // Drop the DC (0 Hz) bin: it's a real backend sample, but 0 has no
+    // place on a log axis — the same reason the old standalone dialog's
+    // own plot skipped it.
+    const pts = res.rate_hz
+      .map((hz, i) => ({ hz, pct: res.spectrum_percent[i] ?? 0 }))
+      .filter((pt) => pt.hz > 0);
+    freqs = pts.map((pt) => pt.hz);
+    curves.push({ label: inCh, values: pts.map((pt) => pt.pct), phase_deg: null });
+    wowResult = {
+      weightedPercent: res.weighted_rms_percent,
+      unweightedPercent: res.unweighted_rms_percent,
+      peakPercent: res.peak_weighted_percent,
+      staticOffsetHz: res.static_offset_hz,
+      referenceFreqUsed: res.reference_freq,
+    };
   } else {
     // THD is single-channel; run once per requested channel.
     const chans: ("Left" | "Right")[] =
@@ -306,6 +382,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
       // not the request — the authoritative source for both the field pick
       // and the unit landed on the frame.
       xUnit = res.swept === "level" ? "dBFS" : "Hz";
+      yUnit = p.metric === "thd_percent" ? "%" : "dB";
       freqs = res.points.map((pt) => (res.swept === "level" ? pt.level_dbfs : pt.frequency));
       curves.push({
         label: ch,
@@ -322,15 +399,21 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
   }
 
   if (sweepCancel.has(id)) {
-    toast(store, "info", `Sweep "${label}" stopped.`);
+    toast(store, "info", `${sweepKindLabel(p)} "${label}" stopped.`);
     return;
   }
-  const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit);
+  const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit, yUnit);
   if (sweep) landProgramFrames(store, id, { sweep });
+  if (wowResult) {
+    const result = wowResult;
+    patchProgram(store, "programs/wow-result", id, (prog2) =>
+      prog2.kind === "sweep" ? { ...prog2, wowResult: result } : prog2
+    );
+  }
   toast(
     store,
     "success",
-    `${p.measurement === "fr" ? "FR" : "Sweep"} "${label}" done (${freqs.length} points).`
+    `${sweepKindLabel(p)} "${label}" done (${freqs.length} points).`
   );
 }
 
@@ -424,9 +507,19 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     if (prog.kind === "sweep") await runSweep(store, ipc, id);
     else await runScript(store, ipc, id);
   } catch (e) {
-    // A mid-capture ⏹ rejects the backend command with "sweep cancelled" —
-    // that's the user's stop, not a failure.
-    if (String(e).includes("sweep cancelled")) toast(store, "info", "Sweep stopped.");
+    // A mid-capture ⏹ rejects the backend command with EXACTLY "sweep
+    // cancelled" (THD/FR) or "wow & flutter measurement cancelled" — that's
+    // the user's stop, not a failure. A loose substring match here is
+    // unsafe (issue #28 second-pass review finding #2): a genuine USB
+    // disconnect mid-capture surfaces as e.g. "wow & flutter measurement
+    // failed: USB transfer error: transfer was cancelled" (nusb's
+    // `TransferError::Cancelled`, wrapped by the backend's generic error
+    // path) — that message CONTAINS "cancelled" too, but is a real failure,
+    // not a user-initiated stop, and must toast as an error.
+    const msg = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+    const isUserCancel = msg === "sweep cancelled" || msg === "wow & flutter measurement cancelled";
+    const kindLabel = prog.kind === "sweep" ? sweepKindLabel(prog.params) : "Program";
+    if (isUserCancel) toast(store, "info", `${kindLabel} stopped.`);
     else toast(store, "error", `Program failed: ${e}`);
   } finally {
     sweepCancel.delete(id);
@@ -473,6 +566,14 @@ export function sweepEstimateSeconds(
   const p = prog.params;
   const chans = p.channel === "both" ? 2 : 1;
   if (p.measurement === "fr") return p.durationS + 2;
+  if (p.measurement === "wowflutter") {
+    // The backend clamps the capture to [1, 15] s regardless of what's
+    // asked (`measure_wow_flutter`'s `duration_secs.clamp(1.0, 15.0)`,
+    // issue #28 second-pass review finding #4) — an unclamped estimate off
+    // a dialog value outside that range would run the progress percentage
+    // far past (or well short of) the ACTUAL capture length.
+    return Math.min(15, Math.max(1, p.durationS)) + 2;
+  }
   const segment = 32768 + 2 * 2048;
   return (chans * p.points * segment) / Math.max(1, sampleRate) + 2;
 }

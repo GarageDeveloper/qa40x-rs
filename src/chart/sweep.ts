@@ -73,8 +73,8 @@ export class WrappedSweepChart implements SweepRenderer {
     this.chart.setYUnit(label);
   }
 
-  setXUnit(unit: "Hz" | "dBFS"): void {
-    this.chart.setXKind(unit === "dBFS" ? "level" : "frequency");
+  setXUnit(unit: "Hz" | "dBFS" | "rateHz"): void {
+    this.chart.setXKind(unit === "dBFS" ? "level" : unit === "rateHz" ? "rateHz" : "frequency");
   }
 
   setShowPhase(on: boolean): void {

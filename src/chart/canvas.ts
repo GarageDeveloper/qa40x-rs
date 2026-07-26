@@ -1335,10 +1335,15 @@ export class FrequencyResponseChart extends InteractiveLogChart {
   private readonly fixedRange: [number, number] = [-80, 20];
   /** Y-axis unit caption (e.g. "dB", "%"); reflects the plotted quantity. */
   private yUnit = "dB";
-  /** X-axis semantic (issue #27): "frequency" — log Hz, octave marker deltas
-   * (THD-vs-frequency / FR, the original shape) — or "level" — linear dBFS,
-   * plain dB deltas (THD-vs-level). Drives `xScale` (inherited) too. */
-  private xKind: "frequency" | "level" = "frequency";
+  /** X-axis semantic: "frequency" — log Hz, ≥1 Hz floor, octave marker
+   * deltas (THD-vs-frequency / FR, the original shape, issue #27) —
+   * "level" — linear dBFS, plain dB deltas (THD-vs-level, issue #27) — or
+   * "rateHz" — log Hz like "frequency" but with a sub-1 Hz floor instead of
+   * the ≥1 Hz clamp (wow & flutter's deviation spectrum, issue #28 second
+   * pass: a 33⅓ rpm once-per-revolution wow sits at 0.555 Hz, below the
+   * frequency-sweep floor that exists to keep log10(0) out of the picture).
+   * Drives `xScale` (inherited) too. */
+  private xKind: "frequency" | "level" | "rateHz" = "frequency";
 
   constructor(container: HTMLElement) {
     super(container, "Run a sweep to plot the response");
@@ -1352,10 +1357,11 @@ export class FrequencyResponseChart extends InteractiveLogChart {
     this.render();
   }
 
-  /** Set the X-axis semantic — "frequency" (log Hz) or "level" (linear
-   * dBFS, THD-vs-level, issue #27). The old viewport doesn't carry over
-   * across a kind switch (its units just changed meaning). */
-  setXKind(kind: "frequency" | "level"): void {
+  /** Set the X-axis semantic — "frequency" (log Hz, ≥1 Hz floor), "level"
+   * (linear dBFS, THD-vs-level, issue #27), or "rateHz" (log Hz, sub-1 Hz
+   * floor, wow & flutter, issue #28 second pass). The old viewport doesn't
+   * carry over across a kind switch (its units just changed meaning). */
+  setXKind(kind: "frequency" | "level" | "rateHz"): void {
     if (kind === this.xKind) return;
     this.xKind = kind;
     this.xScale = kind === "level" ? "linear" : "log";
@@ -1484,15 +1490,22 @@ export class FrequencyResponseChart extends InteractiveLogChart {
     const { plot } = this;
     if (plot.w < 40 || plot.h < 40) return;
 
-    // "level" (issue #27) is a linear dBFS axis: no Hz floor-at-1, and the
-    // full extent is stored RAW (fwd()/inv() are identity in linear mode) —
-    // "frequency" keeps the original log10(Hz) extent.
+    // "level" (issue #27) is a linear dBFS axis: no Hz floor, and the full
+    // extent is stored RAW (fwd()/inv() are identity in linear mode) —
+    // "frequency" keeps the original log10(Hz) extent floored at 1 Hz
+    // (UNCHANGED — issue #28 second-pass review finding #3 requires this
+    // exact clamp stays put for real "Hz" data). "rateHz" is log10 too but
+    // floored two decades lower: a 33⅓ rpm once-per-revolution wow sits at
+    // 0.555 Hz, and the demod's own bin resolution can go under 0.1 Hz on a
+    // long capture — clamping those away at 1 Hz would hide the headline
+    // defect the "Tape / turntable" template exists to catch.
     const isLevel = this.xKind === "level";
-    let fMin = isLevel ? d.frequencies[0] : Math.max(1, d.frequencies[0]);
+    const freqFloor = this.xKind === "rateHz" ? 0.1 : 1;
+    let fMin = isLevel ? d.frequencies[0] : Math.max(freqFloor, d.frequencies[0]);
     let fMax = d.frequencies[d.frequencies.length - 1];
     for (const o of this.overlays) {
       if (o.frequencies.length) {
-        fMin = Math.min(fMin, isLevel ? o.frequencies[0] : Math.max(1, o.frequencies[0]));
+        fMin = Math.min(fMin, isLevel ? o.frequencies[0] : Math.max(freqFloor, o.frequencies[0]));
         fMax = Math.max(fMax, o.frequencies[o.frequencies.length - 1]);
       }
     }

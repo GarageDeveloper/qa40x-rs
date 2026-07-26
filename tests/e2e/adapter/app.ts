@@ -411,6 +411,25 @@ export class AppV2 {
     );
   }
 
+  /** A tile's "+" add-trace picker: the trace ids currently OFFERED (the
+   * blank "＋" placeholder option excluded) — issue #28 second-pass review
+   * finding #9's domain filter (spectrum → fd, scope → td, sweep → sweep,
+   * a domain-less trace listed everywhere). */
+  async addTraceOptions(tileId = "tile-1"): Promise<string[]> {
+    return this.drv.eval(
+      (a: { tileId: string }) => {
+        const sel = document.querySelector(
+          `[data-testid="tile-add-trace-${a.tileId}"]`
+        ) as HTMLSelectElement | null;
+        if (!sel) return [];
+        return Array.from(sel.options)
+          .map((o) => o.value)
+          .filter((v) => v !== "");
+      },
+      { tileId }
+    );
+  }
+
   /** Set a tile's display unit (fd or td — the same per-tile selector). */
   async setTileUnit(unit: string, tileId = "tile-1"): Promise<void> {
     await this.setSelect(`tile-unit-${tileId}`, unit);
@@ -873,7 +892,7 @@ export class AppV2 {
 
   /** Add a program via the panel's "+" menu; closes the auto-opened config
    * dialog and returns the new program id. */
-  async addProgram(kind: "thd" | "fr" | "script"): Promise<string> {
+  async addProgram(kind: "thd" | "fr" | "wowflutter" | "script"): Promise<string> {
     await this.drv.click('[data-testid="btn-add-program"]');
     await this.drv.click(`[data-testid="add-prog-${kind}"]`);
     await this.closeDialog();

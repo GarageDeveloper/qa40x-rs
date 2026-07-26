@@ -754,7 +754,10 @@ export class FakeDevice {
     if (this.programGate) {
       const gate = this.programGate;
       await new Promise<void>((resolve, reject) => {
-        this.wowFlutterCancel = () => reject(new Error("wow & flutter measurement cancelled (fake)"));
+        // EXACT match to the real backend's cancel message (issue #28
+        // second-pass review finding #2 — the frontend now matches this
+        // string exactly, not by substring, so it must not drift).
+        this.wowFlutterCancel = () => reject(new Error("wow & flutter measurement cancelled"));
         gate.then(resolve);
       }).finally(() => {
         this.wowFlutterCancel = null;

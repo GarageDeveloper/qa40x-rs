@@ -7,7 +7,6 @@
  * it; while one runs, every other transport is disabled with the reason.
  */
 import "./panel.css";
-import { shallowEq } from "../../store/store";
 import type { Store } from "../../store/store";
 import type { AppState, ProgramMeta } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
@@ -24,7 +23,6 @@ import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openSweepDialog } from "./sweepdialog";
 import { openProgramScriptDialog } from "./scriptdialog";
-import { openWowFlutterDialog } from "./wowflutterdialog";
 
 interface RowVM {
   prog: ProgramMeta;
@@ -35,9 +33,10 @@ interface RowVM {
   lock: string | null;
 }
 
-const ADD_PROGRAMS: { kind: "thd" | "fr" | "script"; label: string }[] = [
-  { kind: "thd", label: "Sweep (THD vs freq)" },
+const ADD_PROGRAMS: { kind: "thd" | "fr" | "wowflutter" | "script"; label: string }[] = [
+  { kind: "thd", label: "Sweep (THD vs freq/level)" },
   { kind: "fr", label: "Frequency Response" },
+  { kind: "wowflutter", label: "Wow & Flutter" },
   { kind: "script", label: "Script (measure / plot)" },
 ];
 
@@ -46,7 +45,68 @@ function typeLabel(p: ProgramMeta): string {
     return p.role === "measurement" ? "Script · measure" : "Script · plot";
   }
   if (p.params.measurement === "fr") return "Freq response";
+  if (p.params.measurement === "wowflutter") return "Wow & flutter";
   return p.params.axis === "level" ? "THD vs level" : "THD vs freq";
+}
+
+/** Cents of a Hz offset around a reference tone (100 ¢ = one semitone) — a
+ * musician-legible complement to the raw Hz static-offset reading. `null`
+ * when the ratio isn't meaningful (never `-Infinity`). */
+function centsOffset(offsetHz: number, referenceHz: number): number | null {
+  if (referenceHz <= 0) return null;
+  const ratio = 1 + offsetHz / referenceHz;
+  if (!(ratio > 0)) return null;
+  return 1200 * Math.log2(ratio);
+}
+
+function fmtSigned(v: number, digits: number, unit: string): string {
+  return `${v >= 0 ? "+" : ""}${v.toFixed(digits)} ${unit}`;
+}
+
+/**
+ * A program's scalar-readout line: "—" for anything that isn't a wow &
+ * flutter program (thd/fr/script), else "not run yet" before its first
+ * successful run, then weighted/unweighted %, peak %, and the static
+ * frequency offset (Hz + cents, against the backend's ACTUALLY-used
+ * reference frequency, surfaced with an "@ N Hz" note when the backend's
+ * Nyquist clamp moved it away from what was asked — issue #28 second pass,
+ * review points 4/9).
+ *
+ * ALWAYS called for every program row (see `build()`/`update()`) — the
+ * line itself is unconditionally present on every card, never created or
+ * destroyed based on `measurement`. Two real bugs came from the earlier
+ * "only build this DOM node for a wowflutter program" approach (issue #28
+ * second-pass review finding #1): (A) `configureSweepProgram` can convert a
+ * program's `measurement` from "thd" to "wowflutter" via the gear dialog
+ * AFTER the row already exists — `keyedList` (keyed on the program id)
+ * only calls `create()` once per id, so a converted program's scalars had
+ * no DOM slot to land in, ever; (B) two workspaces loaded back to back can
+ * reuse the same `prog-N` id across a kind change, leaving a stale
+ * conditionally-built node (or a missing one) behind. A row's `measurement`
+ * is READ FRESH from `prog` on every call here — there is nothing left to
+ * go stale.
+ */
+export function wowSummary(prog: ProgramMeta): string {
+  if (prog.kind !== "sweep" || prog.params.measurement !== "wowflutter") return "—";
+  const r = prog.wowResult;
+  if (!r) return "not run yet";
+  const cents = centsOffset(r.staticOffsetHz, r.referenceFreqUsed);
+  const offset =
+    cents === null
+      ? fmtSigned(r.staticOffsetHz, 2, "Hz")
+      : `${fmtSigned(r.staticOffsetHz, 2, "Hz")} (${fmtSigned(cents, 1, "¢")})`;
+  // The backend clamps reference_freq to [20, 0.9·Nyquist] — surface it
+  // when it actually moved (review finding #4), rather than silently
+  // reporting scalars measured at a DIFFERENT tone than the one asked for.
+  const usedNote =
+    Math.abs(r.referenceFreqUsed - prog.params.wowReferenceHz) > 0.5
+      ? ` @ ${r.referenceFreqUsed.toFixed(0)} Hz`
+      : "";
+  return (
+    `weighted ${r.weightedPercent.toFixed(3)}% (DIN approx.) · ` +
+    `unweighted ${r.unweightedPercent.toFixed(3)}% · ` +
+    `peak ${r.peakPercent.toFixed(3)}%${usedNote} · offset ${offset}`
+  );
 }
 
 function openDialogFor(
@@ -106,21 +166,6 @@ export function mountProgramsPanel(
     "+"
   );
 
-  // Wow & flutter (issue #28) is a one-shot dialog, not a persisted program
-  // (see store/actions/wowflutter.ts) — its own button beside "+", not an
-  // entry in the add-program menu. Short label: at the default sidebar
-  // width, "Wow & flutter…" wrapped onto two lines and doubled this header's
-  // height on every workspace (issue #28 review point 8).
-  const wfBtn = el(
-    "button.btn.btn--small",
-    {
-      type: "button",
-      "data-testid": "btn-wow-flutter",
-      onclick: () => openWowFlutterDialog(store, ipc),
-    },
-    "W&F…"
-  ) as HTMLButtonElement;
-
   const head = el(
     "div.programs__head",
     {},
@@ -133,8 +178,7 @@ export function mountProgramsPanel(
       },
       "exclusive · one at a time"
     ),
-    el("div.programs__addwrap", {}, addBtn, menu),
-    wfBtn
+    el("div.programs__addwrap", {}, addBtn, menu)
   );
   const section = el(
     "section.programs",
@@ -193,6 +237,11 @@ export function mountProgramsPanel(
       title: "Trace color — click to change",
     }) as HTMLInputElement;
     dot.addEventListener("input", () => setTraceColor(store, id, dot.value));
+    // The scalar-readout line is UNCONDITIONAL — every program row gets one
+    // (see `wowSummary`'s doc comment for why the old "only for a
+    // wowflutter program" approach was a real bug, issue #28 second-pass
+    // review finding #1). No-layout-shift too: the slot's PRESENCE never
+    // changes across any state, only its text.
     return el(
       "div.programs__row",
       {},
@@ -207,7 +256,8 @@ export function mountProgramsPanel(
         freeze,
         remove
       ),
-      el("div.programs__type", { "data-testid": `prog-type-${id}` })
+      el("div.programs__type", { "data-testid": `prog-type-${id}` }),
+      el("div.programs__wow", { "data-testid": `prog-wow-${id}` })
     );
   };
 
@@ -223,6 +273,16 @@ export function mountProgramsPanel(
     type.textContent = running
       ? `${typeLabel(vm.prog)} · ${programProgressText(vm.prog, sr, performance.now())}`
       : typeLabel(vm.prog);
+
+    // nowrap + ellipsis (.programs__wow, panel.css) clips the ~100-char
+    // readout instead of wrapping the card to 3 lines and growing it on
+    // the first ▶ (issue #28 second-pass review finding #6) — the full
+    // text still reaches the user via the native title tooltip, same
+    // pattern as `.programs__name`.
+    const wow = node.querySelector<HTMLElement>(`[data-testid="prog-wow-${id}"]`)!;
+    const summary = wowSummary(vm.prog);
+    wow.textContent = summary;
+    wow.title = summary;
 
     const play = node.querySelector<HTMLButtonElement>(`[data-testid="prog-play-${id}"]`)!;
     play.textContent = running ? "⏹" : "▶";
@@ -271,23 +331,6 @@ export function mountProgramsPanel(
       render();
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)
-  );
-
-  // Wow & flutter's own button greys out under the SAME rules every other
-  // transport does (issue #28 review point 10a): another exclusive
-  // measurement running, or no device connected.
-  store.select(
-    (s) => ({
-      lock: programLockReason(s),
-      connected: s.device.status === "connected",
-    }),
-    ({ lock, connected }) => {
-      wfBtn.disabled = !connected || lock !== null;
-      wfBtn.title = !connected
-        ? "Connect the device first — this measurement drives the hardware."
-        : (lock ?? "Wow & flutter — DIN/IEC 386 approximation on a reference tone");
-    },
-    shallowEq
   );
 
   // Tick the acquisition estimate while a program runs (the backend is

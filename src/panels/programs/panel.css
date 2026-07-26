@@ -122,6 +122,24 @@
   color: var(--ink-3);
 }
 
+/* Every program card's scalar-readout line (issue #28 second pass) — "—"
+   for thd/fr/script, the wow & flutter readout otherwise; UNCONDITIONALLY
+   present (panel.ts's `build()`), so a conversion via the gear dialog or a
+   fresh run only ever changes this line's TEXT, never its presence.
+   nowrap + ellipsis (review finding #6): the ~100-char wow & flutter
+   readout otherwise wraps to ~3 lines in the default 320 px sidebar and
+   grows the card on the first ▶ — clip it instead, full text in `title`
+   (same pattern as `.programs__name`). */
+.programs__wow {
+  padding-left: 16px;
+  font-size: 10px;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The measurement-script dialog extras (panels/programs/scriptdialog.ts) —
    editor base styles ride .scriptdialog from the sources dialog. */
 .scriptdialog__bar {
