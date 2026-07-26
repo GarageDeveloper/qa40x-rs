@@ -12,12 +12,14 @@ import type {
   DeviceConfig,
   DeviceMeta,
   LevelOffsetsDb,
+  LevelResult,
   RestStatus,
   ScriptRole,
   SlotError,
   Telemetry,
   TransformStep,
   TriggerState,
+  UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
 
@@ -406,6 +408,39 @@ export interface UiState {
   peakHoldEpoch: number;
 }
 
+/**
+ * The frontend's currently loaded user weighting curve (issue #29): display
+ * configuration, persisted in the WORKSPACE document (never keyed on "the
+ * device" — issue #25 — a curve is a bench-wide setting, like a notch's Q).
+ * `name` is display-only (the imported file's name); the backend never sees
+ * it — each `TransformStep::Weighting { mode: "user" }` step embeds its own
+ * snapshot of `curve` at Apply time, so the backend stays a pure function of
+ * its parameters.
+ */
+export interface WeightingState {
+  userCurve: UserWeightingCurve | null;
+  userCurveName: string | null;
+}
+
+/**
+ * The Levels panel (issue #29 — exposes `measure_levels`): one exclusive
+ * generate+capture, like a sweep program but a single scalar result, not a
+ * trace. Transient — excluded from the workspace document (the acquisition
+ * knobs default fresh each session, like the sweep dialogs' own params
+ * would if they weren't attached to a saved program).
+ */
+export interface LevelsState {
+  inputChannel: Chan;
+  outputChannel: Chan;
+  durationSecs: number;
+  generate: boolean;
+  stimulusFreqHz: number;
+  stimulusDbfs: number;
+  running: boolean;
+  result: LevelResult | null;
+  error: string | null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Layout (M3): the multi-tile graph grid.                              */
 /* ------------------------------------------------------------------ */
@@ -514,6 +549,10 @@ export interface AppState {
   /** Per-endpoint trigger settings, keyed by `HW_TRACE_IDS.*` (plan §3.2).
    * Read-through default: an absent entry means `DEFAULT_TRIGGER` ("off"). */
   triggers: Record<TraceId, TriggerSettings>;
+  /** The bench's loaded user weighting curve (issue #29), workspace-persisted. */
+  weighting: WeightingState;
+  /** The Levels panel's params/result (issue #29), transient. */
+  levels: LevelsState;
 }
 
 export const FFT_SIZES = [
@@ -718,5 +757,17 @@ export function initialState(): AppState {
       peakHoldEpoch: 0,
     },
     triggers: {},
+    weighting: { userCurve: null, userCurveName: null },
+    levels: {
+      inputChannel: "left",
+      outputChannel: "left",
+      durationSecs: 1,
+      generate: true,
+      stimulusFreqHz: 1000,
+      stimulusDbfs: -20,
+      running: false,
+      result: null,
+      error: null,
+    },
   };
 }

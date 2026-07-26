@@ -30,10 +30,53 @@ pub enum WeightingMode {
 /// A user-loaded weighting curve: ascending `freqs` (Hz) with matching
 /// `gains` (dB to ADD at that frequency). Interpolated log-frequency /
 /// linear-dB, held flat beyond the endpoints.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Issue #29: this is display configuration the frontend imports from a CSV
+/// and stores in the WORKSPACE document (never module-global state here —
+/// callers pass it in per `TransformStep::Weighting { mode: User, curve }`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct UserWeightingCurve {
     pub freqs: Vec<f64>,
     pub gains: Vec<f64>,
+}
+
+impl UserWeightingCurve {
+    /// Validate this curve is usable for log-frequency interpolation: same
+    /// length, non-empty, every frequency finite and strictly positive
+    /// (`.ln()` of 0/negative is NaN/undefined), strictly ascending (the
+    /// interpolation's binary search assumes it). A curve built by the
+    /// frontend's CSV importer (core/weightingcurve.ts) always satisfies
+    /// this; this guards the OTHER path in — a `TransformStep` handed
+    /// straight over IPC/REST — from poisoning the whole spectrum with NaN
+    /// (issue #29 review finding #5).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.freqs.len() != self.gains.len() {
+            return Err(format!(
+                "freqs/gains length mismatch ({} vs {})",
+                self.freqs.len(),
+                self.gains.len()
+            ));
+        }
+        if self.freqs.is_empty() {
+            return Err("curve has no points".to_string());
+        }
+        let mut prev = 0.0f64;
+        for (i, &f) in self.freqs.iter().enumerate() {
+            if !(f.is_finite() && f > 0.0) {
+                return Err(format!("point {i}: frequency {f} is not a positive finite number"));
+            }
+            // `f` is already known finite (checked above), so a plain `<=`
+            // is the exact, non-negated equivalent of "not strictly ascending".
+            if i > 0 && f <= prev {
+                return Err(format!(
+                    "point {i}: frequency {f} is not strictly ascending after {prev}"
+                ));
+            }
+            prev = f;
+        }
+        Ok(())
+    }
 }
 
 /// Raw (unnormalized) A-weighting transfer magnitude at frequency f.
@@ -85,6 +128,17 @@ pub fn user_weight_gain_db(curve: &UserWeightingCurve, f: f64) -> f64 {
         } else {
             hi = mid;
         }
+    }
+    // Defensive backstop (belt-and-suspenders alongside `validate()`, called
+    // once by `dashboard::apply_transform_chain` before the per-bin loop): a
+    // non-positive bracket frequency would poison `ln()` with NaN/-Inf for a
+    // curve nobody validated (e.g. handed straight over IPC) — fall back to
+    // the lower point's gain rather than propagating garbage through the
+    // whole spectrum.
+    // Non-negated equivalent of `!(x > 0.0)` (NaN included) — a bare `<= 0.0`
+    // would silently let a NaN bracket frequency through to `.ln()` below.
+    if freqs[lo].is_nan() || freqs[lo] <= 0.0 || freqs[hi].is_nan() || freqs[hi] <= 0.0 {
+        return gains[lo];
     }
     let t = (f.ln() - freqs[lo].ln()) / (freqs[hi].ln() - freqs[lo].ln());
     gains[lo] + t * (gains[hi] - gains[lo])
@@ -202,6 +256,49 @@ mod tests {
         assert_eq!(user_weight_gain_db(&empty, 1000.0), 0.0);
         let mismatched = UserWeightingCurve { freqs: vec![100.0, 1000.0], gains: vec![3.0] };
         assert_eq!(user_weight_gain_db(&mismatched, 500.0), 0.0);
+    }
+
+    #[test]
+    fn validate_accepts_a_well_formed_curve_and_names_each_defect() {
+        let good = UserWeightingCurve { freqs: vec![20.0, 100.0, 1000.0], gains: vec![-6.0, 0.0, 12.0] };
+        assert!(good.validate().is_ok());
+
+        let mismatched = UserWeightingCurve { freqs: vec![100.0, 1000.0], gains: vec![3.0] };
+        assert!(mismatched.validate().is_err());
+
+        let empty = UserWeightingCurve { freqs: vec![], gains: vec![] };
+        assert!(empty.validate().is_err());
+
+        // freq 0 (or negative) would poison ln() with NaN/-Inf.
+        let non_positive = UserWeightingCurve { freqs: vec![0.0, 1000.0], gains: vec![0.0, 12.0] };
+        assert!(non_positive.validate().is_err());
+        let negative = UserWeightingCurve { freqs: vec![-10.0, 1000.0], gains: vec![0.0, 12.0] };
+        assert!(negative.validate().is_err());
+
+        // Not strictly ascending (equal or reversed).
+        let flat_step = UserWeightingCurve { freqs: vec![100.0, 100.0], gains: vec![0.0, 3.0] };
+        assert!(flat_step.validate().is_err());
+        let reversed = UserWeightingCurve { freqs: vec![1000.0, 100.0], gains: vec![0.0, 3.0] };
+        assert!(reversed.validate().is_err());
+
+        // NaN/infinite frequency.
+        let nan = UserWeightingCurve { freqs: vec![f64::NAN, 1000.0], gains: vec![0.0, 3.0] };
+        assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn an_invalid_curve_never_produces_nan_or_infinite_gain() {
+        // A curve nobody validated (freq 0 mid-array) must not poison the
+        // WHOLE spectrum with NaN — every queried point stays finite.
+        let curve = UserWeightingCurve {
+            freqs: vec![0.0, 1000.0, 10000.0],
+            gains: vec![0.0, 12.0, -3.0],
+        };
+        assert!(curve.validate().is_err());
+        for f in [10.0, 100.0, 500.0, 999.0, 1000.0, 5000.0, 10000.0, 20000.0] {
+            let g = user_weight_gain_db(&curve, f);
+            assert!(g.is_finite(), "f={f} gave non-finite gain {g}");
+        }
     }
 
     #[test]

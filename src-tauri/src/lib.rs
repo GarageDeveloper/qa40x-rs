@@ -1191,6 +1191,46 @@ async fn measure_wow_flutter(
         })
 }
 
+/// Measure signal/noise levels on `input_channel`: unweighted / A / C RMS +
+/// peak (dBFS), plus absolute Vrms/dBV/dBu via calibration (issue #29 — the
+/// UI's counterpart to the THD/FR sweeps: a single exclusive-device
+/// generate+capture, no progress events). With `generate` a stimulus tone
+/// plays (self-test); otherwise silence is sent and the input is monitored
+/// (e.g. a DUT's own noise floor).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command: args map 1:1 to the UI form.
+async fn measure_levels(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    input_channel: qa40x::Channel,
+    output_channel: qa40x::Channel,
+    duration_secs: f32,
+    generate: bool,
+    stimulus_freq: f32,
+    stimulus_dbfs: f32,
+) -> Result<audio::LevelResult, String> {
+    let (device, running, stop) = {
+        let app_state = state.lock().await;
+        (
+            app_state.device.clone(),
+            app_state.generator_running.clone(),
+            app_state.generator_stop.clone(),
+        )
+    };
+    ensure_generator_stopped(&running, &stop).await;
+    let device = device.lock().await;
+    device
+        .measure_levels(
+            input_channel,
+            output_channel,
+            duration_secs,
+            generate,
+            stimulus_freq,
+            stimulus_dbfs,
+        )
+        .await
+        .map_err(|e| format!("levels measurement failed: {}", e))
+}
+
 // ---- Test plans (reusable measurement recipes) ----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1301,6 +1341,7 @@ pub fn run() {
             measure_thd_vs_frequency,
             measure_thd_vs_level,
             measure_wow_flutter,
+            measure_levels,
             firmware::extract_firmware_from_exe,
             firmware::extract_firmware_from_setup,
             firmware::list_qa40x_releases,

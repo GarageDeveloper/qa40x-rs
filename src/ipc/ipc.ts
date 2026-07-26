@@ -21,6 +21,7 @@ import type {
   FrameMeasures,
   FrequencyResponseTrace,
   InputDbvOffset,
+  LevelResult,
   MixerSlotDesc,
   OutputOnlyStatus,
   ReleaseInfo,
@@ -168,6 +169,20 @@ export interface Commands {
       generate: boolean;
     };
     result: WowFlutterResult;
+  };
+  // Levels (issue #29): unweighted / A / C RMS + peak, plus absolute
+  // Vrms/dBV/dBu via calibration. One exclusive generate+capture, no
+  // progress events — same device-lock family as the sweeps above.
+  measure_levels: {
+    args: {
+      inputChannel: Channel;
+      outputChannel: Channel;
+      durationSecs: number;
+      generate: boolean;
+      stimulusFreq: number;
+      stimulusDbfs: number;
+    };
+    result: LevelResult;
   };
 
   // Measurement scripts (M4): the run streams `script-log` / `script-frame`

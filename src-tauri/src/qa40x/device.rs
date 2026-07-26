@@ -1818,9 +1818,17 @@ impl QA40xDevice {
         let duration = duration_secs.clamp(0.2, 15.0);
         let n = (sample_rate as f32 * duration) as usize;
 
+        // The stimulus is a raw tone (no coherent-gen bin snap, unlike the
+        // dashboard mixer) — clamp to the Nyquist-alias ceiling so a request
+        // above it doesn't silently play a folded-back frequency and report
+        // levels for a tone that was never actually generated (issue #29
+        // review finding #1; same 0.98·Nyquist policy as the frontend's
+        // `playedFrequencyHz`, not the sweep's 0.45·Nyquist — THD needs
+        // harmonic headroom, a level reading only needs the fundamental).
+        let effective_freq = effective_stimulus_freq(stimulus_freq, sample_rate);
         let stim = if generate {
             let amp = 10.0f32.powf(stimulus_dbfs.clamp(-80.0, 0.0) / 20.0);
-            crate::utils::SignalGenerator::sine(stimulus_freq, amp, sample_rate, n)
+            crate::utils::SignalGenerator::sine(effective_freq, amp, sample_rate, n)
         } else {
             vec![0.0f32; n]
         };
@@ -1839,22 +1847,12 @@ impl QA40xDevice {
         let m = crate::audio::analyze_levels(sig, sample_rate);
         let (factor, calibrated) = self.input_volts_factor(input_channel).await;
 
-        let lin = |dbfs: f32| 10.0f32.powf(dbfs / 20.0);
-        let v_rms = lin(m.rms_dbfs) * factor;
-        let v_a = lin(m.rms_a_dbfs) * factor;
-        let v_to_dbv = |v: f32| if v > 0.0 { 20.0 * v.log10() } else { -200.0 };
-
-        Ok(crate::audio::LevelResult {
-            rms_dbfs: m.rms_dbfs,
-            peak_dbfs: m.peak_dbfs,
-            rms_a_dbfs: m.rms_a_dbfs,
-            rms_c_dbfs: m.rms_c_dbfs,
-            rms_vrms: v_rms,
-            rms_dbv: v_to_dbv(v_rms),
-            rms_dbu: v_to_dbv(v_rms / 0.775),
-            rms_a_dbv: v_to_dbv(v_a),
+        Ok(crate::audio::project_levels(
+            &m,
+            factor,
             calibrated,
-        })
+            if generate { effective_freq } else { 0.0 },
+        ))
     }
 }
 
@@ -1960,6 +1958,16 @@ fn dac_volts_per_digital_rms(out_fs_dbv: f32) -> f32 {
     std::f32::consts::SQRT_2 * 10.0f32.powf(out_fs_dbv / 20.0)
 }
 
+/// Clamp a requested stimulus frequency to what can actually be played
+/// without aliasing: `[1 Hz, 0.98 · Nyquist]` (issue #29 review finding #1 —
+/// mirrors the frontend's `playedFrequencyHz`; `measure_levels` has no
+/// harmonic to protect, unlike the THD sweep's 0.45·Nyquist cap, so it can
+/// use the full sub-Nyquist range).
+fn effective_stimulus_freq(requested: f32, sample_rate: u32) -> f32 {
+    let nyquist = sample_rate as f32 / 2.0;
+    requested.clamp(1.0, nyquist * 0.98)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1990,5 +1998,19 @@ mod tests {
         let output_off = 20.0 * dac_volts_per_digital_rms(out_fs).log10();
         let fr_offset = in_fs - out_fs - 9.0;
         assert!(((input_off - output_off) - fr_offset).abs() < 0.011);
+    }
+
+    #[test]
+    fn effective_stimulus_freq_clamps_to_98pct_of_nyquist() {
+        // Below the cap: passed through unchanged.
+        assert_eq!(effective_stimulus_freq(1000.0, 48000), 1000.0);
+        // 30 kHz at 48 kHz sample rate would alias past Nyquist (24 kHz) —
+        // clamped to 0.98 * 24000 = 23520, not silently folded back.
+        assert!((effective_stimulus_freq(30000.0, 48000) - 23520.0).abs() < 1e-3);
+        // A sub-1 Hz or negative request floors at 1 Hz.
+        assert_eq!(effective_stimulus_freq(0.0, 48000), 1.0);
+        assert_eq!(effective_stimulus_freq(-5.0, 48000), 1.0);
+        // Scales with the sample rate (192 kHz Nyquist = 96 kHz).
+        assert!((effective_stimulus_freq(100000.0, 192000) - 94080.0).abs() < 1e-3);
     }
 }

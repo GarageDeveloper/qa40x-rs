@@ -1,0 +1,87 @@
+/* Levels panel (issue #29): exposes measure_levels — unweighted/A/C RMS +
+   peak, plus absolute Vrms/dBV/dBu via calibration. */
+.levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.levels__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.levels__head > .sidebar__title {
+  flex: 1;
+}
+
+.levels__form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.levels__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.levels__row > .levels__label {
+  flex: none;
+  width: 90px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.levels__row > .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.levels__measure {
+  align-self: flex-start;
+}
+
+/* Readout grid — ALWAYS rendered (no layout shift across the generate
+   toggle or before/after a measurement): only the values change. */
+.levels__readouts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-1);
+  border-radius: 6px;
+}
+
+.levels__readout {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.levels__readout-label {
+  color: var(--ink-3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.levels__readout-value {
+  color: var(--ink-1);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+/* Clip flag (issue #29 review finding #4): the label never disappears —
+   only the color/text flip between "ok" and "CLIP". */
+.levels__readout-value--clip {
+  color: var(--danger-ink);
+  font-weight: 600;
+}
+
+.levels__note {
+  color: var(--ink-3);
+  font-size: 10px;
+}

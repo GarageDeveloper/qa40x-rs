@@ -280,4 +280,63 @@ describe("data/chains — transform endpoint scheduling", () => {
     expect(calls.length).toBe(after); // no further runs once settled
     expect(after - settled).toBeLessThan(6);
   });
+
+  describe("watchChains signature — user weighting curve identity (issue #29 review finding #2)", () => {
+    // The watcher's signature must NEVER re-stringify a user curve's whole
+    // point array on every store batch (a ~20k-row import would otherwise
+    // cost real CPU on every live frame) — it swaps in a cheap WeakMap
+    // identity instead (chains.ts's `curveIdentity`/`lightStep`). These
+    // tests guard the OBSERVABLE contract that swap must preserve: a
+    // genuinely different curve still triggers a recompute, an unchanged
+    // one (same object OR a harmless unrelated store batch) does not.
+
+    it("a user-weighting transform recomputes when the curve is swapped for a DIFFERENT one", async () => {
+      const store = new Store(initialState());
+      const { ipc, calls } = fakeIpc();
+      watchChains(store, ipc);
+      const curveA = { freqs: [100, 1000], gains: [0, 6] };
+      const id = addTransformTrace(store, HW_TRACE_IDS.inputL, [
+        { type: "weighting", mode: "user", curve: curveA },
+      ]);
+      ingest(store, [-40, -3]);
+      await flush();
+      await flush();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].steps[0]).toEqual({ type: "weighting", mode: "user", curve: curveA });
+
+      // A DIFFERENT curve object (same shape, different values) must still
+      // be detected as a real change and re-run the chain.
+      const curveB = { freqs: [100, 1000], gains: [3, 9] };
+      configureTransform(store, ipc, id, {
+        label: "fx",
+        input: HW_TRACE_IDS.inputL,
+        steps: [{ type: "weighting", mode: "user", curve: curveB }],
+      });
+      await flush();
+      await flush();
+      expect(calls).toHaveLength(2);
+      expect(calls[1].steps[0]).toEqual({ type: "weighting", mode: "user", curve: curveB });
+    });
+
+    it("an unrelated store batch does not re-run the chain (the curve identity is stable)", async () => {
+      const store = new Store(initialState());
+      const { ipc, calls } = fakeIpc();
+      watchChains(store, ipc);
+      const curve = { freqs: [100, 1000], gains: [0, 6] };
+      addTransformTrace(store, HW_TRACE_IDS.inputL, [
+        { type: "weighting", mode: "user", curve },
+      ]);
+      ingest(store, [-40, -3]);
+      await flush();
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      // An unrelated batch (e.g. a UI toast) must not re-trigger the chain —
+      // the SAME curve object still maps to the SAME identity number.
+      store.update("test/unrelated", (s) => ({ ...s, ui: { ...s.ui, peakHoldEpoch: 1 } }));
+      await flush();
+      await flush();
+      expect(calls).toHaveLength(1);
+    });
+  });
 });

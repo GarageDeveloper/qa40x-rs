@@ -1,0 +1,16 @@
+/* Transform-chain dialog extras (the user-curve import row). */
+.transformdialog__usercurve {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.transformdialog__usercurve-status {
+  overflow: hidden;
+  flex: 1;
+  color: var(--ink-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

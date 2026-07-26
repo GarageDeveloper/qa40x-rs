@@ -70,19 +70,32 @@ Does: connect/presence/config registers, the two dBFS→dBV converter offsets,
 mixer slot rendering (sine/square/triangle/sawtooth/tones/noise/chirp/
 multitone at correct RMS levels, routed and summed), a range-correct
 loopback capture with a small noise floor, real windowed FFTs and crude
-derived metrics, telemetry, in-memory storage stubs. THREE measurement
-programs: the THD-vs-frequency sweep (`measure_thd_vs_frequency`), its
-sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) and wow &
-flutter (`measure_wow_flutter`, issue #28) — all stub RESULTS (used only by
-the device-lock family, the level-sweep spec and `wow-flutter.pw.ts`, which
-assert lock/plumbing semantics around them, never their numbers), gateable
-with `app.holdPrograms()` / `releasePrograms()` so the locked UI can be
-observed instead of raced.
+derived metrics, telemetry, in-memory storage stubs. FOUR measurement
+programs, same discipline (a stub RESULT, gateable with `app.holdPrograms()`
+/ `releasePrograms()` so the locked UI can be observed instead of raced,
+never asserted by value):
+- the THD-vs-frequency sweep (`measure_thd_vs_frequency`) — log-spaced
+  points at the ideal floor;
+- its sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) —
+  linear dBFS steps at a fixed tone;
+- wow & flutter (`measure_wow_flutter`, issue #28) — synthesizes the result
+  of a known 4 Hz / 0.15 %-peak wow with the real backend's own
+  decimation/window/cap constants; genuinely cancellable while held (Stop
+  rejects it), unlike the instantaneous THD stubs;
+- the Levels panel's one-shot capture (`measure_levels`, issue #29) — a
+  played tone's RMS/peak derived from the REQUESTED stimulus level (RMS =
+  peak − 3.0103 dB), projected to dBV through the SAME `inputDbvOffsetDb`
+  the fake's `get_input_dbv_offset` reports (so a Levels reading agrees with
+  an Input trace's dBV for the same nominal level) and the SAME
+  0.98·Nyquist stimulus-frequency clamp as the real backend. NOT modeled:
+  A/C-weighting math (both read back equal to the unweighted value) or any
+  clipping (`clipped` is always `false`) — see the two bullets below.
 
 Does NOT: Rhai script execution (refused with a named error), other
 measurement programs / sweeps (unimplemented commands throw), converter
 distortion or frequency response, round-trip latency, relay settling,
-averaging, FFT windows other than Hann, calibration pages. **Unknown commands
+averaging, FFT windows other than Hann, calibration pages, A/C-weighting
+math or ADC clipping in `measure_levels` (see above). **Unknown commands
 throw loudly** — if the app grows a new startup invoke, a test will name it
 instead of hanging.
 
