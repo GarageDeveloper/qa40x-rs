@@ -5,6 +5,7 @@
  */
 import type {
   HarmonicMarkVM,
+  ScopeTriggerVM,
   SeriesVM,
   SweepSeriesVM,
   TdSeriesVM,
@@ -31,12 +32,25 @@ export interface SpectrumRenderer {
   destroy(): void;
 }
 
+/** The trigger drag callbacks (Lot A, issue #26): `onLevel` receives a
+ * DISPLAY-unit value (the volts conversion happens in the tile, never in
+ * the chart — plan §3.4); `onPosition` receives 0..1 of the window. Wired
+ * ONCE per renderer instance (tile.ts, at renderer creation), not per frame. */
+export interface ScopeTriggerHandlers {
+  onLevel: (displayValue: number) => void;
+  onPosition: (position: number) => void;
+}
+
 export interface ScopeRenderer {
   /** Replace the drawn series (values already in display units). */
   setSeries(series: TdSeriesVM[]): void;
   setUnitLabel(label: string): void;
   /** Displayed time window in ms; null = the whole capture. */
   setTimeWindow(ms: number | null): void;
+  /** Trigger overlay, the VM's own shape; `null` draws nothing (trigger off,
+   * or the tile's markers toggle is off — tile.ts decides which). */
+  setTrigger(trigger: ScopeTriggerVM | null): void;
+  setTriggerHandlers(handlers: ScopeTriggerHandlers): void;
   destroy(): void;
 }
 

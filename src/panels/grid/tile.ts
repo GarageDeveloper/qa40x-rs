@@ -8,6 +8,7 @@ import type { Store } from "../../store/store";
 import type { AppState, TileConfig } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import type { FdUnit, TdUnit, TraceId } from "../../core/model";
+import type { TriggerState } from "../../gen";
 import {
   addTraceToTile,
   removeTraceFromTile,
@@ -20,18 +21,28 @@ import {
   setTileShowPhase,
   setTileTdUnit,
   setTileTimeWindow,
+  setTileTriggerPosition,
   toggleCurveHidden,
   toggleTraceHidden,
 } from "../../store/actions/layout";
+import { armSingle, setTriggerLevelV } from "../../store/actions/trigger";
 import { shownTraces } from "../../store/selectors/layout";
+import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
 import { programProgressText } from "../../store/actions/programs";
-import { traceCurveColor, type GraphKind } from "../../store/state";
+import {
+  DEFAULT_TRIGGER,
+  traceCurveColor,
+  type GraphKind,
+  type TriggerEdge,
+  type TriggerMode,
+} from "../../store/state";
 import {
   chipSourceTraceId,
   scopeVM,
   spectrumVM,
   sweepVM,
+  triggerLevelFromDisplay,
 } from "../../store/selectors/chartvm";
 import type { ScopeRenderer, SpectrumRenderer, SweepRenderer } from "../../chart/renderer";
 import { WrappedSpectrumChart } from "../../chart/spectrum";
@@ -53,6 +64,22 @@ const TD_UNITS: { value: TdUnit; label: string }[] = [
   { value: "mv", label: "mV" },
   { value: "pctfs", label: "%FS" },
 ];
+
+/** The trigger chip's text (Lot A, issue #26): mode+edge+state, never DOM
+ * presence, change (no-layout-shift invariant). `state` is `undefined`
+ * before any frame has landed for the resolved endpoint — treated like
+ * "waiting" (a normal/single trigger with nothing latched yet). Single's
+ * "STOP" label covers BOTH `triggered` (the firing frame) and `stopped`
+ * (every frame after) — from the user's view the shot has already landed. */
+function triggerChipText(mode: TriggerMode, edge: TriggerEdge, state: TriggerState | undefined): string {
+  if (mode === "off") return "T off";
+  const arrow = edge === "rising" ? "▲" : "▼";
+  if (mode === "auto") return `T ${arrow} AUTO`;
+  if (mode === "normal") {
+    return state === "triggered" ? `T ${arrow} NORM · TRIG'D` : `T ${arrow} WAIT`;
+  }
+  return state === "triggered" || state === "stopped" ? `T ${arrow} SINGLE · STOP` : `T ${arrow} WAIT`;
+}
 
 export interface TileView {
   readonly root: HTMLElement;
@@ -114,6 +141,30 @@ export function createTile(
       setTileTimeWindow(store, tileId, v === "" ? null : Number(v));
     },
   });
+  // Scope trigger chip + Arm (Lot A, issue #26): ALWAYS in the DOM (hidden
+  // for non-scope kinds via tile__hidden, same mechanism as timeSel) — only
+  // the chip's text and the Arm button's disabled state change with the
+  // resolved endpoint's mode/edge/state (no-layout-shift invariant).
+  const trigChip = el(
+    "span.tile__trig",
+    { "data-testid": `tile-trigger-${tileId}`, title: "Scope trigger state" },
+    "T off"
+  );
+  const armBtn = el(
+    "button.btn.btn--small",
+    {
+      "data-testid": `tile-trigger-arm-${tileId}`,
+      title: "Arm a SINGLE shot",
+      onclick: () => {
+        const s = store.get();
+        const tile = s.layout.tiles[tileId];
+        if (!tile) return;
+        const sourceId = tileTriggerSourceId(s, tile);
+        if (sourceId) armSingle(store, ipc, sourceId);
+      },
+    },
+    "Arm"
+  );
   const phaseBtn = el(
     "button.btn.btn--small",
     {
@@ -248,6 +299,8 @@ export function createTile(
       kindSel,
       unitSel,
       timeSel,
+      trigChip,
+      armBtn,
       el("span.tile__spacer"),
       addSel,
       chipAddSel,
@@ -388,8 +441,31 @@ export function createTile(
     chartHost.replaceChildren();
     kind = next;
     if (next === "spectrum") spectrum = new WrappedSpectrumChart(chartHost);
-    else if (next === "scope") scope = new WrappedScopeChart(chartHost);
-    else {
+    else if (next === "scope") {
+      scope = new WrappedScopeChart(chartHost);
+      // Wired ONCE per chart instance (renderer.ts's ScopeTriggerHandlers
+      // contract) — the drag reports display-unit level / 0..1 position,
+      // resolved here against the CURRENT store (not captured at wiring
+      // time) since the tile's trigger source can change afterward.
+      scope.setTriggerHandlers({
+        onLevel: (displayValue) => {
+          const s = store.get();
+          const tile = s.layout.tiles[tileId];
+          const sourceId = tile ? tileTriggerSourceId(s, tile) : null;
+          if (!tile || !sourceId) return;
+          const offsetDb = s.traces.byId[sourceId]?.offsetDb ?? null;
+          setTriggerLevelV(
+            store,
+            ipc,
+            sourceId,
+            triggerLevelFromDisplay(displayValue, tile.tdUnit, offsetDb)
+          );
+        },
+        onPosition: (position) => {
+          setTileTriggerPosition(store, ipc, tileId, position * 100);
+        },
+      });
+    } else {
       sweep = new WrappedSweepChart(chartHost);
       sweep.setShowPhase(showPhase);
     }
@@ -451,6 +527,8 @@ export function createTile(
       // gear value joins the preset list as its own option).
       const isScope = tile.kind === "scope";
       timeSel.classList.toggle("tile__hidden", !isScope);
+      trigChip.classList.toggle("tile__hidden", !isScope);
+      armBtn.classList.toggle("tile__hidden", !isScope);
       if (isScope) {
         const win = tile.timeWindowMs;
         const values = TIME_WINDOWS_MS.includes(win ?? -1) || win === null
@@ -669,11 +747,25 @@ export function createTile(
         scope.setTimeWindow(tile.timeWindowMs);
         scope.setUnitLabel(vm.unitLabel);
         scope.setSeries(vm.series);
+        // Markers toggle is display-only (plan §3.2): off draws nothing even
+        // with a live trigger, on draws the VM's trigger verbatim.
+        scope.setTrigger(tile.showTriggerMarkers ? vm.trigger : null);
       } else if (tile.kind === "sweep" && sweep) {
         const vm = sweepVM(s, tile);
         sweep.setUnitLabel(vm.unitLabel);
         sweep.setSeries(vm.series);
       }
+
+      // Trigger chip + Arm (always computed — hidden via CSS for non-scope
+      // kinds, never absent from the DOM). `trigState` is read straight from
+      // `run.triggers`, the live per-endpoint mirror ingestFrame writes every
+      // frame, so the chip tracks the CURRENT frame even when scopeVM's
+      // `vm.trigger` is null (e.g. no snapshot latched yet).
+      const trigSourceId = tileTriggerSourceId(s, tile);
+      const trigSettings = trigSourceId ? (s.triggers[trigSourceId] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
+      const trigState = trigSourceId ? s.run.triggers[trigSourceId]?.state : undefined;
+      trigChip.textContent = triggerChipText(trigSettings.mode, trigSettings.edge, trigState);
+      armBtn.toggleAttribute("disabled", trigSettings.mode !== "single");
 
       // The Auto option names the trace it currently resolves to — "Auto
       // (Input L)" — so the readouts are never ambiguous (maintainer ask).

@@ -6,15 +6,33 @@
  * backend transform chains — noted in the Axis tab, not half-built here.
  */
 import type { Store } from "../../store/store";
-import type { AppState, GraphKind } from "../../store/state";
+import type { TraceId } from "../../core/model";
+import type { AppState, GraphKind, TriggerEdge, TriggerMode } from "../../store/state";
+import { DEFAULT_TRIGGER } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
   setTileAxis,
   setTileKind,
   setTileShowHarmonics,
+  setTileShowTriggerMarkers,
   setTileTimeWindow,
   setTileTraces,
+  setTileTriggerPosition,
+  setTileTriggerSource,
 } from "../../store/actions/layout";
+import {
+  armSingle,
+  setTriggerEdge,
+  setTriggerHystV,
+  setTriggerLevelV,
+  setTriggerMode,
+} from "../../store/actions/trigger";
+import { tileTriggerSourceId } from "../../store/selectors/trigger";
+import {
+  TD_UNIT_LABELS,
+  triggerLevelFromDisplay,
+  triggerLevelToDisplay,
+} from "../../store/selectors/chartvm";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
 
@@ -197,11 +215,156 @@ export function openTileGearDialog(
     )
   );
 
+  /* ---- Trigger tab (Lot A, issue #26) ---------------------------------
+   * Mode/edge/level/hysteresis are per ENDPOINT (`AppState.triggers`, plan
+   * §3.2 — shared by every tile whose trigger resolves to the same hw
+   * endpoint); source/position/markers are per TILE. Every control resolves
+   * the CURRENT endpoint at dispatch time (`tileTriggerSourceId`), not the
+   * one captured when the dialog opened — a source change must retarget
+   * the mode/edge/level/hyst controls without reopening the dialog. */
+  const trigSourceId0 = tileTriggerSourceId(s0, tile);
+  const trigSettings0 = trigSourceId0 ? (s0.triggers[trigSourceId0] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
+
+  const currentSourceId = (): TraceId | null => {
+    const t = store.get().layout.tiles[tileId];
+    return t ? tileTriggerSourceId(store.get(), t) : null;
+  };
+
+  const trigSourceSel = el("select.field", {
+    "data-testid": "gear-trigger-source",
+    onchange: (e: Event) =>
+      setTileTriggerSource(store, ipc, tileId, (e.target as HTMLSelectElement).value as "auto" | TraceId),
+  });
+  trigSourceSel.append(
+    el("option", { value: "auto" }, "Auto"),
+    ...tile.traces
+      .map((id) => s0.traces.byId[id])
+      .filter((t): t is NonNullable<typeof t> => !!t)
+      .map((t) => el("option", { value: t.id }, t.label))
+  );
+  trigSourceSel.value = tile.triggerSource;
+
+  const trigModeSel = el("select.field", {
+    "data-testid": "gear-trigger-mode",
+    onchange: (e: Event) => {
+      const sourceId = currentSourceId();
+      if (sourceId) setTriggerMode(store, ipc, sourceId, (e.target as HTMLSelectElement).value as TriggerMode);
+    },
+  });
+  trigModeSel.append(
+    el("option", { value: "off" }, "Off"),
+    el("option", { value: "auto" }, "Auto"),
+    el("option", { value: "normal" }, "Normal"),
+    el("option", { value: "single" }, "Single")
+  );
+  trigModeSel.value = trigSettings0.mode;
+
+  const trigEdgeSel = el("select.field", {
+    "data-testid": "gear-trigger-edge",
+    onchange: (e: Event) => {
+      const sourceId = currentSourceId();
+      if (sourceId) setTriggerEdge(store, ipc, sourceId, (e.target as HTMLSelectElement).value as TriggerEdge);
+    },
+  });
+  trigEdgeSel.append(
+    el("option", { value: "rising" }, "Rising"),
+    el("option", { value: "falling" }, "Falling")
+  );
+  trigEdgeSel.value = trigSettings0.edge;
+
+  // Level travels in the tile's OWN display unit (canvas-drag parity) —
+  // converted to/from the endpoint's level-volts at the store boundary.
+  const trigLevelLabel = el("span.gear__label", {}, `Level (${TD_UNIT_LABELS[tile.tdUnit]})`);
+  const trigLevelInput = el("input.field", {
+    type: "number",
+    step: "any",
+    "data-testid": "gear-trigger-level",
+    onchange: (e: Event) => {
+      const s = store.get();
+      const t = s.layout.tiles[tileId];
+      const sourceId = currentSourceId();
+      if (!t || !sourceId) return;
+      const offsetDb = s.traces.byId[sourceId]?.offsetDb ?? null;
+      const raw = Number((e.target as HTMLInputElement).value);
+      setTriggerLevelV(store, ipc, sourceId, triggerLevelFromDisplay(raw, t.tdUnit, offsetDb));
+    },
+  });
+  {
+    const offsetDb0 = trigSourceId0 ? (s0.traces.byId[trigSourceId0]?.offsetDb ?? null) : null;
+    trigLevelInput.value = String(triggerLevelToDisplay(trigSettings0.levelV, tile.tdUnit, offsetDb0));
+  }
+
+  const trigHystInput = el("input.field", {
+    type: "number",
+    step: "any",
+    min: "0",
+    placeholder: "auto",
+    "data-testid": "gear-trigger-hyst",
+    onchange: (e: Event) => {
+      const sourceId = currentSourceId();
+      if (!sourceId) return;
+      const raw = (e.target as HTMLInputElement).value;
+      setTriggerHystV(store, ipc, sourceId, raw === "" ? null : Number(raw));
+    },
+  });
+  if (trigSettings0.hystV !== null) trigHystInput.value = String(trigSettings0.hystV);
+
+  const trigPositionInput = el("input.field", {
+    type: "number",
+    min: "0",
+    max: "100",
+    step: "any",
+    "data-testid": "gear-trigger-position",
+    onchange: (e: Event) =>
+      setTileTriggerPosition(store, ipc, tileId, Number((e.target as HTMLInputElement).value)),
+  });
+  trigPositionInput.value = String(tile.triggerPositionPct);
+
+  const trigMarkersBox = el("input", {
+    type: "checkbox",
+    "data-testid": "gear-trigger-markers",
+    onchange: (e: Event) =>
+      setTileShowTriggerMarkers(store, tileId, (e.target as HTMLInputElement).checked),
+  }) as HTMLInputElement;
+  trigMarkersBox.checked = tile.showTriggerMarkers;
+
+  const trigArmBtn = el(
+    "button.btn.btn--small",
+    {
+      "data-testid": "gear-trigger-arm",
+      title: "Arm a SINGLE shot",
+      onclick: () => {
+        const sourceId = currentSourceId();
+        if (sourceId) armSingle(store, ipc, sourceId);
+      },
+    },
+    "Arm"
+  );
+
+  const triggerTab = el(
+    "div.gear__tab",
+    {},
+    el("label.gear__row", {}, el("span.gear__label", {}, "Trigger source"), trigSourceSel),
+    el("label.gear__row", {}, el("span.gear__label", {}, "Mode"), trigModeSel),
+    el("label.gear__row", {}, el("span.gear__label", {}, "Edge"), trigEdgeSel),
+    el("label.gear__row", {}, trigLevelLabel, trigLevelInput),
+    el("label.gear__row", {}, el("span.gear__label", {}, "Hysteresis (V)"), trigHystInput),
+    el("label.gear__row", {}, el("span.gear__label", {}, "Position (%)"), trigPositionInput),
+    el("label.gear__row", {}, trigMarkersBox, el("span", {}, "Show trigger markers")),
+    el("div.gear__row", {}, trigArmBtn),
+    el(
+      "p.gear__note",
+      {},
+      "Mode, edge, level and hysteresis are per ENDPOINT — shared by every tile whose trigger points at it. Source, position and markers are per TILE."
+    )
+  );
+
   /* ---- tabs ----------------------------------------------------------- */
   const tabs: { name: string; testid: string; pane: HTMLElement }[] = [
     { name: "Graph", testid: "gear-tab-graph", pane: graphTab },
     { name: "Traces", testid: "gear-tab-traces", pane: tracesTab },
     { name: "Axis", testid: "gear-tab-axis", pane: axisTab },
+    { name: "Trigger", testid: "gear-tab-trigger", pane: triggerTab },
   ];
   const paneHost = el("div.gear__pane");
   const tabBar = el("div.gear__tabs");

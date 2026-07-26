@@ -16,7 +16,12 @@
 //! 5. computes the requested spectra — one [`SpectrumAnalyzer`] **per
 //!    channel**, so averaging L never contaminates R (the "one value where
 //!    there must be N" class, applied to the averager);
-//! 6. emits [`StreamMsg::Frame`] carrying the frame's own per-converter
+//! 6. evaluates each requested endpoint's scope TRIGGER against the
+//!    already-emitted buffer (`evaluate_trigger`, `crate::audio::trigger`) —
+//!    ALIGNMENT ONLY: it picks/shifts the slice the scope DISPLAYS, it never
+//!    reorders or gates step 5 — `analyze_frame` always sees the unchanged
+//!    mid-slice, whether the endpoint triggered, is waiting or is stopped;
+//! 7. emits [`StreamMsg::Frame`] carrying the frame's own per-converter
 //!    [`LevelOffsetsDb`] — computed from the register state of THIS frame, so
 //!    a chart can never pair a trace with the wrong converter's reference
 //!    (structural close of #48/#50/#51/#58/#60).

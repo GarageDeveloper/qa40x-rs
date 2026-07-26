@@ -35,6 +35,9 @@
   /* Marker annotation colours (mirrored in chart.ts) */
   --marker-a: #e6a23c;
   --marker-b: #e06ca6;
+  /* Scope trigger overlay (level/position lines + handles), distinct from
+     the A/B markers above (mirrored in canvas.ts). */
+  --chart-trigger: #2dd4bf;
 
   /* Status */
   --good: #23b247;
@@ -149,6 +152,7 @@
   /* Markers */
   --marker-a: #b9741a;
   --marker-b: #c24d86;
+  --chart-trigger: #0f766e;
 
   /* Status — legible as text on white and as saturated LED fills */
   --good: #1a8a44;

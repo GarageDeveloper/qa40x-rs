@@ -546,6 +546,122 @@ export class AppV2 {
     );
   }
 
+  /** Raw display-unit samples of a tile's first scope series (the trigger
+   * source's own picture) — for edge-alignment and held-frame assertions. */
+  async scopeSamples(tileId?: string): Promise<number[]> {
+    return this.drv.eval(
+      (a: { tileId?: string }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              scopeVM(id?: string): {
+                series: { samples: Float64Array }[];
+              };
+            };
+          }
+        ).qa40xV2Debug;
+        const s = dbg.scopeVM(a.tileId).series[0];
+        return s ? Array.from(s.samples) : [];
+      },
+      { tileId }
+    );
+  }
+
+  /** The scope trigger overlay of a tile's view-model (Lot A, issue #26) —
+   * `null` when the tile's resolved trigger is off or nothing has latched
+   * yet, the same shape `scopeVM().trigger` returns. */
+  async scopeTrigger(tileId?: string): Promise<{
+    sourceId: string;
+    state: string;
+    frac: number;
+    levelDisplay: number;
+    position: number;
+    held: boolean;
+  } | null> {
+    return this.drv.eval(
+      (a: { tileId?: string }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              scopeVM(id?: string): {
+                trigger: {
+                  sourceId: string;
+                  state: string;
+                  frac: number;
+                  levelDisplay: number;
+                  position: number;
+                  held: boolean;
+                } | null;
+              };
+            };
+          }
+        ).qa40xV2Debug;
+        return dbg.scopeVM(a.tileId).trigger;
+      },
+      { tileId }
+    );
+  }
+
+  /** Set a scope tile's trigger controls via the ⚙ Trigger tab (same
+   * gesture the Axis-tab tests use elsewhere in this adapter) — pass only
+   * the fields to change, the rest are left as-is. Mode/edge/level/hyst
+   * land on the tile's CURRENTLY resolved endpoint (per-endpoint, plan
+   * §3.2); source/position/markers land on the tile itself. */
+  async setTileTrigger(
+    tileId: string,
+    opts: {
+      source?: "auto" | string;
+      mode?: "off" | "auto" | "normal" | "single";
+      edge?: "rising" | "falling";
+      levelV?: number;
+      hystV?: number | null;
+      positionPct?: number;
+      markers?: boolean;
+    }
+  ): Promise<void> {
+    await this.drv.click(`[data-testid="tile-gear-${tileId}"]`);
+    await this.drv.click('[data-testid="gear-tab-trigger"]');
+    if (opts.source !== undefined) await this.setSelect("gear-trigger-source", opts.source);
+    if (opts.mode !== undefined) await this.setSelect("gear-trigger-mode", opts.mode);
+    if (opts.edge !== undefined) await this.setSelect("gear-trigger-edge", opts.edge);
+    if (opts.levelV !== undefined) await this.setNumber("gear-trigger-level", opts.levelV);
+    if (opts.hystV !== undefined) {
+      await this.drv.eval(
+        (a: { value: number | null }) => {
+          const input = document.querySelector(
+            '[data-testid="gear-trigger-hyst"]'
+          ) as HTMLInputElement;
+          input.value = a.value === null ? "" : String(a.value);
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        { value: opts.hystV }
+      );
+    }
+    if (opts.positionPct !== undefined) await this.setNumber("gear-trigger-position", opts.positionPct);
+    if (opts.markers !== undefined) {
+      await this.drv.eval(
+        (a: { want: boolean }) => {
+          const box = document.querySelector(
+            '[data-testid="gear-trigger-markers"]'
+          ) as HTMLInputElement;
+          if (box.checked !== a.want) box.click();
+        },
+        { want: opts.markers }
+      );
+    }
+    await this.closeDialog();
+  }
+
+  /** The tile-header trigger chip's text (`T off` / `T ▲ AUTO` / ...). */
+  async triggerChip(tileId: string): Promise<string | null> {
+    return this.drv.text(`[data-testid="tile-trigger-${tileId}"]`);
+  }
+
+  /** Click a tile's Arm button (re-)arms a SINGLE shot. */
+  async armTrigger(tileId: string): Promise<void> {
+    await this.drv.click(`[data-testid="tile-trigger-arm-${tileId}"]`);
+  }
+
   /** The pool rows as {id, label, badges: [{tag, dim, tip}]}. */
   async poolRows(): Promise<
     { id: string; label: string; badges: { tag: string; dim: boolean; tip: string }[] }[]

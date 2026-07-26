@@ -179,6 +179,104 @@ function band(
   return { amp, power };
 }
 
+/* ---- scope trigger (Lot A, issue #26) --------------------------------
+ * An EXACT port of src-tauri/src/audio/trigger.rs's `find_edge` /
+ * `auto_hysteresis` — same Schmitt-qualification control flow, same edge
+ * cases (`from.max(1)`, the armed/candidate state machine, hysteresis == 0
+ * degenerating to a plain level crossing) — so the fake backend's trigger
+ * picture matches what a real device would report for the same samples.
+ * Only the numeric domain differs (JS f64 vs Rust f32); see refineLinear.
+ */
+
+export type TriggerEdgePolarity = "rising" | "falling";
+
+export interface TriggerHit {
+  /** First sample at/after the crossing. */
+  index: number;
+  /** Sub-sample residual in [0,1): the crossing is at `index - 1 + frac`. */
+  frac: number;
+}
+
+/** Port of `refine_linear`: linear sub-sample crossing fraction between
+ * `prev` and `cur`. Degenerates to 0 when there's no slope to interpolate
+ * along (mirrors the Rust `f32::EPSILON` guard, at f64 tolerance). */
+export function refineLinear(prev: number, cur: number, level: number): number {
+  const d = cur - prev;
+  if (Math.abs(d) < 1e-7) return 0;
+  return Math.min(1, Math.max(0, (level - prev) / d));
+}
+
+/**
+ * Port of `find_edge`: first Schmitt-qualified `edge` crossing of `level` at
+ * index >= `from`. Single pass, `from` clamped to >= 1; `have_low`/`armed`
+ * tracks whether a qualifying low(-hysteresis) sample has been seen yet;
+ * `candidate` is a plain `level` crossing held until a later sample either
+ * confirms it (clears the hysteresis band) or a false start re-arms the
+ * search. The reported crossing is always the plain `level` crossing, found
+ * BEFORE confirmation — alignment is independent of hysteresis width.
+ */
+export function findEdge(
+  samples: ArrayLike<number>,
+  level: number,
+  hysteresis: number,
+  edge: TriggerEdgePolarity,
+  from: number
+): TriggerHit | null {
+  const hyst = Math.abs(hysteresis);
+  // Fold polarity into a sign so rising/falling share one scan (mirrors the
+  // Rust `s * sample` trick — Falling flips "above/below" without touching
+  // the buffer).
+  const s = edge === "rising" ? 1 : -1;
+  const lvl = s * level;
+  const lo = lvl - hyst;
+  const hi = lvl + hyst;
+
+  let haveLow = false;
+  let candidate: TriggerHit | null = null;
+
+  const start = Math.max(1, from);
+  for (let i = start; i < samples.length; i++) {
+    const prev = s * samples[i - 1];
+    const cur = s * samples[i];
+
+    if (candidate) {
+      if (cur >= hi) {
+        return candidate;
+      } else if (cur <= lo) {
+        // False start: dropped back to the low band without ever
+        // confirming. `cur` itself re-arms.
+        candidate = null;
+      }
+      continue; // between lo and hi, unconfirmed: keep waiting
+    }
+
+    if (!haveLow) {
+      if (cur <= lo) haveLow = true;
+      continue;
+    }
+
+    if (prev < lvl && cur >= lvl) {
+      const frac = refineLinear(prev, cur, lvl);
+      if (cur >= hi) {
+        // hysteresis == 0 (or the confirming sample IS the crossing
+        // sample): confirmed immediately.
+        return { index: i, frac };
+      }
+      candidate = { index: i, frac };
+    }
+    // else: still below `level` (or between lo and level) — stay armed.
+  }
+  return null;
+}
+
+/** Port of `auto_hysteresis`: `frac` x peak|x| of the frame, floored at
+ * `floor` (so a near-silent frame doesn't collapse the band to ~0). */
+export function autoHysteresis(samples: ArrayLike<number>, frac: number, floor: number): number {
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+  return Math.max(peak * frac, floor);
+}
+
 /**
  * `analyze_audio` stand-in: textbook THD from harmonics 2–10, THD+N from the
  * residual spectral power, time-domain RMS/peak/DC. Crude on purpose.
