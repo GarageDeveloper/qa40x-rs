@@ -22,6 +22,14 @@ export function measureRequest(s: AppState): MeasureRequest {
     // list must not keep an endpoint's suite computing.
     if (tile.kind === "sweep") continue;
     if (!tile.measures.some((k) => SCOPE_MEASURE_KEYS.has(k))) continue;
+    // NOTE: chipSourceTraceId's "auto" resolution reads the frames CACHE
+    // (state outside the store), so this projection can drift as frames
+    // land. Every event that makes a trace gain or lose data (source
+    // start/stop, trace add/remove/hide, pattern, workspace) calls
+    // syncStream, which rebuilds it — keep it that way (the lot-A re-feed
+    // selector trap, mirror image). Also: a non-hardware chip source (file
+    // or transform trace) contributes nothing here — its suite chips read
+    // "—" (backend suites exist for live hw endpoints only, for now).
     const src = chipSourceTraceId(tile);
     if (src) wanted.add(src);
   }

@@ -88,13 +88,46 @@ fn goertzel_power(windowed: &[f64], sample_rate: f64, freq_hz: f64) -> f64 {
     s1 * s1 + s2 * s2 - coeff * s1 * s2
 }
 
-/// Refine a frequency estimate against the Hann-windowed Goertzel spectrum:
-/// evaluate log-power at `f − d, f, f + d`, move to the parabola vertex,
-/// halve `d`, repeat. Starts at one FFT-bin width (the crossing seed is
-/// always well inside the Hann mainlobe, which is 4 bins wide) and stops
-/// when `d` is far below the target resolution. The vertex step is clamped
-/// to ±`d` so a degenerate triple can never throw the estimate outside the
-/// bracket.
+/// One parabolic-interpolation descent on the Hann-windowed Goertzel
+/// log-power: evaluate at `f − d, f, f + d`, move to the parabola vertex,
+/// halve `d`, repeat. Starts at one FFT-bin width (a valid crossing seed is
+/// always well inside the Hann mainlobe, which is 4 bins wide). The vertex
+/// step is clamped to ±`d` so a degenerate triple can never throw the
+/// estimate outside the bracket — which also bounds the total travel to
+/// 2 bins from the seed.
+fn refine_at(windowed: &[f64], sample_rate: f64, seed_hz: f64) -> f64 {
+    let n = windowed.len();
+    let nyquist = sample_rate / 2.0;
+    let mut f = seed_hz;
+    let mut d = sample_rate / n as f64; // one bin
+    for _ in 0..10 {
+        let lo = (f - d).max(d * 1e-3);
+        let hi = (f + d).min(nyquist - d * 1e-3);
+        let p = |freq: f64| goertzel_power(windowed, sample_rate, freq).max(1e-300).ln();
+        let (pl, pc, pr) = (p(lo), p(f), p(hi));
+        let denom = pl - 2.0 * pc + pr;
+        if denom < 0.0 {
+            // Proper local maximum: parabola vertex, clamped to the bracket.
+            let delta = (0.5 * (pl - pr) / denom).clamp(-1.0, 1.0);
+            f = (f + delta * d).clamp(lo, hi);
+        } else if pr > pl {
+            // Not a peak yet (seed on a slope): walk uphill one step.
+            f = hi;
+        } else {
+            f = lo;
+        }
+        d *= 0.5;
+    }
+    f
+}
+
+/// Refine a crossing-seeded frequency estimate against the Hann-windowed
+/// Goertzel spectrum ([`refine_at`]), then sanity-check the SUBHARMONICS:
+/// a waveform that crosses its mean more than twice per period (strong odd
+/// harmonics) seeds an integer MULTIPLE of the fundamental, and the local
+/// refinement then confirms that (real) harmonic peak — comparing the
+/// power at `f/2` and `f/3` and re-refining from the stronger one recovers
+/// the true fundamental (review lot B #4).
 fn refine_frequency(samples: &[f32], sample_rate: f64, seed_hz: f64) -> f64 {
     let n = samples.len();
     let nyquist = sample_rate / 2.0;
@@ -113,27 +146,25 @@ fn refine_frequency(samples: &[f32], sample_rate: f64, seed_hz: f64) -> f64 {
         })
         .collect();
 
-    let mut f = seed_hz;
-    let mut d = sample_rate / n as f64; // one bin
-    for _ in 0..10 {
-        let lo = (f - d).max(d * 1e-3);
-        let hi = (f + d).min(nyquist - d * 1e-3);
-        let p = |freq: f64| goertzel_power(&windowed, sample_rate, freq).max(1e-300).ln();
-        let (pl, pc, pr) = (p(lo), p(f), p(hi));
-        let denom = pl - 2.0 * pc + pr;
-        if denom < 0.0 {
-            // Proper local maximum: parabola vertex, clamped to the bracket.
-            let delta = (0.5 * (pl - pr) / denom).clamp(-1.0, 1.0);
-            f = (f + delta * d).clamp(lo, hi);
-        } else if pr > pl {
-            // Not a peak yet (seed on a slope): walk uphill one step.
-            f = hi;
-        } else {
-            f = lo;
+    let f1 = refine_at(&windowed, sample_rate, seed_hz);
+    let bin = sample_rate / n as f64;
+    let mut best = (f1, goertzel_power(&windowed, sample_rate, f1));
+    for k in [2.0, 3.0] {
+        let cand = f1 / k;
+        if cand <= bin {
+            continue; // below the first resolvable bin — nothing down there
         }
-        d *= 0.5;
+        // The un-refined `f1/k` already sits sub-bin from a real fundamental
+        // (the seed is `k · f0 · (1 ± ε)`), so its raw power is comparable.
+        if goertzel_power(&windowed, sample_rate, cand) > best.1 {
+            let fk = refine_at(&windowed, sample_rate, cand);
+            let pk = goertzel_power(&windowed, sample_rate, fk);
+            if pk > best.1 {
+                best = (fk, pk);
+            }
+        }
     }
-    f
+    best.0
 }
 
 /// Base/top levels from the bimodal amplitude histogram (the IEEE-181-style
@@ -141,6 +172,15 @@ fn refine_frequency(samples: &[f32], sample_rate: f64, seed_hz: f64) -> f64 {
 /// half of the span, `top` = the mode of the upper half. On a square wave
 /// this reads the flats (immune to overshoot); on a sine the density peaks
 /// at the extremes so it degenerates gracefully to ~min/max.
+///
+/// A mode only counts when its bin is distinctly more populated than a
+/// UNIFORM spread would make it — a triangle/sawtooth's histogram is flat,
+/// its "mode" is a sampling-noise artifact anywhere in the half, and using
+/// it put `top` at mid-swing (duty 73 %, rise 4× short on the app's own
+/// sawtooth source — review lot B #1). A non-modal half falls back to its
+/// extreme (the peak method), which is exactly right for those waveforms.
+/// Ties resolve OUTWARD (lowest bin for the base, highest for the top) for
+/// the same reason.
 fn base_top(samples: &[f32], min: f64, max: f64) -> (f64, f64) {
     const BINS: usize = 128;
     let span = max - min;
@@ -150,16 +190,30 @@ fn base_top(samples: &[f32], min: f64, max: f64) -> (f64, f64) {
         counts[idx.min(BINS - 1)] += 1;
     }
     let bin_center = |i: usize| min + (i as f64 + 0.5) / BINS as f64 * span;
-    let mode = |range: std::ops::Range<usize>| {
-        let mut best = range.start;
-        for i in range {
-            if counts[i] > counts[best] {
-                best = i;
-            }
+    // A real flat must hold a FRANK share of the frame: 8× the uniform
+    // per-bin count (6.25 % of the samples). A square's flats hold ~50 %
+    // each (modal even when noise spreads them over a few bins); a sine's
+    // extreme bins peak at ~5.6 % and a triangle/sawtooth at ≤4 % — all
+    // fall back to min/max, the exact IEEE "peak method" answer for
+    // waveforms without flats. (A looser 2× threshold was defeated by
+    // integer-period synthetic ramps, whose quantized values fake narrow
+    // histogram spikes.)
+    let modal_threshold = (samples.len() as f64 / BINS as f64) * 8.0;
+    let mut lo_mode = 0;
+    for i in 0..BINS / 2 {
+        if counts[i] > counts[lo_mode] {
+            lo_mode = i; // strict > : ties keep the LOWEST bin
         }
-        bin_center(best)
-    };
-    (mode(0..BINS / 2), mode(BINS / 2..BINS))
+    }
+    let mut hi_mode = BINS - 1;
+    for i in (BINS / 2..BINS).rev() {
+        if counts[i] > counts[hi_mode] {
+            hi_mode = i; // reverse scan: ties keep the HIGHEST bin
+        }
+    }
+    let base = if counts[lo_mode] as f64 >= modal_threshold { bin_center(lo_mode) } else { min };
+    let top = if counts[hi_mode] as f64 >= modal_threshold { bin_center(hi_mode) } else { max };
+    (base, top)
 }
 
 /// Mean transition time (seconds) between the `from_level` and `to_level`
@@ -168,11 +222,21 @@ fn base_top(samples: &[f32], min: f64, max: f64) -> (f64, f64) {
 /// while falling back through `from_level` abandons it (a false start).
 /// Sub-sample interpolation at both ends. `None` when no complete
 /// transition exists.
+///
+/// Schmitt-armed like every other crossing in this module (review lot
+/// B #2): a candidate only opens once the signal has been seen at/below
+/// `from_level − hysteresis`, so the noise floor of an idle input — whose
+/// excursions never leave the hysteresis band — can never fake a
+/// transition time (it used to report ~32 µs on −120 dBFS noise while
+/// every other metric correctly read `None`). As in `find_edge`,
+/// qualification decides WHETHER, never WHERE: recorded times stay the
+/// plain `from`/`to` crossings.
 fn mean_transition_s(
     samples: &[f32],
     sample_rate: f64,
     from_level: f64,
     to_level: f64,
+    hysteresis: f64,
     direction: Edge,
 ) -> Option<f64> {
     // Fold polarity so rising/falling share one scan (the find_edge trick):
@@ -182,6 +246,8 @@ fn mean_transition_s(
         Edge::Falling => -1.0,
     };
     let (lo, hi) = (s * from_level, s * to_level);
+    let h = hysteresis.abs();
+    let mut armed = false;
     let mut start_t: Option<f64> = None;
     let mut sum = 0.0f64;
     let mut count = 0u32;
@@ -195,12 +261,20 @@ fn mean_transition_s(
                 None
             }
         };
-        // A `from_level` crossing (re)starts the clock — a LATER `lo`
-        // crossing while one is pending restarts it, so the timed
-        // transition is always the final monotonic run, never one that
-        // included a dip back through `lo` (dipping cleared it below).
+        // A qualified `from_level` crossing (re)starts the clock: qualified
+        // = armed by an earlier low sample, OR `prev` itself sits below the
+        // arming level (a step edge whose low side IS the proof — also the
+        // only form a first-interval edge can prove), OR a candidate is
+        // already pending (a LATER `lo` crossing restarts it, so the timed
+        // transition is always the final monotonic run).
         if let Some(t0) = cross_up(lo) {
-            start_t = Some(t0);
+            if armed || prev <= lo - h || start_t.is_some() {
+                start_t = Some(t0);
+                armed = false;
+            }
+        } else if cur <= lo - h {
+            armed = true; // (re-)arm; also clears a pending false start
+            start_t = None;
         } else if start_t.is_some() && cur < lo {
             start_t = None; // fell back below the start level: false start
         }
@@ -217,8 +291,10 @@ fn mean_transition_s(
 }
 
 /// Measure one frame. Total cost: a handful of O(n) passes plus ~30 O(n)
-/// Goertzel evaluations for the frequency refinement — small next to the
-/// frame's FFTs.
+/// Goertzel evaluations for the frequency refinement — measured ~2 ms per
+/// endpoint at 32 k samples (≈2× the frame's FFT, ~1 % of its capture
+/// time), scaling linearly to ~70 ms at 1 M. Runs on the stream loop's
+/// blocking thread for exactly that reason.
 pub fn measure_scope(samples: &[f32], sample_rate: f64) -> ScopeValues {
     if samples.len() < 2 || sample_rate <= 0.0 {
         return ScopeValues::default();
@@ -262,7 +338,13 @@ pub fn measure_scope(samples: &[f32], sample_rate: f64) -> ScopeValues {
         });
         let cycles = (mean_crossings.len() - 1) as f64;
         let seed = cycles * sample_rate / (t_last - t_first);
-        (rms_ac, Some(refine_frequency(samples, sample_rate, seed)))
+        // Above ~0.45·fs (fewer than ~2.2 samples per period) the crossing
+        // seed itself degrades by hundreds of Hz and the refinement's
+        // 2-bin travel cannot recover — report nothing rather than a
+        // confidently-formatted wrong number (review lot B #3).
+        let freq = (seed < 0.45 * sample_rate)
+            .then(|| refine_frequency(samples, sample_rate, seed));
+        (rms_ac, freq)
     } else {
         (None, None)
     };
@@ -274,8 +356,9 @@ pub fn measure_scope(samples: &[f32], sample_rate: f64) -> ScopeValues {
         let l10 = base + 0.1 * amp;
         let l50 = base + 0.5 * amp;
         let l90 = base + 0.9 * amp;
-        let rise = mean_transition_s(samples, sample_rate, l10, l90, Edge::Rising);
-        let fall = mean_transition_s(samples, sample_rate, l90, l10, Edge::Falling);
+        let h = hyst as f64;
+        let rise = mean_transition_s(samples, sample_rate, l10, l90, h, Edge::Rising);
+        let fall = mean_transition_s(samples, sample_rate, l90, l10, h, Edge::Falling);
         // Duty over whole periods between rising mid crossings (a partial
         // period would bias toward whichever half-cycle the window ends in).
         let mid_crossings = rising_crossings(samples, l50 as f32, hyst);
@@ -540,6 +623,118 @@ mod tests {
         assert_eq!(n_clean, 9);
     }
 
+    /// Test 8 (review lot B #1) — triangle and sawtooth: their amplitude
+    /// histogram is FLAT (uniform density), so base/top must fall back to
+    /// min/max instead of trusting a sampling-noise "mode" — with the old
+    /// inward tie-resolution the top landed at mid-swing and a sawtooth's
+    /// rise read 4× short. On a linear ramp the 10→90 % time is exact:
+    /// 0.8 × the ramp duration, interpolation error zero.
+    #[test]
+    fn triangle_and_sawtooth_read_true_rise_fall_duty() {
+        let fs = 48000.0;
+        let period = 48usize; // 1 kHz
+        let n = 32768;
+
+        // Triangle ±1, starting at −1: ramps of half a period each way.
+        let tri: Vec<f32> = (0..n)
+            .map(|i| {
+                let p = i % period;
+                if p < period / 2 {
+                    -1.0 + 2.0 * (p as f32) / (period / 2) as f32
+                } else {
+                    1.0 - 2.0 * ((p - period / 2) as f32) / (period / 2) as f32
+                }
+            })
+            .collect();
+        let m = measure_scope(&tri, fs);
+        let half_period_s = (period / 2) as f64 / fs;
+        let rise = m.rise_s.expect("triangle rise");
+        assert!((rise - 0.8 * half_period_s).abs() < 1e-9, "tri rise {rise}");
+        let fall = m.fall_s.expect("triangle fall");
+        assert!((fall - 0.8 * half_period_s).abs() < 1e-9, "tri fall {fall}");
+        let duty = m.duty.expect("triangle duty");
+        assert!((duty - 0.5).abs() < 0.03, "tri duty {duty}");
+        let f = m.freq_hz.expect("triangle freq");
+        assert!((f - 1000.0).abs() < 0.01, "tri freq {f}");
+
+        // Sawtooth ±1: one full-period ramp up, one-sample drop.
+        let saw: Vec<f32> = (0..n)
+            .map(|i| -1.0 + 2.0 * ((i % period) as f32) / period as f32)
+            .collect();
+        let m = measure_scope(&saw, fs);
+        // The sampled ramp tops out at −1 + 2·47/48 (never +1), so the
+        // 10→90 % span is 0.8 × that actual swing along a slope of
+        // 2/period per sample: 0.8 · 47 samples exactly.
+        let rise = m.rise_s.expect("saw rise");
+        let expected_rise = 0.8 * (period - 1) as f64 / fs;
+        assert!((rise - expected_rise).abs() < 1e-8, "saw rise {rise}");
+        // The drop is a one-sample step: 90 %→10 % interpolates to 0.8 of
+        // that single interval.
+        let fall = m.fall_s.expect("saw fall");
+        assert!((fall - 0.8 / fs).abs() < 0.05 / fs, "saw fall {fall}");
+        let duty = m.duty.expect("saw duty");
+        assert!((duty - 0.5).abs() < 0.03, "saw duty {duty}");
+    }
+
+    /// Test 9 (review lot B #2) — the noise floor of an idle input must not
+    /// fake rise/fall times: its excursions never clear the Schmitt arming
+    /// band, so BOTH transition metrics read `None` exactly like the other
+    /// periodic metrics (it used to report ~32 µs while freq/duty said
+    /// `None`, and the sliding stats then averaged pure noise).
+    #[test]
+    fn noise_floor_yields_no_rise_fall() {
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let noise: Vec<f32> = (0..32768)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let u = (state >> 11) as f64 / (1u64 << 53) as f64;
+                (1e-6 * (2.0 * u - 1.0)) as f32 // ±1 µFS ≈ −120 dBFS
+            })
+            .collect();
+        let m = measure_scope(&noise, 48000.0);
+        assert!(m.rise_s.is_none(), "rise {:?}", m.rise_s);
+        assert!(m.fall_s.is_none(), "fall {:?}", m.fall_s);
+        assert!(m.freq_hz.is_none());
+        assert!(m.duty.is_none());
+        assert!(m.vpp < 3e-6);
+    }
+
+    /// Test 10 (review lot B #3) — near Nyquist the crossing seed degrades
+    /// beyond what the 2-bin refinement can recover (measured −210 Hz at
+    /// 23.9 kHz): the frequency must be dropped, not reported wrong. Well
+    /// below the guard the accuracy pin still holds.
+    #[test]
+    fn near_nyquist_frequency_is_dropped_not_wrong() {
+        let fs = 48000.0;
+        let hf = sine(23900.13, 0.5, 0.0, fs, 32768);
+        assert!(measure_scope(&hf, fs).freq_hz.is_none());
+
+        let ok = sine(20000.13, 0.5, 0.0, fs, 32768);
+        let f = measure_scope(&ok, fs).freq_hz.expect("20 kHz freq");
+        assert!((f - 20000.13).abs() < 0.01, "freq {f}");
+    }
+
+    /// Test 11 (review lot B #4) — a strong 3rd harmonic makes the signal
+    /// cross its mean 6× per period, seeding 3·f0; the subharmonic check
+    /// must bring the reading back to the true fundamental (it used to
+    /// report 3000.39 Hz for this exact signal).
+    #[test]
+    fn strong_third_harmonic_does_not_triple_the_frequency() {
+        let fs = 48000.0;
+        let f0 = 1000.13f64;
+        let sig: Vec<f32> = (0..32768)
+            .map(|i| {
+                let t = i as f64 / fs;
+                let w = 2.0 * std::f64::consts::PI * f0 * t;
+                (w.sin() - 0.6 * (3.0 * w).sin()) as f32
+            })
+            .collect();
+        let f = measure_scope(&sig, fs).freq_hz.expect("freq");
+        assert!((f - f0).abs() < 0.05, "freq {f}, expected {f0}");
+    }
+
     /// Test 7 — SlidingStats: exact avg/min/max/σ on a known set, eviction at
     /// capacity, single-value σ = 0, empty → None, NaN dropped.
     #[test]
@@ -570,6 +765,90 @@ mod tests {
 
         s.reset();
         assert!(s.snapshot().is_none());
+    }
+
+    /// Test 8 — the shortest buffer that clears the `len < 2` guard (n = 2):
+    /// a single linear step from 0.0 to 1.0. Vpp/Vmean are exact; the ONE
+    /// possible mean crossing means `mean_crossings.len() == 1` (< 2), so
+    /// every whole-period metric (rms_ac, freq, duty) is undefined — but the
+    /// single step is still a complete 10→90 % transition, so `rise_s` reads.
+    ///
+    /// `rise_s` is NOT the naive 0.8-sample figure here: `base_top`'s 128-bin
+    /// histogram over only 2 samples reports the BIN CENTERS nearest the
+    /// extremes, not the extremes themselves — `base` = bin 0's center =
+    /// 0.5/128, `top` = bin 127's center = 127.5/128, so the measured
+    /// `amp` is 254/256 (≈ 99.2 %) of the true 1.0 span. That shrinks the
+    /// 10→90 % window from 0.8 to 0.8 × 254/256 = 0.79375 samples — a real,
+    /// small discretization bias of the histogram method on very short/
+    /// sparse buffers (rect_wave_duty_freq_rise_fall's 4800-sample buffer
+    /// already tolerates it with slack; here it's exact enough to pin).
+    #[test]
+    fn two_sample_buffer_has_one_crossing_and_a_defined_rise() {
+        let fs = 48000.0;
+        let sig = vec![0.0f32, 1.0f32];
+        let m = measure_scope(&sig, fs);
+
+        assert!((m.vpp - 1.0).abs() < 1e-6, "vpp {}", m.vpp);
+        assert!((m.vmean - 0.5).abs() < 1e-6, "vmean {}", m.vmean);
+        assert!(m.rms_ac.is_none(), "only one mean crossing exists");
+        assert!(m.freq_hz.is_none());
+        assert!(m.duty.is_none(), "only one mid crossing exists");
+
+        let rise = m.rise_s.expect("the single step is a complete transition");
+        let expected = 0.8 * (254.0 / 256.0) / fs;
+        assert!((rise - expected).abs() < 1e-12, "rise {rise}, expected {expected}");
+    }
+
+    /// Test 9 — a signal spanning LESS than one full cycle (a quarter period
+    /// here) must never report a frequency: `mean_crossings` holds at most
+    /// one entry (the single rising crossing of the ramp through its own
+    /// mean), which is below the 2-crossing whole-period requirement.
+    /// Vpp/Vmean are pinned to the analytic quarter-sine values: mean over
+    /// θ ∈ [0, π/2) of `amp·sinθ` is `amp·(2/π)` (∫sinθ dθ = [−cosθ], the
+    /// quarter-cycle average of a sine ramp); Vpp is ~amp (the window ends
+    /// just shy of the peak, one sample before θ = π/2).
+    #[test]
+    fn sub_one_cycle_window_never_reports_a_frequency() {
+        let fs = 48000.0;
+        let amp = 0.5;
+        // 1 Hz over 12000 samples at 48 kHz = 0.25 s = exactly one quarter
+        // period: the sine argument runs from 0 to (just under) π/2.
+        let sig = sine(1.0, amp, 0.0, fs, 12000);
+        let m = measure_scope(&sig, fs);
+
+        let expected_mean = amp * 2.0 / std::f64::consts::PI;
+        assert!((m.vmean - expected_mean).abs() < 1e-3, "vmean {}", m.vmean);
+        assert!((m.vpp - amp).abs() < 1e-3, "vpp {}", m.vpp);
+
+        assert!(m.freq_hz.is_none(), "under one cycle: no whole period exists");
+        assert!(m.rms_ac.is_none());
+        assert!(m.duty.is_none());
+    }
+
+    /// Test 10 — duty and frequency must be invariant to DC offset: base/top
+    /// (duty) come from the bimodal amplitude HISTOGRAM and mean-crossing
+    /// counting (freq) is relative to the frame's OWN mean, so shifting every
+    /// sample by a constant moves Vmean by exactly that constant and changes
+    /// nothing else — unlike a fixed-level duty/frequency measurement, which
+    /// a DC offset would silently break.
+    #[test]
+    fn duty_and_frequency_are_invariant_to_dc_offset() {
+        let fs = 48000.0;
+        let amp = 0.5;
+        let dc = 0.3;
+        // Same 25 %-duty, 1 kHz rectangular wave as Test 3, shifted by +0.3.
+        let sig: Vec<f32> = rect_25(amp, 48, 4800).iter().map(|&x| x + dc).collect();
+        let m = measure_scope(&sig, fs);
+
+        assert!((m.vpp - 2.0 * amp as f64).abs() < 1e-6, "vpp {}", m.vpp);
+        // Un-shifted mean of the 25 %-duty wave is 0.25·amp − 0.75·amp = −0.5·amp.
+        let expected_mean = dc as f64 - 0.5 * amp as f64;
+        assert!((m.vmean - expected_mean).abs() < 1e-6, "vmean {}", m.vmean);
+
+        let duty = m.duty.expect("duty");
+        assert!((duty - 0.25).abs() < 0.01, "duty {duty}");
+        let f = m.freq_hz.expect("freq");
+        assert!((f - 1000.0).abs() < 0.01, "freq {f}");
     }
 }
 

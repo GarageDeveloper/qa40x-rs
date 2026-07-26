@@ -5,9 +5,9 @@
  * mixer.ts slot-building half must not drift in the port).
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import type { TriggerAlign } from "../../gen";
+import type { ScopeMeasures, TriggerAlign } from "../../gen";
 import type { DecodedFrame } from "../../ipc/stream";
-import { clearAllFrames } from "../../data/frames";
+import { clearAllFrames, getFrames } from "../../data/frames";
 import { clearTriggerSnapshots, getTriggerSnapshot } from "../../data/triggered";
 import type { PeriodicSource, ScriptSource, SourceMeta } from "../state";
 import { initialState } from "../state";
@@ -465,5 +465,85 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
     expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeDefined();
     ingestFrame(store, frame({})); // input_l no longer requested
     expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeUndefined();
+  });
+});
+
+describe("ingestFrame — scope measurement suite reaches the frames cache (issue #26 lot B)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  const stat = (value: number): { value: number; avg: number; min: number; max: number; sd: number; n: number } => ({
+    value,
+    avg: value,
+    min: value,
+    max: value,
+    sd: 0,
+    n: 1,
+  });
+  const scopeFixture = (vpp: number): ScopeMeasures => ({
+    vpp: stat(vpp),
+    vmean: stat(0),
+    rms_ac: stat(vpp / 2),
+    freq_hz: stat(1000),
+    rise_s: stat(1e-6),
+    fall_s: stat(1e-6),
+    duty: stat(0.5),
+  });
+
+  /** Same minimal shape as the trigger-block `frame()` above, but exposes
+   * `measures.inputL` so a test can drive it on and off across frames —
+   * the trigger block's helper hardcodes it to `null`. */
+  function frameWithMeasures(inputL: ScopeMeasures | null): DecodedFrame {
+    return {
+      seq: 1,
+      sampleRate: 48000,
+      input: {
+        l: { sampleRate: 48000, samples: Float64Array.from([0.1, 0.2, 0.3]) },
+        r: { sampleRate: 48000, samples: Float64Array.from([0.4, 0.5, 0.6]) },
+      },
+      output: null,
+      fd: { inputL: null, inputR: null, outputL: null, outputR: null },
+      metrics: { inputL: null, inputR: null, harmonicsL: null, harmonicsR: null },
+      mix: {
+        sigma_peak_dbv: null,
+        clip_input: "none",
+        clip_output: false,
+        fitted_output_range_dbv: 8,
+      },
+      offsets: { input_l: 20, input_r: 20, output_l: 0, output_r: 0, calibrated: true },
+      stats: { frames: 1, fps: 30, frame_ms: 33 },
+      errors: [],
+      trigger: { inputL: null, inputR: null, outputL: null, outputR: null },
+      measures: { inputL: inputL, inputR: null, outputL: null, outputR: null },
+    };
+  }
+
+  function freshStore() {
+    return new Store(initialState(), { freeze: true });
+  }
+
+  it("a landed scope suite reaches data/frames.ts's cache for that trace", () => {
+    const store = freshStore();
+    ingestFrame(store, frameWithMeasures(scopeFixture(2.0)));
+    const cached = getFrames(HW_TRACE_IDS.inputL);
+    expect(cached?.scope?.vpp.value).toBe(2.0);
+    expect(cached?.scope?.freq_hz.value).toBe(1000);
+  });
+
+  it("the scope field disappears once the endpoint drops out of the MeasureRequest", () => {
+    const store = freshStore();
+    // Frame 1: the suite is requested and lands.
+    ingestFrame(store, frameWithMeasures(scopeFixture(2.0)));
+    expect(getFrames(HW_TRACE_IDS.inputL)?.scope).toBeDefined();
+
+    // Frame 2: same td (so the write isn't skipped), but the backend no
+    // longer reports a suite for this endpoint (tile's chip strip changed,
+    // or the selector stopped requesting it) — `measures.inputL` is null.
+    // `putFrames` replaces the cached record wholesale, so `scope` must be
+    // gone entirely, not a stale leftover from frame 1.
+    ingestFrame(store, frameWithMeasures(null));
+    expect(getFrames(HW_TRACE_IDS.inputL)?.scope).toBeUndefined();
   });
 });

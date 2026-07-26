@@ -72,4 +72,17 @@ describe("measureRequest", () => {
     s.layout.tiles["tile-4"].measures = ["freq"]; // tile-4 follows Input R
     expect(measureRequest(s).input_r).toBe(false);
   });
+
+  it("two visible tiles union their endpoints — one tile's request never masks another's", () => {
+    const s = initialState();
+    s.layout.pattern = "2x2"; // all four tiles visible
+    tile(s, "tile-1").measures = ["vpp"]; // tile-1 follows Input L
+    tile(s, "tile-4").measures = ["freq"]; // tile-4 follows Input R
+    expect(measureRequest(s)).toEqual({
+      input_l: true,
+      input_r: true,
+      output_l: false,
+      output_r: false,
+    });
+  });
 });

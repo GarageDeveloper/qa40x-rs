@@ -810,9 +810,29 @@ struct MeasureStates {
     input_r: EndpointMeasureStats,
     output_l: EndpointMeasureStats,
     output_r: EndpointMeasureStats,
+    /// The (buffer_size, sample_rate) the windows were accumulated under —
+    /// see [`MeasureStates::sync_acquisition`].
+    acquisition_key: Option<(u32, u32)>,
 }
 
 impl MeasureStates {
+    /// Drop every window when the acquisition geometry changes: readings
+    /// taken over a different frame length / sample rate are a different
+    /// measurement (a 100-frame window means minutes at 1M and seconds at
+    /// 4k), and blending them would show a bogus min/max/σ for a full
+    /// window length (review lot B #5). A signal-content change (retuned
+    /// generator) intentionally does NOT reset — the sliding window
+    /// absorbing it within [`MEASURE_STATS_WINDOW`] frames is standard DSO
+    /// statistics behaviour.
+    fn sync_acquisition(&mut self, buffer_size: u32, sample_rate: u32) {
+        let key = Some((buffer_size, sample_rate));
+        if self.acquisition_key != key {
+            if self.acquisition_key.is_some() {
+                *self = MeasureStates::default();
+            }
+            self.acquisition_key = key;
+        }
+    }
     /// Build the frame's [`MeasuresMsg`] from the per-frame values. An
     /// endpoint with no values this frame (not requested, or an output in
     /// monitor mode) reports `None` AND drops its window — when the suite
@@ -1288,32 +1308,29 @@ async fn run_stream_loop(
             let captured = captured.clone();
             let stimulus = stimulus.clone();
             tokio::task::spawn_blocking(move || {
-                analyzers
+                let analysis = analyzers
                     .lock()
                     .map_err(|_| "analyzer lock poisoned".to_string())
                     .map(|mut a| {
                         if reset_now {
                             a.reset_accumulation();
                         }
-                        let analysis =
-                            analyze_frame(&mut a, &config, &captured, stimulus.as_ref(), sample_rate);
-                        // Scope measurement suite (lot B): same blocking
-                        // thread (a Goertzel refinement over a 1M frame is
-                        // real CPU), computed AFTER — and independently of —
-                        // `analyze_frame` (its output never feeds this, this
-                        // never feeds it; the pinned non-interference rule).
-                        let values = measure_endpoints(
-                            &config.measures,
-                            &captured,
-                            stimulus.as_ref(),
-                            sample_rate,
-                        );
-                        (analysis, values)
-                    })
+                        analyze_frame(&mut a, &config, &captured, stimulus.as_ref(), sample_rate)
+                    })?;
+                // Scope measurement suite (lot B): same blocking thread (a
+                // Goertzel refinement over a 1M frame is real CPU), computed
+                // AFTER — and independently of — `analyze_frame` (its output
+                // never feeds this, this never feeds it; the pinned
+                // non-interference rule), and OUTSIDE the analyzers lock,
+                // whose accumulators it never touches.
+                let values =
+                    measure_endpoints(&config.measures, &captured, stimulus.as_ref(), sample_rate);
+                Ok::<_, String>((analysis, values))
             })
             .await
             .map_err(|e| format!("analysis task failed: {e}"))??
         };
+        measure_states.sync_acquisition(config.buffer_size, sample_rate);
         let measures = measure_states.ingest(&scope_values);
         clip_in.report(analysis.input_peak >= input_clip_threshold, now_ms());
         near_in.report(analysis.input_peak >= input_near_threshold, now_ms());
@@ -1633,6 +1650,29 @@ mod tests {
         assert_eq!(il.freq_hz.n, 0);
     }
 
+    /// Test 14b (review lot B #5) — a buffer_size or sample_rate change
+    /// drops every window: readings taken under a different acquisition
+    /// geometry are a different measurement. A same-key sync is a no-op.
+    #[test]
+    fn measure_states_reset_on_acquisition_change() {
+        let mut st = MeasureStates::default();
+        let vals = ScopeValues { vpp: 1.0, vmean: 0.0, ..Default::default() };
+
+        st.sync_acquisition(32768, 48000);
+        st.ingest(&[Some(vals), None, None, None]);
+        st.sync_acquisition(32768, 48000); // no-op
+        let m = st.ingest(&[Some(vals), None, None, None]);
+        assert_eq!(m.input_l.unwrap().vpp.n, 2, "same key must keep the window");
+
+        st.sync_acquisition(65536, 48000); // FFT size changed
+        let m = st.ingest(&[Some(vals), None, None, None]);
+        assert_eq!(m.input_l.unwrap().vpp.n, 1, "new key must restart the window");
+
+        st.sync_acquisition(65536, 96000); // sample rate changed
+        let m = st.ingest(&[Some(vals), None, None, None]);
+        assert_eq!(m.input_l.unwrap().vpp.n, 1);
+    }
+
     /// Test 15 — an old/minimal client's JSON without the `measures` key
     /// deserializes to the all-off default (the `triggers` compatibility
     /// contract, extended).
@@ -1649,5 +1689,41 @@ mod tests {
         let cfg: StreamConfig = serde_json::from_str(json).expect("deserializes");
         assert_eq!(cfg.measures, MeasureRequest::default());
         assert!(!cfg.measures.input_l);
+    }
+
+    /// Test 16 — a non-finite reading (NaN, e.g. a poisoned capture buffer)
+    /// must never poison the sliding window: `SlidingStats::push` silently
+    /// drops it, so the reported `ScopeStat.value` is `None` for THIS frame
+    /// (never a NaN sent to the frontend) while `avg`/`min`/`max`/`n` keep
+    /// describing only the frames that read a finite value.
+    #[test]
+    fn endpoint_stats_ignore_a_non_finite_reading() {
+        let frame = |vpp: f64| ScopeValues {
+            vpp,
+            vmean: 0.0,
+            rms_ac: None,
+            freq_hz: None,
+            rise_s: None,
+            fall_s: None,
+            duty: None,
+        };
+        let mut st = EndpointMeasureStats::default();
+
+        let m1 = st.ingest(&frame(1.0));
+        assert_eq!(m1.vpp.value, Some(1.0));
+        assert_eq!(m1.vpp.n, 1);
+        assert_eq!(m1.vpp.avg, 1.0);
+
+        // A NaN reading: reported value is None, window/stats untouched.
+        let m2 = st.ingest(&frame(f64::NAN));
+        assert_eq!(m2.vpp.value, None, "a NaN reading must not surface as a value");
+        assert_eq!(m2.vpp.n, 1, "the NaN must not have been pushed into the window");
+        assert_eq!(m2.vpp.avg, 1.0, "stats still describe only the one finite reading");
+
+        // The window keeps working normally afterward.
+        let m3 = st.ingest(&frame(3.0));
+        assert_eq!(m3.vpp.value, Some(3.0));
+        assert_eq!(m3.vpp.n, 2);
+        assert_eq!(m3.vpp.avg, 2.0);
     }
 }

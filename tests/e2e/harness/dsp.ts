@@ -394,16 +394,11 @@ function goertzelPower(windowed: Float64Array, sampleRate: number, freqHz: numbe
   return s1 * s1 + s2 * s2 - coeff * s1 * s2;
 }
 
-/** Port of `refine_frequency`: iterative parabolic interpolation on the
+/** Port of `refine_at`: one parabolic-interpolation descent on the
  * Hann-windowed Goertzel log-power, one-bin start, halving spacing. */
-function refineFrequency(samples: ArrayLike<number>, sampleRate: number, seedHz: number): number {
-  const n = samples.length;
+function refineAt(windowed: Float64Array, sampleRate: number, seedHz: number): number {
+  const n = windowed.length;
   const nyquist = sampleRate / 2;
-  if (n < 8 || seedHz <= 0 || seedHz >= nyquist) return seedHz;
-  const windowed = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    windowed[i] = samples[i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
-  }
   let f = seedHz;
   let d = sampleRate / n;
   for (let it = 0; it < 10; it++) {
@@ -428,7 +423,41 @@ function refineFrequency(samples: ArrayLike<number>, sampleRate: number, seedHz:
   return f;
 }
 
-/** Port of `base_top`: modes of the lower/upper halves of the histogram. */
+/** Port of `refine_frequency`: refineAt from the crossing seed, then the
+ * SUBHARMONIC check — a strong-odd-harmonics waveform seeds an integer
+ * multiple of the fundamental; comparing the power at f/2 and f/3 and
+ * re-refining from the stronger one recovers the true fundamental. */
+function refineFrequency(samples: ArrayLike<number>, sampleRate: number, seedHz: number): number {
+  const n = samples.length;
+  const nyquist = sampleRate / 2;
+  if (n < 8 || seedHz <= 0 || seedHz >= nyquist) return seedHz;
+  const windowed = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    windowed[i] = samples[i] * 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+  }
+  const f1 = refineAt(windowed, sampleRate, seedHz);
+  const bin = sampleRate / n;
+  let best = f1;
+  let bestP = goertzelPower(windowed, sampleRate, f1);
+  for (const k of [2, 3]) {
+    const cand = f1 / k;
+    if (cand <= bin) continue;
+    if (goertzelPower(windowed, sampleRate, cand) > bestP) {
+      const fk = refineAt(windowed, sampleRate, cand);
+      const pk = goertzelPower(windowed, sampleRate, fk);
+      if (pk > bestP) {
+        best = fk;
+        bestP = pk;
+      }
+    }
+  }
+  return best;
+}
+
+/** Port of `base_top`: modes of the lower/upper halves of the histogram,
+ * ties resolving OUTWARD, and a non-modal half (no frank flat ≥ 8× the
+ * uniform per-bin count) falling back to that half's extreme — a
+ * triangle/sawtooth's flat histogram must not put "top" at mid-swing. */
 function baseTop(samples: ArrayLike<number>, min: number, max: number): [number, number] {
   const BINS = 128;
   const span = max - min;
@@ -438,26 +467,34 @@ function baseTop(samples: ArrayLike<number>, min: number, max: number): [number,
     counts[Math.min(idx, BINS - 1)] += 1;
   }
   const binCenter = (i: number): number => min + ((i + 0.5) / BINS) * span;
-  const mode = (start: number, end: number): number => {
-    let best = start;
-    for (let i = start; i < end; i++) if (counts[i] > counts[best]) best = i;
-    return binCenter(best);
-  };
-  return [mode(0, BINS / 2), mode(BINS / 2, BINS)];
+  const modalThreshold = (samples.length / BINS) * 8;
+  let loMode = 0;
+  for (let i = 0; i < BINS / 2; i++) if (counts[i] > counts[loMode]) loMode = i;
+  let hiMode = BINS - 1;
+  for (let i = BINS - 1; i >= BINS / 2; i--) if (counts[i] > counts[hiMode]) hiMode = i;
+  const base = counts[loMode] >= modalThreshold ? binCenter(loMode) : min;
+  const top = counts[hiMode] >= modalThreshold ? binCenter(hiMode) : max;
+  return [base, top];
 }
 
 /** Port of `mean_transition_s`: mean from→to crossing time, sub-sample at
- * both ends, a later `lo` crossing restarting the clock. */
+ * both ends, Schmitt-ARMED like the Rust twin — a candidate opens only
+ * once the signal has been seen at/below `fromLevel − hysteresis` (or the
+ * crossing's own `prev` proves it), so an idle input's noise floor can
+ * never fake a transition; a later `lo` crossing restarts the clock. */
 function meanTransitionS(
   samples: ArrayLike<number>,
   sampleRate: number,
   fromLevel: number,
   toLevel: number,
+  hysteresis: number,
   direction: TriggerEdgePolarity
 ): number | null {
   const s = direction === "rising" ? 1 : -1;
   const lo = s * fromLevel;
   const hi = s * toLevel;
+  const h = Math.abs(hysteresis);
+  let armed = false;
   let startT: number | null = null;
   let sum = 0;
   let count = 0;
@@ -468,7 +505,13 @@ function meanTransitionS(
       prev < level && cur >= level ? i - 1 + (level - prev) / (cur - prev) : null;
     const tLo = crossUp(lo);
     if (tLo !== null) {
-      startT = tLo;
+      if (armed || prev <= lo - h || startT !== null) {
+        startT = tLo;
+        armed = false;
+      }
+    } else if (cur <= lo - h) {
+      armed = true;
+      startT = null;
     } else if (startT !== null && cur < lo) {
       startT = null;
     }
@@ -527,7 +570,10 @@ export function measureScope(samples: ArrayLike<number>, sampleRate: number): Sc
       rmsAc = Math.sqrt(sq / (i1 - i0));
     }
     const cycles = meanCrossings.length - 1;
-    freqHz = refineFrequency(samples, sampleRate, (cycles * sampleRate) / (tLast - tFirst));
+    // Above ~0.45·fs the crossing seed itself degrades beyond what the
+    // 2-bin refinement can recover: report nothing (Rust twin's guard).
+    const seed = (cycles * sampleRate) / (tLast - tFirst);
+    freqHz = seed < 0.45 * sampleRate ? refineFrequency(samples, sampleRate, seed) : null;
   }
 
   let riseS: number | null = null;
@@ -539,8 +585,8 @@ export function measureScope(samples: ArrayLike<number>, sampleRate: number): Sc
     const l10 = base + 0.1 * amp;
     const l50 = base + 0.5 * amp;
     const l90 = base + 0.9 * amp;
-    riseS = meanTransitionS(samples, sampleRate, l10, l90, "rising");
-    fallS = meanTransitionS(samples, sampleRate, l90, l10, "falling");
+    riseS = meanTransitionS(samples, sampleRate, l10, l90, hyst, "rising");
+    fallS = meanTransitionS(samples, sampleRate, l90, l10, hyst, "falling");
     const midCrossings = risingCrossings(samples, l50, hyst);
     if (midCrossings.length >= 2) {
       const i0 = Math.ceil(midCrossings[0]);

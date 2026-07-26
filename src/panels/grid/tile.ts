@@ -919,11 +919,14 @@ export function createTile(
         if (def && valueNode) valueNode.textContent = def.format(ctx);
         // Sliding-window stats ride the tooltip (issue #26 lot B) — text
         // only, the chip itself never changes size (no-layout-shift rule).
+        // Assigned only on change: rewriting `title` every frame could
+        // dismiss an open native tooltip mid-read (webview-dependent).
         if (def?.statsTooltip) {
           const stats = def.statsTooltip(ctx);
-          (chip as HTMLElement).title = stats
+          const title = stats
             ? `${def.desc}\n${stats}\n— click to remove`
             : `${def.desc} — click to remove`;
+          if ((chip as HTMLElement).title !== title) (chip as HTMLElement).title = title;
         }
       }
     },

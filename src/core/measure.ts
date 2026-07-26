@@ -197,19 +197,18 @@ export const MEASURES: MeasureDef[] = [
       return `${v.toFixed(1)} ${unit}`;
     },
   },
-  // Backend harmonic metrics — input endpoints only (the stream analyzes
-  // captured channels; an ideal stimulus has no distortion to measure).
   // Scope measurement suite (issue #26 lot B) — backend-computed per
   // endpoint with sliding-window stats on the chip tooltip. The values ride
   // the stream frame (data/frames.ts `scope`), not `measure_frames`.
   scopeDef("vpp", "Vpp", "Peak-to-peak amplitude", (m) => m.vpp, (ctx, v) =>
     fmtScopeLevel(ctx, v, "Vpp")
   ),
-  scopeDef("vmean", "Vmean", "Mean level (DC) of the frame", (m) => m.vmean, (ctx, v) => {
-    if (ctx.tdUnit === "pctfs") return `${(v * 100).toPrecision(3)} %FS`;
-    if (ctx.offsetDb === null) return `${(v * 1e3).toPrecision(3)} mFS`;
-    return `${(v * displayScale("v", ctx.offsetDb) * 1e3).toPrecision(3)} mV`;
-  }),
+  // Vmean goes through the same adaptive-SI path as the other levels: a
+  // hard-coded mV would print "5.00e+3 mV" for a 5 V mean (reachable on a
+  // +18 dBV range — review lot B #12).
+  scopeDef("vmean", "Vmean", "Mean level (DC) of the frame", (m) => m.vmean, (ctx, v) =>
+    fmtScopeLevel(ctx, v, "V")
+  ),
   scopeDef(
     "acrms",
     "AC RMS",
@@ -233,6 +232,8 @@ export const MEASURES: MeasureDef[] = [
   scopeDef("duty", "Duty", "Time above the 50 % level, whole periods", (m) => m.duty, (_ctx, v) =>
     `${(v * 100).toFixed(1)} %`
   ),
+  // Backend harmonic metrics — input endpoints only (the stream analyzes
+  // captured channels; an ideal stimulus has no distortion to measure).
   { key: "thd", label: "THD", desc: "Total harmonic distortion", domain: "fd", format: ({ metrics }) => (metrics ? pct(metrics.thd) : "—") },
   { key: "thddb", label: "THD (dB)", desc: "THD relative, in dB", domain: "fd", format: ({ metrics }) => (metrics ? percentToDb(metrics.thd) : "—") },
   { key: "thdn", label: "THD+N", desc: "THD + noise, in dB", domain: "fd", format: ({ metrics }) => (metrics ? percentToDb(metrics.thd_n) : "—") },
