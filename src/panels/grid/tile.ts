@@ -873,6 +873,15 @@ export function createTile(
       const trigState = trigSourceId ? s.run.triggers[trigSourceId]?.state : undefined;
       trigChip.textContent = triggerChipText(trigSettings.mode, trigSettings.edge, trigState);
       armBtn.toggleAttribute("disabled", trigSettings.mode !== "single");
+      // Armed = SINGLE still waiting for its shot (undefined = nothing
+      // latched yet, i.e. armed). Highlight clears the moment the shot
+      // lands (`triggered` on the firing frame, `stopped` after).
+      armBtn.classList.toggle(
+        "btn--primary",
+        trigSettings.mode === "single" &&
+          trigState !== "triggered" &&
+          trigState !== "stopped"
+      );
 
       // The Auto option names the trace it currently resolves to — "Auto
       // (Input L)" — so the readouts are never ambiguous (maintainer ask).

@@ -185,6 +185,29 @@ test("chip updates from a gear change even while the stream is STOPPED (review #
   expect(await app.triggerChip("tile-2")).toBe("T ▲ AUTO");
 });
 
+test("Arm button highlights while a SINGLE shot is armed, clears once it lands", async ({ app }) => {
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.waitForSeries("Input L");
+
+  // Armed but unable to fire: raise the level ABOVE the peak first, THEN
+  // select SINGLE — the other order fires instantly at the default level 0
+  // and the shot lands before the level change (setTileTrigger applies its
+  // fields in a fixed order, mode before level).
+  await app.setTileTrigger("tile-2", { levelV: 999, edge: "rising" });
+  await app.setTileTrigger("tile-2", { mode: "single" });
+  await expect.poll(async () => app.armHighlighted("tile-2"), { timeout: 10_000 }).toBe(true);
+
+  // Drop the level into the signal: the shot lands and disarms.
+  await app.setTileTrigger("tile-2", { levelV: 0 });
+  await expect.poll(async () => app.armHighlighted("tile-2"), { timeout: 10_000 }).toBe(false);
+  await expect.poll(async () => app.triggerChip("tile-2"), { timeout: 10_000 }).toMatch(/STOP/);
+
+  // Off mode never highlights (and the button is disabled anyway).
+  await app.setTileTrigger("tile-2", { mode: "off" });
+  await expect.poll(async () => app.armHighlighted("tile-2"), { timeout: 5000 }).toBe(false);
+});
+
 test("the chip's quick menu sets mode and edge without opening the gear", async ({ app }) => {
   const id = await app.addSine();
   await app.playSine(id);

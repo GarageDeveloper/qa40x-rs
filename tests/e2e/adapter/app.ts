@@ -697,6 +697,16 @@ export class AppV2 {
     await this.drv.click(`[data-testid="tile-trigger-arm-${tileId}"]`);
   }
 
+  /** Whether the Arm button carries the armed highlight (SINGLE waiting). */
+  async armHighlighted(tileId: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { sel: string }) =>
+        document.querySelector(a.sel)?.classList.contains("btn--primary") ===
+        true,
+      { sel: `[data-testid="tile-trigger-arm-${tileId}"]` }
+    );
+  }
+
   /** Client-px bounding box of a scope tile's chart canvas — the coordinate
    * space `dragOnScopeCanvas` and the trigger/marker hit zones live in. */
   async chartCanvasRect(
