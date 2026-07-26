@@ -7,6 +7,7 @@
  * it; while one runs, every other transport is disabled with the reason.
  */
 import "./panel.css";
+import { shallowEq } from "../../store/store";
 import type { Store } from "../../store/store";
 import type { AppState, ProgramMeta } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
@@ -23,6 +24,7 @@ import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openSweepDialog } from "./sweepdialog";
 import { openProgramScriptDialog } from "./scriptdialog";
+import { openWowFlutterDialog } from "./wowflutterdialog";
 
 interface RowVM {
   prog: ProgramMeta;
@@ -104,6 +106,21 @@ export function mountProgramsPanel(
     "+"
   );
 
+  // Wow & flutter (issue #28) is a one-shot dialog, not a persisted program
+  // (see store/actions/wowflutter.ts) — its own button beside "+", not an
+  // entry in the add-program menu. Short label: at the default sidebar
+  // width, "Wow & flutter…" wrapped onto two lines and doubled this header's
+  // height on every workspace (issue #28 review point 8).
+  const wfBtn = el(
+    "button.btn.btn--small",
+    {
+      type: "button",
+      "data-testid": "btn-wow-flutter",
+      onclick: () => openWowFlutterDialog(store, ipc),
+    },
+    "W&F…"
+  ) as HTMLButtonElement;
+
   const head = el(
     "div.programs__head",
     {},
@@ -116,7 +133,8 @@ export function mountProgramsPanel(
       },
       "exclusive · one at a time"
     ),
-    el("div.programs__addwrap", {}, addBtn, menu)
+    el("div.programs__addwrap", {}, addBtn, menu),
+    wfBtn
   );
   const section = el(
     "section.programs",
@@ -253,6 +271,23 @@ export function mountProgramsPanel(
       render();
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  );
+
+  // Wow & flutter's own button greys out under the SAME rules every other
+  // transport does (issue #28 review point 10a): another exclusive
+  // measurement running, or no device connected.
+  store.select(
+    (s) => ({
+      lock: programLockReason(s),
+      connected: s.device.status === "connected",
+    }),
+    ({ lock, connected }) => {
+      wfBtn.disabled = !connected || lock !== null;
+      wfBtn.title = !connected
+        ? "Connect the device first — this measurement drives the hardware."
+        : (lock ?? "Wow & flutter — DIN/IEC 386 approximation on a reference tone");
+    },
+    shallowEq
   );
 
   // Tick the acquisition estimate while a program runs (the backend is

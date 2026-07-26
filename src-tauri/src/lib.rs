@@ -1144,6 +1144,53 @@ async fn measure_thd_vs_level(
     .await
 }
 
+/// Measure wow & flutter (issue #28) on a reference tone (DIN/IEC 386
+/// approximation, typically 3150 Hz). Session-scoped like the other
+/// discrete measurement commands: no state survives the call besides the
+/// device handle itself, and channels are named per-endpoint (issue #25 —
+/// never "the device"). Cancellable through the SAME `sweep_cancel` flag /
+/// `sweep_stop` command the batched THD sweep uses — safe to share because
+/// only one exclusive measurement program runs at a time.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command: args map 1:1 to the UI form.
+async fn measure_wow_flutter(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    reference_freq: f32,
+    duration_secs: f32,
+    output_channel: qa40x::Channel,
+    input_channel: qa40x::Channel,
+    generate: bool,
+) -> Result<audio::WowFlutterResult, String> {
+    let (device, running, stop, sweep_cancel) = {
+        let app_state = state.lock().await;
+        (
+            app_state.device.clone(),
+            app_state.generator_running.clone(),
+            app_state.generator_stop.clone(),
+            app_state.sweep_cancel.clone(),
+        )
+    };
+    ensure_generator_stopped(&running, &stop).await;
+    // A fresh call consumes any stale Stop click from a previous run (same
+    // rule as run_thd_batch's "a fresh batch consumes any stale stop click").
+    sweep_cancel.store(false, Ordering::SeqCst);
+    let device = device.lock().await;
+    device
+        .measure_wow_flutter(
+            reference_freq,
+            duration_secs,
+            output_channel,
+            input_channel,
+            generate,
+            Some(&sweep_cancel),
+        )
+        .await
+        .map_err(|e| match e {
+            qa40x::QA40xError::Cancelled => "wow & flutter measurement cancelled".to_string(),
+            e => format!("wow & flutter measurement failed: {e}"),
+        })
+}
+
 // ---- Test plans (reusable measurement recipes) ----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1253,6 +1300,7 @@ pub fn run() {
             measure_frequency_response_multi,
             measure_thd_vs_frequency,
             measure_thd_vs_level,
+            measure_wow_flutter,
             firmware::extract_firmware_from_exe,
             firmware::extract_firmware_from_setup,
             firmware::list_qa40x_releases,

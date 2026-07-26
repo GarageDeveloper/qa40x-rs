@@ -19,6 +19,12 @@ export function openDialog(opts: {
    * call `close()` from the returned handle). */
   actions: HTMLElement[];
   testid?: string;
+  /** Fires on EVERY close path — ✕, Escape, backdrop click, an action
+   * calling `close()`, or another `openDialog()` replacing this one — not
+   * just the caller's own action buttons. Lets a dialog with an in-flight
+   * device operation (e.g. Wow & flutter) cancel it when dismissed any
+   * other way. */
+  onClose?: () => void;
 }): DialogHandle {
   current?.close();
 
@@ -50,11 +56,15 @@ export function openDialog(opts: {
     )
   );
 
+  let closed = false;
   const handle: DialogHandle = {
     close: () => {
+      if (closed) return; // Escape + a click can both fire in one dismissal
+      closed = true;
       overlay.remove();
       document.removeEventListener("keydown", onKey);
       if (current === handle) current = null;
+      opts.onClose?.();
     },
   };
   current = handle;

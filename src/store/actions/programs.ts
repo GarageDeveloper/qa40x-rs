@@ -40,6 +40,7 @@ import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 import { toast } from "./ui";
+import { WOW_FLUTTER_LOCK_ID } from "./wowflutter";
 
 /* ------------------------------------------------------------------ */
 /* Definitions                                                         */
@@ -191,6 +192,7 @@ export function configureScriptProgram(
 export function programLockReason(s: AppState): string | null {
   const id = s.run.programLock;
   if (id === null) return null;
+  if (id === WOW_FLUTTER_LOCK_ID) return 'measurement "Wow & flutter" is running';
   const label = s.traces.byId[id]?.label ?? "program";
   return `measurement "${label}" is running`;
 }

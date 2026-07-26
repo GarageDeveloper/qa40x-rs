@@ -63,3 +63,4 @@ export type { FlashProgress } from "./FlashProgress";
 export type { RegistryMatch } from "./RegistryMatch";
 export type { ReleaseInfo } from "./ReleaseInfo";
 export type { SignatureStatus } from "./SignatureStatus";
+export type { WowFlutterResult } from "./WowFlutterResult";

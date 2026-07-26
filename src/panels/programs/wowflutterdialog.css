@@ -1,0 +1,75 @@
+/* Wow & flutter dialog (issue #28) — configure + run + result readout. */
+
+.wf {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 460px;
+  max-width: 560px;
+}
+
+.wf__intro {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.wf__note {
+  margin: 2px 0;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.wf__actions {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* `.btn`'s `display: inline-flex` (author, normal) otherwise beats the UA's
+   `[hidden] { display: none }` (UA, normal) — same lesson as
+   `.programs__menu[hidden]` in panel.css: Run/Stop must actually disappear,
+   not just occupy the DOM invisibly-but-present. */
+.wf__actions [hidden] {
+  display: none;
+}
+
+.wf__meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.wf__meta dt {
+  color: var(--ink-3);
+}
+
+.wf__meta dd {
+  margin: 0;
+  font-family: var(--mono);
+  color: var(--ink-1);
+}
+
+.wf__hint-text {
+  margin: 2px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.wf__subtitle {
+  margin: 4px 0 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+}
+
+.wf__svg {
+  width: 100%;
+  height: 150px;
+  background: var(--chart-surface);
+  border: 1px solid var(--line-1);
+  border-radius: 4px;
+}

@@ -1641,6 +1641,16 @@ impl QA40xDevice {
     /// reference tone is played on the output (loopback / driven DUT); otherwise
     /// silence is sent and the input is monitored (external transport playing a
     /// test tone). The captured input channel is FM-demodulated.
+    ///
+    /// `reference_freq` is clamped to a safe sub-Nyquist range (issue #28
+    /// review point 3): above it, both the generated tone and the heterodyne
+    /// demodulation alias — silently wrong, never loud — so the clamp is
+    /// applied to BOTH the stimulus and the analysis, and the result reports
+    /// the frequency actually used (`WowFlutterResult::reference_freq`).
+    ///
+    /// `cancel` is the same cooperative-cancel flag the batched THD sweep
+    /// uses (one exclusive measurement at a time, so one shared flag is
+    /// safe) — lets a long capture be aborted from a Stop button.
     pub async fn measure_wow_flutter(
         &self,
         reference_freq: f32,
@@ -1648,14 +1658,27 @@ impl QA40xDevice {
         output_channel: Channel,
         input_channel: Channel,
         generate: bool,
+        cancel: Option<&AtomicBool>,
     ) -> Result<crate::audio::WowFlutterResult> {
         let sample_rate = self.config.lock().await.sample_rate.as_hz();
         let duration = duration_secs.clamp(1.0, 15.0);
         let n = (sample_rate as f32 * duration) as usize;
 
+        // No harmonic headroom is needed here (unlike THD) — just enough
+        // margin below Nyquist that the down-converted image stays
+        // filterable and a generated tone doesn't alias on its own way out.
+        let nyquist = sample_rate as f32 / 2.0;
+        let f0 = reference_freq.clamp(20.0, nyquist * 0.9);
+        if (f0 - reference_freq).abs() > 0.05 {
+            log::warn!(
+                "wow & flutter: reference frequency {reference_freq:.1} Hz out of range for a \
+                 {sample_rate} Hz sample rate — clamped to {f0:.1} Hz"
+            );
+        }
+
         let stim = if generate {
             // 0.5 amplitude reference tone.
-            crate::utils::SignalGenerator::sine(reference_freq, 0.5, sample_rate, n)
+            crate::utils::SignalGenerator::sine(f0, 0.5, sample_rate, n)
         } else {
             vec![0.0f32; n]
         };
@@ -1665,13 +1688,13 @@ impl QA40xDevice {
             Channel::Right => (silence.as_slice(), stim.as_slice()),
         };
 
-        let captured = self.generate_and_capture(left, right).await?;
+        let captured = self.generate_and_capture_cancellable(left, right, cancel).await?;
         let sig = match input_channel {
             Channel::Left => &captured.left_channel,
             Channel::Right => &captured.right_channel,
         };
 
-        Ok(crate::audio::analyze_wow_flutter(sig, sample_rate, reference_freq))
+        crate::audio::analyze_wow_flutter(sig, sample_rate, f0).map_err(QA40xError::Other)
     }
 
     /// Linear factor converting a full-scale-referenced digital RMS to Vrms for

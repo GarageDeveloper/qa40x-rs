@@ -70,10 +70,11 @@ Does: connect/presence/config registers, the two dBFS→dBV converter offsets,
 mixer slot rendering (sine/square/triangle/sawtooth/tones/noise/chirp/
 multitone at correct RMS levels, routed and summed), a range-correct
 loopback capture with a small noise floor, real windowed FFTs and crude
-derived metrics, telemetry, in-memory storage stubs. TWO measurement
-programs: the THD-vs-frequency sweep (`measure_thd_vs_frequency`) and its
-sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) — both stub
-RESULTS (used only by the device-lock family and the level-sweep spec, which
+derived metrics, telemetry, in-memory storage stubs. THREE measurement
+programs: the THD-vs-frequency sweep (`measure_thd_vs_frequency`), its
+sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) and wow &
+flutter (`measure_wow_flutter`, issue #28) — all stub RESULTS (used only by
+the device-lock family, the level-sweep spec and `wow-flutter.pw.ts`, which
 assert lock/plumbing semantics around them, never their numbers), gateable
 with `app.holdPrograms()` / `releasePrograms()` so the locked UI can be
 observed instead of raced.

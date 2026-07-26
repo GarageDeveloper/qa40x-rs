@@ -57,6 +57,23 @@ function sine(route: SourceMeta["route"]): SourceMeta {
   };
 }
 
+/** The DIN/IEC 386 wow & flutter reference tone (issue #28's stimulus
+ * preset) — record it to tape/vinyl at a steady speed, then play the
+ * recording back and open the Programs panel's "Wow & flutter…" dialog on
+ * the captured input. Paused, like every template source. */
+function wowFlutterTone(route: SourceMeta["route"]): SourceMeta {
+  return {
+    id: "src-wf-3150",
+    label: "Wow & flutter ref (3150 Hz)",
+    route,
+    playing: false,
+    kind: "sine",
+    frequencyHz: 3150,
+    levelDbv: -12,
+    extraTones: [],
+  };
+}
+
 function sweep(
   id: string,
   label: string,
@@ -239,7 +256,21 @@ export function templates(): { name: string; make: () => WorkspaceDoc }[] {
           programs: [sweep("t-fr", "RIAA response", "fr", "both")],
         }),
     },
-    // 9. Loopback self-test — one big spectrum, driven by a 1 kHz tone.
+    // 9. Tape / turntable — the DIN/IEC 386 reference tone (issue #28) plus
+    // a scope + spectrum to watch the played-back recording, ready for the
+    // Programs panel's "Wow & flutter…" dialog.
+    {
+      name: "Tape / turntable",
+      make: () =>
+        doc("Tape / turntable", "1x2", {
+          tiles: [
+            tile("g-scope", "scope", [L], { measures: ["rms", "peak"] }),
+            tile("g-spec", "spectrum", [L], { measures: ["peakfreq"] }),
+          ],
+          sources: [wowFlutterTone("left")],
+        }),
+    },
+    // 10. Loopback self-test — one big spectrum, driven by a 1 kHz tone.
     {
       name: "Loopback self-test",
       make: () =>

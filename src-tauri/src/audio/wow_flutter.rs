@@ -15,7 +15,8 @@ use rustfft::num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
 /// Wow & flutter result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct WowFlutterResult {
     pub reference_freq: f32,
     /// Weighted (DIN/IEC 386) RMS speed deviation, percent.
@@ -90,8 +91,43 @@ fn din_weight_rms(dev: &[f32], fs: f32) -> (f32, f32) {
     (rms, peak)
 }
 
-/// Analyse wow & flutter of a captured reference tone.
-pub fn analyze_wow_flutter(signal: &[f32], sample_rate: u32, reference_freq: f32) -> WowFlutterResult {
+/// Single-bin DFT magnitude of `signal` at `freq_hz`, plus the signal's own
+/// broadband RMS — the presence check below compares the two to tell "a
+/// reference tone is here" from "this is noise/silence" (issue #28 review
+/// point 1). Not windowed: a rough presence estimate, not a precision
+/// measurement — the heterodyne pipeline below does the real work once we
+/// know there's something to demodulate.
+fn tone_presence(signal: &[f32], fs: f32, freq_hz: f32) -> (f32, f32) {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let w = two_pi * freq_hz as f64 / fs as f64;
+    let mut re = 0.0f64;
+    let mut im = 0.0f64;
+    let mut sumsq = 0.0f64;
+    for (i, &s) in signal.iter().enumerate() {
+        let ph = w * i as f64;
+        let s = s as f64;
+        re += s * ph.cos();
+        im -= s * ph.sin();
+        sumsq += s * s;
+    }
+    let n = signal.len() as f64;
+    // Amplitude estimate: |DFT bin| normalized so a pure sine of amplitude A
+    // reads back ≈ A (matches the heterodyne image-rejection math above).
+    let mag = ((re * re + im * im).sqrt() / n * 2.0) as f32;
+    let rms = (sumsq / n).sqrt() as f32;
+    (mag, rms)
+}
+
+/// Analyse wow & flutter of a captured reference tone. Fails loudly (rather
+/// than reporting a plausible-looking number derived from the noise floor)
+/// when the capture shows no dominant energy at `reference_freq` — no
+/// transport playing, wrong input channel, unplugged cable (issue #28
+/// review point 1).
+pub fn analyze_wow_flutter(
+    signal: &[f32],
+    sample_rate: u32,
+    reference_freq: f32,
+) -> Result<WowFlutterResult, String> {
     let fs = sample_rate as f32;
     let f0 = reference_freq.max(1.0);
     let n = signal.len();
@@ -108,7 +144,19 @@ pub fn analyze_wow_flutter(signal: &[f32], sample_rate: u32, reference_freq: f32
         spectrum_percent: Vec::new(),
     };
     if n < 1024 {
-        return empty;
+        return Ok(empty);
+    }
+
+    // Signal-presence guard: a real reference tone dominates the capture —
+    // its energy concentrates almost entirely into the f0 bin. Noise or
+    // silence does not: the f0 component is a small fraction of the
+    // broadband RMS (and near-zero in absolute terms for true silence).
+    let (tone_mag, sig_rms) = tone_presence(signal, fs, f0);
+    if tone_mag < 1e-4 || tone_mag < sig_rms * 0.2 {
+        return Err(format!(
+            "no reference tone detected at {f0:.1} Hz — check the transport is playing, \
+             the input channel, and the cabling"
+        ));
     }
 
     // 1. Heterodyne the tone to baseband.
@@ -136,7 +184,7 @@ pub fn analyze_wow_flutter(signal: &[f32], sample_rate: u32, reference_freq: f32
     let skip = (fs * 0.05) as usize; // 50 ms
     let dz: Vec<Complex<f32>> = z.iter().skip(skip).step_by(m).cloned().collect();
     if dz.len() < 64 {
-        return empty;
+        return Ok(empty);
     }
 
     // 4. Unwrapped phase → instantaneous frequency deviation (Hz).
@@ -177,7 +225,7 @@ pub fn analyze_wow_flutter(signal: &[f32], sample_rate: u32, reference_freq: f32
     // Deviation spectrum (magnitude in %) via a simple DFT-through-FFT.
     let (rate_hz, spectrum_percent) = deviation_spectrum(&dev_pct, demod_rate);
 
-    WowFlutterResult {
+    Ok(WowFlutterResult {
         reference_freq: f0,
         weighted_rms_percent: weighted_rms,
         unweighted_rms_percent: unweighted_rms,
@@ -187,7 +235,7 @@ pub fn analyze_wow_flutter(signal: &[f32], sample_rate: u32, reference_freq: f32
         deviation_series: dev_pct,
         rate_hz,
         spectrum_percent,
-    }
+    })
 }
 
 /// One-sided magnitude spectrum of the deviation signal, up to ~200 Hz.
@@ -257,7 +305,7 @@ mod tests {
             })
             .collect();
 
-        let r = analyze_wow_flutter(&sig, fs, f0);
+        let r = analyze_wow_flutter(&sig, fs, f0).expect("a real tone must be detected");
         let expected_rms = depth / 2.0f32.sqrt() * 100.0; // percent
         assert!(
             (r.unweighted_rms_percent - expected_rms).abs() < 0.03,
@@ -291,11 +339,93 @@ mod tests {
         let sig: Vec<f32> = (0..n)
             .map(|i| (two_pi * f0 * i as f32 / fs as f32).sin())
             .collect();
-        let r = analyze_wow_flutter(&sig, fs, f0);
+        let r = analyze_wow_flutter(&sig, fs, f0).expect("a real tone must be detected");
         assert!(
             r.unweighted_rms_percent < 0.01,
             "clean tone W&F {} should be ~0",
             r.unweighted_rms_percent
+        );
+    }
+
+    /// The presence guard (issue #28 review point 1) is a DOMINANCE check
+    /// (tone energy vs. the capture's own broadband RMS), not an absolute
+    /// level floor: a quiet-but-genuine tone — 30 dB below full scale, the
+    /// kind a real tape/turntable recording actually produces, well above
+    /// the guard's 1e-4 near-silence floor but far below the earlier
+    /// full-scale `clean_tone_reads_near_zero` case — mixed with some
+    /// background noise must still be ACCEPTED and correctly demodulated,
+    /// not mistaken for `rejects_a_capture_with_no_reference_tone`'s pure
+    /// noise just because it is quiet.
+    #[test]
+    fn a_weak_but_real_tone_with_background_noise_is_recovered() {
+        let fs = 48000u32;
+        let f0 = 3150.0f32;
+        let dur = 3.0f32;
+        let n = (fs as f32 * dur) as usize;
+        let f_w = 4.0f32;
+        let depth = 0.002f32; // 0.2% peak, same as recovers_known_wow
+        let tone_amp = 0.03f32; // ~30 dB below full scale
+        let two_pi = 2.0 * std::f32::consts::PI;
+
+        // Same deterministic pseudo-noise generator as
+        // rejects_a_capture_with_no_reference_tone, scaled well under the
+        // tone: tone_rms ≈ tone_amp/√2 ≈ 0.0212, noise_rms ≈ noise_amp/√3 ≈
+        // 0.0035 — tone dominates (mag/sig_rms ≈ 1.4, comfortably above the
+        // guard's 0.2 threshold) without being a noiseless signal.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut noise = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as i32 as f32 / (1u32 << 24) as f32).clamp(-1.0, 1.0)
+        };
+        let noise_amp = 0.006f32;
+
+        let sig: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / fs as f32;
+                let ph = two_pi * f0 * (t - depth / (two_pi * f_w) * (two_pi * f_w * t).cos());
+                tone_amp * ph.sin() + noise_amp * noise()
+            })
+            .collect();
+
+        let r = analyze_wow_flutter(&sig, fs, f0)
+            .expect("a quiet but genuine tone, even with background noise, must be accepted");
+        let expected_rms = depth / 2.0f32.sqrt() * 100.0; // percent
+        assert!(
+            (r.unweighted_rms_percent - expected_rms).abs() < 0.05,
+            "unweighted RMS {} vs expected {} — background noise must not swamp a real weak tone",
+            r.unweighted_rms_percent,
+            expected_rms
+        );
+    }
+
+    /// A capture that is just noise (no transport playing, wrong channel,
+    /// unplugged cable) must be REJECTED, not silently demodulated into a
+    /// plausible-looking percentage off the noise floor (issue #28 review
+    /// point 1).
+    #[test]
+    fn rejects_a_capture_with_no_reference_tone() {
+        let fs = 48000u32;
+        let f0 = 3150.0f32;
+        let n = 48000 * 3;
+        // Deterministic pseudo-noise (xorshift64) — broadband, no energy
+        // concentrated at f0.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let sig: Vec<f32> = (0..n)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 40) as i32 as f32 / (1u32 << 24) as f32).clamp(-1.0, 1.0) * 0.05
+            })
+            .collect();
+
+        let err = analyze_wow_flutter(&sig, fs, f0)
+            .expect_err("pure noise must not read as a valid wow & flutter capture");
+        assert!(
+            err.contains("no reference tone detected") && err.contains("3150"),
+            "unexpected error message: {err}"
         );
     }
 }
