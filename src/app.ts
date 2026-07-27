@@ -22,6 +22,7 @@ import { mountGridPanel } from "./panels/grid/panel";
 import { mountWorkspaceBar } from "./panels/workspace/panel";
 import { watchChains } from "./data/chains";
 import { initProgramEvents } from "./store/actions/programs";
+import type { WorkspaceStore } from "./store/wsstore";
 import {
   initAutoSave,
   restoreWorkspaceAtBoot,
@@ -34,11 +35,12 @@ import { el } from "./ui/dom";
 const TELEMETRY_POLL_MS = 1000;
 const AUTOCONNECT_POLL_MS = 2000;
 
-export function mountApp(
+export async function mountApp(
   root: HTMLElement,
   store: Store<AppState>,
-  ipc: Ipc
-): void {
+  ipc: Ipc,
+  ws: WorkspaceStore
+): Promise<void> {
   const topbar = el("header.app__topbar");
   const sidebar = el("aside.app__sidebar", { "data-testid": "sidebar" });
   const main = el("main.app__main", { "data-testid": "graph-area" });
@@ -56,12 +58,13 @@ export function mountApp(
 
   // Restore the auto-saved workspace BEFORE panels mount, so their initial
   // render is the restored bench (M5; falls back to the first-run state).
-  restoreWorkspaceAtBoot(store, ipc);
+  // Async since issue #44 lot 1 (IndexedDB) — panels wait for the restore.
+  await restoreWorkspaceAtBoot(store, ipc, ws);
 
   mountDevicePanel(topbar, store, ipc);
   // The workspace names the BENCH, so it heads the bench column (the v1
   // placement) — and the topbar stays a single, static device line.
-  mountWorkspaceBar(sidebar, store, ipc);
+  mountWorkspaceBar(sidebar, store, ipc, ws);
   mountSourcesPanel(sidebar, store, ipc);
   mountTracesPanel(sidebar, store, ipc);
   mountProgramsPanel(sidebar, store, ipc);
@@ -82,7 +85,7 @@ export function mountApp(
   );
 
   // Auto-save the workspace on every edit (debounced, M5).
-  initAutoSave(store);
+  initAutoSave(store, ws);
 
   // The status-bar REST indicator needs the truth from boot (the drawer
   // refreshes it again on open).

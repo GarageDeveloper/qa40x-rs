@@ -9,6 +9,8 @@
  * - a REAL legacy v4 blob (captured from the v1 template code, not
  *   hand-written) appears under Legacy in the Load menu and imports:
  *   generator → source, sweeps → programs, graphs → tiles;
+ * - an old v2 localStorage blob (pre-#44, the localStorage era) migrates
+ *   into IndexedDB at boot and its localStorage key is removed;
  * - Space is the global transport (run/stop), guarded while typing.
  */
 import { readFileSync } from "node:fs";
@@ -16,12 +18,12 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "./adapter/fixtures";
 
-const V4_BLOB = readFileSync(
-  path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "fixtures",
-    "workspace-v4.json"
-  ),
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+const V4_BLOB = readFileSync(path.join(FIXTURES, "workspace-v4.json"), "utf8");
+/** A REAL pre-#44 v5 blob (generated from snapshotWorkspace, decimal-JSON
+ * frames included) — exactly what the localStorage era wrote. */
+const V5_LS_BLOB = readFileSync(
+  path.join(FIXTURES, "workspace-v5-localstorage.json"),
   "utf8"
 );
 
@@ -132,6 +134,43 @@ test("a legacy v4 save imports: source, programs and tiles land in their panels"
   expect(progNames).toContain("THD vs freq");
   expect(progNames).toContain("FR L");
   expect((await app.poolRows()).map((r) => r.label)).toContain("Input L");
+});
+
+test("a pre-#44 v2 localStorage save migrates to IndexedDB at boot, key removed (issue #44 lot 1)", async ({
+  app,
+}) => {
+  // Seed the localStorage-era blobs behind the app's back, then reboot —
+  // the storage seam imports them at first IndexedDB open.
+  await app.putLocalStorage("qa40x-v2-ws:LS bench", V5_LS_BLOB);
+  await app.putLocalStorage("qa40x-v2-ws-current", V5_LS_BLOB);
+  await app.boot();
+
+  // The auto-saved current came back through IndexedDB: the restored bench
+  // IS the seeded one (name + collapsed panel + the frozen ❄ trace).
+  const digest = (await app.workspaceDigest()) as {
+    workspace: { name: string };
+    traces: { id: string; label: string }[];
+  };
+  expect(digest.workspace.name).toBe("LS bench");
+  expect(await app.panelCollapsed("programs")).toBe(true);
+  expect(digest.traces.map((t) => t.label)).toContain("Input L ❄");
+
+  // The named save now lists from IndexedDB…
+  const menu = await app.workspaceMenu();
+  expect(menu.saved).toContain("LS bench");
+  // …and the quota-eating localStorage keys are gone (that was the point).
+  expect(await app.getLocalStorage("qa40x-v2-ws:LS bench")).toBeNull();
+  expect(await app.getLocalStorage("qa40x-v2-ws-current")).toBeNull();
+
+  // The migrated save still LOADS (frames included) after wandering off.
+  await app.loadWorkspace("First Look", "template");
+  await app.loadWorkspace("LS bench", "saved");
+  const back = (await app.workspaceDigest()) as {
+    workspace: { name: string };
+    traces: { id: string; label: string }[];
+  };
+  expect(back.workspace.name).toBe("LS bench");
+  expect(back.traces.map((t) => t.label)).toContain("Input L ❄");
 });
 
 test("Space runs and stops the stream; typing is never hijacked", async ({

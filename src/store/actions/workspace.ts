@@ -20,23 +20,20 @@ import type { WorkspaceDoc } from "../persist";
 import {
   docToFrames,
   isQuotaExceeded,
-  loadCurrent,
+  loadLegacyCurrent,
   loadLegacyNamed,
-  loadNamed,
-  saveCurrent,
-  saveNamed,
   snapshotWorkspace,
 } from "../persist";
+import type { WorkspaceStore } from "../wsstore";
 import { syncStream } from "./stream";
 import { toast } from "./ui";
 
-/** A quota-exceeded save is either a one-off (a huge curve on THIS save) or
- * a standing condition (storage already full) — either way, warn once per
- * session rather than on every 500 ms auto-save tick. */
+/** A quota-exceeded save is either a one-off (a huge document on THIS
+ * save) or a standing condition (storage already full) — either way, warn
+ * once per session rather than on every 500 ms auto-save tick. */
 function quotaOrGenericMessage(action: string, e: unknown): string {
   return isQuotaExceeded(e)
-    ? `${action} failed: local storage is full — free up space (a large imported ` +
-        "weighting curve is the usual cause) or clear an old saved workspace."
+    ? `${action} failed: storage is full — delete old saved workspaces or free up disk space.`
     : `${action} failed: ${e}`;
 }
 
@@ -138,26 +135,35 @@ export function togglePanelCollapsed(store: Store<AppState>, key: string): void 
 }
 
 /** Save the current bench under a name (also becomes the workspace name). */
-export function saveWorkspaceAs(store: Store<AppState>, name: string): void {
+export async function saveWorkspaceAs(
+  store: Store<AppState>,
+  ws: WorkspaceStore,
+  name: string
+): Promise<void> {
   const trimmed = name.trim();
   if (!trimmed) return;
   setWorkspaceName(store, trimmed);
-  let error: unknown = null;
-  const ok = saveNamed(trimmed, snapshotWorkspace(store.get()), (e) => (error = e));
-  if (ok) {
+  try {
+    await ws.save(trimmed, snapshotWorkspace(store.get()));
     toast(store, "success", `Workspace "${trimmed}" saved.`);
-  } else {
-    toast(store, "error", quotaOrGenericMessage(`Saving workspace "${trimmed}"`, error));
+  } catch (e) {
+    toast(store, "error", quotaOrGenericMessage(`Saving workspace "${trimmed}"`, e));
   }
 }
 
-export function loadWorkspaceNamed(
+export async function loadWorkspaceNamed(
   store: Store<AppState>,
   ipc: Ipc,
+  ws: WorkspaceStore,
   name: string,
   from: "saved" | "legacy" = "saved"
-): void {
-  const doc = from === "legacy" ? loadLegacyNamed(name) : loadNamed(name);
+): Promise<void> {
+  let doc: WorkspaceDoc | null = null;
+  try {
+    doc = from === "legacy" ? loadLegacyNamed(name) : await ws.load(name);
+  } catch {
+    doc = null;
+  }
   if (!doc) {
     toast(store, "error", `Could not load workspace "${name}".`);
     return;
@@ -168,12 +174,23 @@ export function loadWorkspaceNamed(
 }
 
 /**
- * Boot restore: the auto-saved current document (v2 keys, else the legacy
- * v4 current through the importer). Without one, the initialState() bench
- * stands — the maintainer-validated first-run defaults, not a template.
+ * Boot restore: the auto-saved current document (IndexedDB — which imported
+ * any old v2 localStorage blobs at first open — else the legacy v4 current
+ * through the importer). Without one, the initialState() bench stands — the
+ * maintainer-validated first-run defaults, not a template.
  */
-export function restoreWorkspaceAtBoot(store: Store<AppState>, ipc: Ipc): void {
-  const doc = loadCurrent();
+export async function restoreWorkspaceAtBoot(
+  store: Store<AppState>,
+  ipc: Ipc,
+  ws: WorkspaceStore
+): Promise<void> {
+  let doc: WorkspaceDoc | null = null;
+  try {
+    doc = await ws.loadCurrent();
+  } catch {
+    doc = null; // an unusable DB must never block the boot
+  }
+  doc ??= loadLegacyCurrent();
   if (doc) applyWorkspaceDoc(store, ipc, doc);
 }
 
@@ -183,11 +200,13 @@ const AUTO_SAVE_DEBOUNCE_MS = 500;
  * Auto-save every edit (v1 parity): any store batch schedules a trailing
  * snapshot; identical documents are not rewritten (per-frame updates only
  * touch transients, which the snapshot strips — the compare keeps frame
- * traffic from thrashing localStorage).
+ * traffic from thrashing the storage). Writes are chained so two ticks
+ * never interleave inside the async store.
  */
-export function initAutoSave(store: Store<AppState>): void {
+export function initAutoSave(store: Store<AppState>, ws: WorkspaceStore): void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let lastJson = "";
+  let chain: Promise<void> = Promise.resolve();
   // A full quota won't clear itself between ticks — warn once per session,
   // not every 500 ms (issue #29 review finding #2), but keep trying: the
   // user may have freed space (deleted a saved workspace) in the meantime.
@@ -199,15 +218,18 @@ export function initAutoSave(store: Store<AppState>): void {
       const doc = snapshotWorkspace(store.get());
       const json = JSON.stringify(doc);
       if (json === lastJson) return;
-      let error: unknown = null;
-      const ok = saveCurrent(doc, (e) => (error = e));
-      if (ok) {
-        lastJson = json;
-        warned = false;
-      } else if (!warned) {
-        warned = true;
-        toast(store, "error", quotaOrGenericMessage("Workspace auto-save", error));
-      }
+      chain = chain.then(async () => {
+        try {
+          await ws.saveCurrent(doc);
+          lastJson = json;
+          warned = false;
+        } catch (e) {
+          if (!warned) {
+            warned = true;
+            toast(store, "error", quotaOrGenericMessage("Workspace auto-save", e));
+          }
+        }
+      });
     }, AUTO_SAVE_DEBOUNCE_MS);
   });
 }

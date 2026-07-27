@@ -1151,7 +1151,8 @@ export class AppV2 {
     );
   }
 
-  /** Name the workspace and Save it (the bar's explicit named save). */
+  /** Name the workspace and Save it (the bar's explicit named save), then
+   * wait for the outcome toast — the write is async (issue #44 lot 1). */
   async saveWorkspaceAs(name: string): Promise<void> {
     await this.drv.eval(
       (a: { name: string }) => {
@@ -1163,22 +1164,79 @@ export class AppV2 {
       },
       { name }
     );
+    const maxToastId = await this.drv.eval(() => {
+      const dbg = (
+        window as unknown as {
+          qa40xV2Debug: { state(): { ui: { toasts: { id: number }[] } } };
+        }
+      ).qa40xV2Debug;
+      return Math.max(0, ...dbg.state().ui.toasts.map((t) => t.id));
+    }, undefined as void);
     await this.drv.click('[data-testid="ws-save"]');
+    await this.drv.waitUntil(
+      (a: { maxToastId: number }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              state(): { ui: { toasts: { id: number; message: string }[] } };
+            };
+          }
+        ).qa40xV2Debug;
+        return dbg
+          .state()
+          .ui.toasts.some((t) => t.id > a.maxToastId && / saved\.|failed/.test(t.message));
+      },
+      { maxToastId }
+    );
   }
 
-  /** Load from the ▾ menu: a template, a v2 save, or a legacy (v1) save. */
+  /** Load from the ▾ menu: a template, a v2 save, or a legacy (v1) save.
+   * Waits for the outcome toast — loading goes through the async storage
+   * seam (issue #44 lot 1), so the click alone doesn't mean applied. */
   async loadWorkspace(
     name: string,
     from: "template" | "saved" | "legacy"
   ): Promise<void> {
+    const maxToastId = await this.drv.eval(() => {
+      const dbg = (
+        window as unknown as {
+          qa40xV2Debug: { state(): { ui: { toasts: { id: number }[] } } };
+        }
+      ).qa40xV2Debug;
+      return Math.max(0, ...dbg.state().ui.toasts.map((t) => t.id));
+    }, undefined as void);
     await this.drv.click('[data-testid="ws-load"]');
     const prefix = from === "template" ? "ws-tpl" : from === "saved" ? "ws-saved" : "ws-legacy";
     await this.drv.click(`[data-testid="${prefix}-${name}"]`);
+    await this.drv.waitUntil(
+      (a: { maxToastId: number }) => {
+        const dbg = (
+          window as unknown as {
+            qa40xV2Debug: {
+              state(): { ui: { toasts: { id: number; message: string }[] } };
+            };
+          }
+        ).qa40xV2Debug;
+        return dbg
+          .state()
+          .ui.toasts.some(
+            (t) => t.id > a.maxToastId && /loaded\.|Could not load/.test(t.message)
+          );
+      },
+      { maxToastId }
+    );
   }
 
-  /** The Load ▾ menu's item labels per section, then close the menu. */
+  /** The Load ▾ menu's item labels per section, then close the menu. The
+   * menu populates asynchronously (saved names list from IndexedDB) and is
+   * revealed once complete — wait for that before reading. */
   async workspaceMenu(): Promise<{ templates: string[]; saved: string[]; legacy: string[] }> {
     await this.drv.click('[data-testid="ws-load"]');
+    await this.drv.waitUntil(
+      () =>
+        document.querySelector<HTMLElement>('[data-testid="ws-menu"]')?.hidden === false,
+      undefined as void
+    );
     const out = await this.drv.eval(() => {
       const items = (sel: string): string[] =>
         Array.from(
@@ -1241,22 +1299,30 @@ export class AppV2 {
     }, undefined as void);
   }
 
-  /** Wait until the debounced auto-save wrote a current-workspace blob
-   * whose name matches (so a reload will restore it). */
+  /** Wait until the debounced auto-save wrote a current-workspace record
+   * whose name matches (so a reload will restore it). Reads through the
+   * app's own storage seam (IndexedDB since issue #44 lot 1) via the
+   * debug hook — an async probe, so this polls rather than waitUntil. */
   async waitForAutoSave(name: string, timeoutMs = 5_000): Promise<void> {
-    await this.drv.waitUntil(
-      (a: { name: string }) => {
-        const raw = localStorage.getItem("qa40x-v2-ws-current");
-        if (!raw) return false;
-        try {
-          return (JSON.parse(raw) as { name?: string }).name === a.name;
-        } catch {
-          return false;
-        }
-      },
-      { name },
-      { timeoutMs }
-    );
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const current = await this.drv.eval(
+        () =>
+          (
+            window as unknown as {
+              qa40xV2Debug: { wsCurrentName(): Promise<string | null> };
+            }
+          ).qa40xV2Debug.wsCurrentName(),
+        undefined as void
+      );
+      if (current === name) return;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `auto-save of "${name}" did not land within ${timeoutMs} ms (current: ${current})`
+        );
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 
   /** Toggle a sidebar section's collapse chevron. */
