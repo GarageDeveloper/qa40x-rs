@@ -7,7 +7,7 @@ use crate::qa40x::{
     types::*,
 };
 use async_trait::async_trait;
-use log::{debug, info};
+use log::{debug, info, warn};
 use nusb::transfer::{Buffer, Bulk, Completion, In, Out};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -89,6 +89,11 @@ pub struct QA40xDevice {
     /// in-capture), for the shared ~1 Hz rate limit
     /// ([`Self::take_keepalive_slot`]).
     last_keepalive: Arc<Mutex<Option<std::time::Instant>>>,
+    /// COMPLETED keepalive cycles (link write + telemetry reads that all
+    /// succeeded), across every path. Distinct from the `last_keepalive`
+    /// stamp, which is taken BEFORE the attempt: validation must count
+    /// successes, not slots taken (issue #54 review, F1).
+    keepalive_ok: Arc<std::sync::atomic::AtomicU64>,
     /// Telemetry captured by the most recent keepalive. Lets the UI refresh its
     /// telemetry readout during a run without any USB I/O of its own.
     cached_telemetry: Arc<Mutex<Option<Telemetry>>>,
@@ -118,6 +123,7 @@ impl QA40xDevice {
             meta: Arc::new(Mutex::new(None)),
             model: Arc::new(Mutex::new(None)),
             last_keepalive: Arc::new(Mutex::new(None)),
+            keepalive_ok: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cached_telemetry: Arc::new(Mutex::new(None)),
             relay_settle: Arc::new(Mutex::new(SettleDeadline::default())),
             virtual_sim: Arc::new(Mutex::new(None)),
@@ -686,14 +692,24 @@ impl QA40xDevice {
         };
         *self.last_keepalive.lock().await = Some(std::time::Instant::now());
         *self.cached_telemetry.lock().await = Some(t.clone());
+        self.keepalive_ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(t)
     }
 
-    /// When the most recent LINK keepalive ran (idle poll, between-frame or
-    /// in-capture), if any. Diagnostics — `examples/hw_run_keepalive.rs` uses
-    /// it to count the keepalives fired during one long capture.
+    /// When the most recent LINK keepalive was ATTEMPTED (idle poll,
+    /// between-frame or in-capture), if any — the rate-limit stamp, taken
+    /// before the cycle runs. For validation use
+    /// [`Self::keepalive_ok_count`], which only counts completed cycles.
     pub async fn last_keepalive_at(&self) -> Option<std::time::Instant> {
         *self.last_keepalive.lock().await
+    }
+
+    /// COMPLETED keepalive cycles since construction, across every path
+    /// (idle poll, between-frame, in-capture). Diagnostics —
+    /// `examples/hw_run_keepalive.rs` asserts on the delta across one long
+    /// capture, which the attempt stamp alone cannot prove (issue #54).
+    pub fn keepalive_ok_count(&self) -> u64 {
+        self.keepalive_ok.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Telemetry from the most recent keepalive (idle poll or in-run), with no
@@ -747,14 +763,30 @@ impl QA40xDevice {
     /// exactly this (its USB traces show 0x00 writes inside armed
     /// STREAM_CTRL=5 windows). Serialization with all other register I/O is
     /// structural: the pump owns the endpoint mutex for the whole capture.
+    ///
     /// Non-fatal by design: an LED ping must never fail a measurement.
-    async fn pump_keepalive_if_due(&self, eps: &mut ClaimedEndpoints) {
+    /// Returns false after a failed cycle so the caller stops pinging for the
+    /// REST of this capture — a register path that stalls under an armed
+    /// stream should not be hammered once a second (each failure costs its
+    /// timeouts and risks reply desync); the between-frame keepalive probes
+    /// it again after STREAM_STOP.
+    async fn pump_keepalive_if_due(&self, eps: &mut ClaimedEndpoints) -> bool {
         if !self.take_keepalive_slot().await {
-            return;
+            return true;
         }
         match keepalive_on(eps).await {
-            Ok(t) => *self.cached_telemetry.lock().await = Some(t),
-            Err(e) => debug!("in-capture keepalive skipped: {}", e),
+            Ok(t) => {
+                // Re-stamp on completion so the cadence matches keepalive()
+                // (~1 s between cycle ends, not between attempt starts).
+                *self.last_keepalive.lock().await = Some(std::time::Instant::now());
+                *self.cached_telemetry.lock().await = Some(t);
+                self.keepalive_ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                warn!("in-capture keepalive failed ({}); disabled until the capture ends", e);
+                false
+            }
         }
     }
 
@@ -1333,6 +1365,8 @@ impl QA40xDevice {
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Vec<u8>> {
         let mut rx = Vec::with_capacity(capacity);
+        let cancelled = || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
+        let mut keepalive_enabled = true;
 
         // Collect ADC data in order. A generous timeout covers the whole queue
         // draining at the sample rate.
@@ -1340,15 +1374,23 @@ impl QA40xDevice {
             // Cooperative cancel between blocks (a long batched sweep is ONE
             // stream — this is the only mid-transaction exit): returning Err
             // rides the caller's cancel_and_drain + STREAM_STOP path.
-            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
+            if cancelled() {
                 debug!("stream_pump: cancelled at block {}/{}", i, blocks);
                 return Err(QA40xError::Cancelled);
             }
             // In-capture LINK keepalive (~1 Hz, issue #54). Every data
             // transfer is already queued on both endpoints, so a
             // millisecond-scale register round-trip between collections
-            // never starves the stream.
-            self.pump_keepalive_if_due(eps).await;
+            // never starves the stream. Re-check cancel afterwards: a
+            // FAILING keepalive can take ~1.5 s of register timeouts, and
+            // the flag must not wait out the next 5 s data read on top.
+            if keepalive_enabled {
+                keepalive_enabled = self.pump_keepalive_if_due(eps).await;
+                if cancelled() {
+                    debug!("stream_pump: cancelled at block {}/{} (post-keepalive)", i, blocks);
+                    return Err(QA40xError::Cancelled);
+                }
+            }
             match complete_or_cancel(&mut eps.data_read, Duration::from_secs(5)).await {
                 Ok(c) => {
                     c.status.map_err(QA40xError::from)?;
@@ -1967,10 +2009,24 @@ async fn reg_read_on(eps: &mut ClaimedEndpoints, address: u8) -> Result<Vec<u8>>
         .map_err(QA40xError::from)?;
 
     eps.register_read.submit(Buffer::new(512)); // bulk IN needs a multiple of max_packet (512); device short-packets 4 bytes
-    let data = complete_or_cancel(&mut eps.register_read, Duration::from_secs(1))
-        .await?
-        .into_result()
-        .map_err(QA40xError::from)?;
+    let data = match complete_or_cancel(&mut eps.register_read, Duration::from_secs(1)).await {
+        Ok(c) => c.into_result().map_err(QA40xError::from)?,
+        Err(e) => {
+            // The device may still form the reply after our timeout; left
+            // unconsumed, it would be delivered to the NEXT register read and
+            // shift every subsequent reply one register late for the rest of
+            // the session. One short discard attempt closes that window
+            // (issue #54 review, F4).
+            eps.register_read.submit(Buffer::new(512));
+            if complete_or_cancel(&mut eps.register_read, Duration::from_millis(250))
+                .await
+                .is_ok()
+            {
+                warn!("register 0x{:02X}: reply timed out, then arrived late — discarded it to keep the reply stream in sync", address);
+            }
+            return Err(e);
+        }
+    };
 
     debug!("READ_REGISTER: read {} bytes from 0x{:02X}: {:02X?}", data.len(), address, &data[..]);
     Ok(data.to_vec())

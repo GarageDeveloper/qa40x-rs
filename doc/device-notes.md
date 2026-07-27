@@ -82,9 +82,12 @@ While connected, the reference behaviour is a **continuous ~1 s poll loop**:
 write a pattern to `0x00`, read it back, then read the four telemetry
 registers. This steady traffic is what holds the device's **LINK LED** lit.
 
-qa40x-rs runs this keepalive (rate-limited to ~1 Hz) around its acquisitions,
-so live runs, sweeps and the generator hold the LINK LED, and it caches the
-telemetry for the UI rather than issuing USB reads from the frontend.
+qa40x-rs runs this keepalive (rate-limited to ~1 Hz) around AND inside its
+acquisitions — the stream pump interleaves the cycle with an active stream at
+~1 Hz, matching the official app's in-measurement keepalive (issue #54) — so
+live runs, sweeps, long single captures and the generator all hold the LINK
+LED, and it caches the telemetry for the UI rather than issuing USB reads
+from the frontend.
 
 **Input range at connect.** The reference behaviour is to force a **defined
 safe input range (42 dBV, index 7)** on *every* connect — initial and

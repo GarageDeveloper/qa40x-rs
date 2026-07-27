@@ -319,8 +319,9 @@ export async function refreshTelemetry(
   try {
     // Idle: fire the ~1 s keepalive — it pings the link register (keeps the
     // LINK LED lit, #31) AND reads fresh telemetry. During a run, never
-    // touch the register bus: read the cache the stream's own in-run
-    // keepalive maintains (`last_telemetry`, no USB I/O).
+    // touch the register bus: read the cache the stream's own keepalives
+    // maintain — between frames and, since #54, at ~1 Hz inside each
+    // capture (`last_telemetry`, no USB I/O).
     const telemetry = run.streaming
       ? await ipc.call("last_telemetry", {})
       : await ipc.call("keepalive", {});

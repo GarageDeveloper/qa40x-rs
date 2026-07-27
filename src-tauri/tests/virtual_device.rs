@@ -3,6 +3,9 @@
 //! simulated loopback, then detach/reattach. No hardware, no USB — this is
 //! the same path the app's "Demo" button drives.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use tauri_app_lib::qa40x::{Channel, InputGain, OutputGain, QA40xDevice};
 use tauri_app_lib::utils::SignalGenerator;
 
@@ -163,6 +166,111 @@ async fn dbv_stimulus_lands_at_the_commanded_level_once_trimmed() {
     let r = level_dbv(&captured.right_channel, off_r);
     assert!((l + 10.0).abs() < 0.1, "left loopback level {l} dBV, commanded -10");
     assert!((r + 10.0).abs() < 0.1, "right loopback level {r} dBV, commanded -10");
+
+    device.disconnect().await.expect("disconnect");
+}
+
+/// Issue #54: during a capture the stream pump itself must fire the LINK
+/// keepalive at ~1 Hz (`QA40xDevice::pump_keepalive_if_due`), not just once
+/// before the stream starts (`run_keepalive_if_due`) — otherwise a long FFT's
+/// single capture leaves the LINK LED to time out mid-run. The embedded
+/// simulator is real-time-paced at the sample rate, so a ~3 s @ 48 kHz
+/// capture takes ~3 s of wall time, long enough for the 1 Hz rate limiter to
+/// let more than one in-capture keepalive through.
+///
+/// The test isolates the in-capture path from the ordinary pre-stream ping:
+/// a `keepalive()` fired immediately before starting the capture consumes
+/// the shared rate-limit slot, so `run_keepalive_if_due` (called first thing
+/// inside `stream_io`) is itself rate-limited away — every stamp recorded
+/// strictly after that baseline can only have come from
+/// `pump_keepalive_if_due`, run from inside the collection loop while the
+/// pump holds the endpoint mutex for the whole capture.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_capture_keepalive_fires_at_roughly_1hz_during_a_long_capture() {
+    let _sim = SIM_LOCK.lock().await;
+    let device = Arc::new(QA40xDevice::new());
+    device.connect_virtual().await.expect("virtual connect");
+
+    // Fresh connect: neither the keepalive stamp nor the telemetry cache has
+    // been touched yet (connect/init never call `keepalive`/`read_telemetry`
+    // — only the idle-poll command, the between-stream ping and the
+    // in-capture ping do).
+    assert!(device.last_keepalive_at().await.is_none());
+    assert!(device.last_telemetry().await.is_none());
+
+    // Baseline keepalive: stamps `last_keepalive` right before the capture
+    // starts, so the capture's own pre-stream ping is rate-limited away and
+    // every later stamp is attributable to the in-capture path.
+    device.keepalive().await.expect("baseline keepalive");
+    let baseline = device
+        .last_keepalive_at()
+        .await
+        .expect("baseline stamp recorded");
+    assert!(device.last_telemetry().await.is_some());
+
+    // ~3.1 s @ 48 kHz: long enough for the ~1 Hz rate limiter to open more
+    // than one slot during the capture, short enough to keep the test fast.
+    let sr = 48_000u32;
+    let n = 150_000usize;
+    let tone = SignalGenerator::sine(1000.0, 0.2, sr, n);
+
+    // Watcher: polls `last_keepalive_at()` — a mutex read with no device I/O,
+    // so it never blocks on or contends with the pump holding `eps` for the
+    // whole capture — and records every distinct stamp it observes.
+    let watcher_dev = device.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let watcher = tokio::spawn(async move {
+        let mut stamps: Vec<Instant> = Vec::new();
+        loop {
+            if let Some(t) = watcher_dev.last_keepalive_at().await {
+                if stamps.last() != Some(&t) {
+                    stamps.push(t);
+                }
+            }
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        }
+        stamps
+    });
+
+    let captured = device
+        .generate_and_capture(&tone, &tone)
+        .await
+        .expect("generate_and_capture through the virtual loopback");
+
+    let _ = stop_tx.send(());
+    let stamps = watcher.await.expect("watcher task");
+
+    // The capture must come back intact regardless of the interleaved
+    // register I/O.
+    assert_eq!(captured.sample_rate, sr);
+    assert_eq!(captured.left_channel.len(), n, "left channel truncated");
+    assert_eq!(captured.right_channel.len(), n, "right channel truncated");
+
+    // Every stamp after the baseline was fired DURING this capture (nothing
+    // else in this test calls `keepalive`/`run_keepalive_if_due` again), and
+    // since the baseline consumed the rate-limit slot right before the
+    // capture started, these can only be `pump_keepalive_if_due` firings.
+    let in_capture = stamps.iter().filter(|t| **t > baseline).count();
+    assert!(
+        in_capture >= 2,
+        "expected the pump to fire the in-capture keepalive at least twice \
+         during a ~3 s capture (~1 Hz), got {in_capture} stamps after baseline: {stamps:?}"
+    );
+
+    // `last_telemetry` (refreshed by the SAME in-capture keepalive cycle,
+    // see `pump_keepalive_if_due`) must have moved past the baseline too.
+    let after = device
+        .last_keepalive_at()
+        .await
+        .expect("stamp after capture");
+    assert!(
+        after > baseline,
+        "last_keepalive_at did not advance past the pre-capture baseline"
+    );
+    assert!(device.last_telemetry().await.is_some());
 
     device.disconnect().await.expect("disconnect");
 }
