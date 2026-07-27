@@ -235,6 +235,18 @@ export class FakeDevice {
     };
   }
   private config = { input_gain: 42, output_gain: 8, sample_rate: 48000 };
+
+  /* -- Export seam (issue #30), public for spec assertions -------------- */
+  /** Overrides the answered save path; null (default) derives it from the
+   * app's own suggested filename, under /e2e/. */
+  savePath: string | null = null;
+  /** Arm to make the next save dialog answer null (user cancelled). */
+  cancelSaveDialog = false;
+  /** Every file the app asked `export_write_file` to persist. */
+  exports: { path: string; contentsBase64: string }[] = [];
+  /** Every clipboard image handed to `export_copy_image` (dimensions +
+   * payload size — the pixel values themselves don't matter to specs). */
+  copiedImages: { width: number; height: number; byteLength: number }[] = [];
   private slots: MixSlotDesc[] = [];
   private storage = new Map<string, unknown[]>(); // key: kind (projects, …)
   /** While armed (holdPrograms), measurement-program commands do not resolve
@@ -397,6 +409,30 @@ export class FakeDevice {
       case "rest_set_token":
         this.fixedRestToken = (a.token as string | null) || null;
         return this.restStatus();
+
+      /* -- data export (issue #30) -- */
+      case "plugin:dialog|save": {
+        // The dialog plugin's save() lands here through mockIPC like any
+        // command — the fake IS the "user": it answers a path (derived from
+        // the app's own suggested name unless a spec pinned one) or null
+        // (cancelled) when `cancelSaveDialog` is armed.
+        if (this.cancelSaveDialog) return null;
+        const opts = (a.options ?? {}) as { defaultPath?: string };
+        return this.savePath ?? `/e2e/${opts.defaultPath ?? "export.bin"}`;
+      }
+      case "export_write_file":
+        this.exports.push({
+          path: a.path as string,
+          contentsBase64: a.contentsBase64 as string,
+        });
+        return null;
+      case "export_copy_image":
+        this.copiedImages.push({
+          width: a.width as number,
+          height: a.height as number,
+          byteLength: atob(a.rgbaBase64 as string).length,
+        });
+        return null;
 
       /* -- the mixer (Traces V2 Phase F wire) -- */
       case "mixer_set_slots": {

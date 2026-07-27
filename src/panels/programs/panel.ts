@@ -19,6 +19,7 @@ import {
   stopProgram,
 } from "../../store/actions/programs";
 import { freezeTrace, setTraceColor } from "../../store/actions/traces";
+import { exportTraceCsv } from "../../export/export";
 import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openSweepDialog } from "./sweepdialog";
@@ -229,6 +230,16 @@ export function mountProgramsPanel(
       },
       "✕"
     );
+    // CSV export of the landed result curve (issue #30) — the program's
+    // trace shares its id, so the trace-export path serves it directly.
+    const exportBtn = el(
+      "button.btn.btn--small",
+      {
+        "data-testid": `prog-export-${id}`,
+        onclick: () => void exportTraceCsv(store, ipc, id, "sweep"),
+      },
+      "⤓"
+    );
     // Same color-picker dot as the Traces pool (10a): the program's trace
     // shares its id, so setTraceColor recolors the plotted curve directly.
     const dot = el("input.programs__dot", {
@@ -254,6 +265,7 @@ export function mountProgramsPanel(
         play,
         gear,
         freeze,
+        exportBtn,
         remove
       ),
       el("div.programs__type", { "data-testid": `prog-type-${id}` }),
@@ -296,6 +308,12 @@ export function mountProgramsPanel(
     freeze.disabled = !vm.hasData;
     freeze.title = vm.hasData
       ? "Freeze a named reference from this result"
+      : "No data yet — run first";
+
+    const exportBtn = node.querySelector<HTMLButtonElement>(`[data-testid="prog-export-${id}"]`)!;
+    exportBtn.disabled = !vm.hasData;
+    exportBtn.title = vm.hasData
+      ? "Export the result curve as CSV (provenance header)"
       : "No data yet — run first";
 
     const remove = node.querySelector<HTMLButtonElement>(`[data-testid="prog-remove-${id}"]`)!;

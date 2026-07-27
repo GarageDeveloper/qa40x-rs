@@ -67,3 +67,7 @@ uuid = { version = "1", features = ["v4"] }
 rhai = { version = "1.25.1", features = ["sync"] }
 ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-compat"] }
 
+# System clipboard for the tile PNG "copy image" export (issue #30) — Rust-side
+# so no JS clipboard plugin/permission surface is added.
+arboard = "3"
+

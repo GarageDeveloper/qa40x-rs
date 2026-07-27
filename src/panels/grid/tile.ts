@@ -57,6 +57,7 @@ import { WrappedSweepChart } from "../../chart/sweep";
 import { MEASURES, measureByKey } from "../../core/measure";
 import { getFrames } from "../../data/frames";
 import { measuresFor } from "../../data/measures";
+import { copyTilePng, exportTileCsv, exportTilePng } from "../../export/export";
 import { openTileGearDialog } from "./gear";
 import { addTraceCandidates } from "./addtrace";
 import { el, keyedList } from "../../ui/dom";
@@ -294,6 +295,28 @@ export function createTile(
     },
     "Hₙ"
   );
+  // Export (issue #30): select-as-menu, the tile header's idiom (＋/Σ) —
+  // data as CSV (provenance header), image as PNG file or clipboard copy.
+  const exportSel = el("select.field.field--small.tile__add", {
+    "data-testid": `tile-export-${tileId}`,
+    title:
+      "Export this graph — data as CSV (with a provenance header) or " +
+      "image as PNG (file / clipboard)",
+    onchange: (e: Event) => {
+      const sel = e.target as HTMLSelectElement;
+      const v = sel.value;
+      sel.value = "";
+      if (v === "csv") void exportTileCsv(store, ipc, tileId);
+      else if (v === "png") void exportTilePng(store, ipc, tileId);
+      else if (v === "copy") void copyTilePng(store, ipc, tileId);
+    },
+  });
+  exportSel.append(
+    el("option", { value: "" }, "⤓"),
+    el("option", { value: "csv" }, "Data (CSV)…"),
+    el("option", { value: "png" }, "Image (PNG)…"),
+    el("option", { value: "copy" }, "Copy image")
+  );
   const freezeBtn = el(
     "button.btn.btn--small",
     {
@@ -411,6 +434,7 @@ export function createTile(
       chipAddSel,
       phaseBtn,
       harmBtn,
+      exportSel,
       freezeBtn,
       focusBtn,
       gearBtn

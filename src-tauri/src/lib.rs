@@ -13,6 +13,7 @@ pub mod measurement;
 pub mod measurements;
 pub mod mixer;
 pub mod stream;
+pub mod export;
 
 use qa40x::{QA40xDevice, DeviceConfig, InputGain, Model, OutputGain, SampleRate};
 use utils::SignalGenerator;
@@ -1348,6 +1349,8 @@ pub fn run() {
             firmware::download_qa40x_setup,
             flash_dry_run,
             flash_firmware,
+            export::export_write_file,
+            export::export_copy_image,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
