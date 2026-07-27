@@ -41,11 +41,16 @@
 //!   behind a lifecycle gate, quiesce/shutdown, liveness monitor. Commands
 //!   accept an optional `device_id` (`None` ⇒ default device); every stream
 //!   frame carries its device identity.
+//! - [`wire::DeviceEntry`] / [`wire::DeviceList`] (lot D): the flat DTOs the
+//!   `list_devices` command serves to the frontend devices slice — ids as
+//!   strings, model as the DISPLAY name, the open unit's entry substituted
+//!   by its open-enriched descriptor. The frontend's range/rate menus read
+//!   the capability record (the TS consts are gone). Two id rules on the
+//!   wire: `connect_device` accepts any ENUMERATED unit's id; every other
+//!   keyed command resolves only an OPEN device's id.
 //!
 //! ## What later lots change (for orientation, see the plan on issue #25)
 //!
-//! - Lot D: capabilities on the wire (ts-rs export + a devices command), the
-//!   frontend devices slice, deletion of the TS range consts.
 //! - Lot E: N open devices (runtime map + N stream loops, ingest routed by
 //!   `device_id`), a second virtual unit, slot-keyed endpoint ids.
 //! - Lot F: programs/REST/scripts per device.
