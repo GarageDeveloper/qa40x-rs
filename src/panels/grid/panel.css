@@ -106,10 +106,13 @@
 
 /* Second header row: compose/export tools (＋ trace, Σ measurement,
  * ⤓ export) — tucked under the view row, no top padding so the pair
- * reads as one header block. */
+ * reads as one header block. Indented by the drag handle's width + gap
+ * so its first control sits flush under the kind select. */
 .tile__head--tools {
   padding-top: 0;
+  padding-left: calc(8px + 14px + 6px);
 }
+
 
 .tile__strip:empty {
   display: none;
@@ -132,6 +135,31 @@
 
 .tile__add {
   max-width: 90px;
+}
+
+/* Header COLUMNS (maintainer ask on PR #41): the tools row's controls
+ * line up under the view row's — same fixed widths pairwise (col1: kind
+ * select ↔ ＋ add-trace, col2: unit ↔ Σ, col3: scope time window ↔ ⤓
+ * export). The handle gets a fixed width so the tools row's indent is
+ * deterministic. Declared AFTER .tile__add so max-width:none beats its
+ * 90 px cap at equal specificity. */
+.tile__handle {
+  width: 14px;
+}
+
+.tile__col1 {
+  width: 112px;
+  max-width: none;
+}
+
+.tile__col2 {
+  width: 76px;
+  max-width: none;
+}
+
+.tile__col3 {
+  width: 76px;
+  max-width: none;
 }
 
 /* Utility hide toggled from tile.ts per tile kind. !important because it
