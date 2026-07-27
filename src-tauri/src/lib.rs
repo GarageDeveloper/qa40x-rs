@@ -189,11 +189,16 @@ async fn connect_device(
     // this generation). The monitor lives in device::runtime — Tauri only
     // provides the event emission. A virtual unit never unplugs; it only
     // disconnects through disconnect_device (the connect_virtual_device
-    // rule, kept for a virtual unit opened by id).
+    // rule, kept for a virtual unit opened by id). Resolve the runtime BY
+    // the unit just opened, not "the default" (review F3): if a racing
+    // connect already superseded this open, there is nothing left for this
+    // command to monitor — the winner spawned its own.
     if !desc.identity.is_virtual {
-        device::spawn_liveness_monitor(devices.default_runtime(), move |lost| {
-            let _ = app_handle.emit("device-disconnected", lost);
-        });
+        if let Ok(rt) = devices.runtime_for(Some(desc.id.as_str())) {
+            device::spawn_liveness_monitor(rt, move |lost| {
+                let _ = app_handle.emit("device-disconnected", lost);
+            });
+        }
     }
 
     Ok("Connected successfully".to_string())
@@ -229,10 +234,11 @@ async fn disconnect_device(
     // device back first — quiesce returns once the loops fully exited, so
     // the stream channel gets a clean Stopped, never an Error. (quiesce also
     // trips the sweep cancel — the PR #35 follow-up: disconnect during a
-    // batched sweep no longer waits the sweep out.)
+    // batched sweep no longer waits the sweep out.) close_runtime keeps the
+    // teardown on the SAME runtime the command routed to (review F3).
     rt.quiesce().await;
 
-    devices.close().await
+    devices.close_runtime(&rt).await
         .map(|_| "Disconnected successfully".to_string())
         .map_err(|e| format!("Failed to disconnect: {}", e))
 }
@@ -805,8 +811,16 @@ async fn flash_firmware(
     device.lock().await.mark_disconnected().await;
     // The unit is detaching to re-enumerate as the bootloader — the registry
     // must not keep reporting it open. Generation-keyed: a stale flash can't
-    // wipe a newer open's bookkeeping.
-    rt.note_closed_at(flash_gen);
+    // wipe a newer open's bookkeeping. Whoever applies the clear OWNS the
+    // user notification (the note_closed_at token contract): the liveness
+    // monitor will see `current` already empty and stay silent, so the event
+    // must be emitted HERE — review F1: without it the UI stays "connected"
+    // to a unit that detached into the bootloader, and the post-flash replug
+    // never auto-reconnects (autoConnectTick only runs while disconnected).
+    let lost_id = rt.device_id().map(|id| id.as_str().to_string());
+    if rt.note_closed_at(flash_gen) {
+        let _ = app.emit("device-disconnected", device::DeviceLost { device_id: lost_id });
+    }
 
     let plan = flash::build_flash_plan(&image);
     let _ = app.emit("firmware-flash-phase", "waiting-for-bootloader");

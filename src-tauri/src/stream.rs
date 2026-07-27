@@ -1237,13 +1237,18 @@ async fn run_stream_loop(
         // and without this a stop (or an app quit — safe_shutdown) could only
         // take effect at the NEXT frame boundary. Same mechanism as the
         // batched sweeps (the sweep got it first; this is its stream twin).
-        let captured_raw = {
+        let (captured_raw, frame_device_id) = {
             let device = ctl.device.lock().await;
             match device
                 .generate_and_capture_cancellable(&left, &right, Some(&ctl.stop))
                 .await
             {
-                Ok(c) => c,
+                // The frame's device identity, read WHILE the capture's
+                // device guard is still held: a connect landing during the
+                // (seconds-long at 1M FFT) analysis window below must not
+                // stamp this frame with the NEXT unit's id (review F2 —
+                // "the unit this frame was CAPTURED on", literally).
+                Ok(c) => (c, ctl.open_unit.get().map(|id| id.as_str().to_string())),
                 Err(crate::qa40x::QA40xError::Cancelled) => {
                     log::info!("stream: stop observed mid-capture — cancelled cooperatively");
                     return Ok(());
@@ -1370,9 +1375,7 @@ async fn run_stream_loop(
 
         let msg = StreamMsg::Frame(Box::new(StreamFrame {
             seq,
-            // This frame's device identity, from the runtime's open-unit
-            // cell (std lock, held for a clone only).
-            device_id: ctl.open_unit.get().map(|id| id.as_str().to_string()),
+            device_id: frame_device_id,
             captured,
             stimulus,
             spectra: analysis.spectra,

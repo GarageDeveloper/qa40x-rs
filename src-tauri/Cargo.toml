@@ -80,4 +80,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # `tauri::test` (mock runtime + IPC harness): pins that the REAL command
 # deserialization layer resolves an omitted `device_id: Option<String>` to
 # `None` (issue #25 lot C) — the whole "old callers unchanged" contract.
+# Known tradeoff: cargo unifies features across dev/normal deps for test
+# targets, so `cargo test` builds the lib with `tauri/test` on while release
+# builds don't — acceptable because the feature only ADDS the `tauri::test`
+# module, it changes no shipped code path.
 tauri = { version = "2", features = ["test"] }

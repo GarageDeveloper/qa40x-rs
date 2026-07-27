@@ -215,16 +215,26 @@ impl DeviceRegistry {
         Err(DeviceError::NotFound)
     }
 
-    /// Close the open device (safe-state teardown included). The caller has
-    /// already stopped the stream/generator loops, same as before. Waits out
-    /// an in-flight open on the lifecycle gate first, so a close racing a
-    /// connect can never interleave with it.
+    /// Close the DEFAULT device (safe-state teardown included) — the
+    /// unrouted legacy form; the routed form is [`Self::close_runtime`].
     pub async fn close(&self) -> Result<(), DeviceError> {
-        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
-        let res = self.inner.runtime.teardown().await;
+        let rt = self.default_runtime();
+        self.close_runtime(&rt).await
+    }
+
+    /// Close a SPECIFIC runtime's device (safe-state teardown included). The
+    /// caller has already stopped that runtime's loops, same as before.
+    /// Waits out an in-flight open on the runtime's lifecycle gate first, so
+    /// a close racing a connect can never interleave with it. Taking the
+    /// runtime (not an id) keeps `disconnect_device` routing and teardown on
+    /// the SAME device — the lot-E "routing, not refactor" premise
+    /// (review F3).
+    pub async fn close_runtime(&self, rt: &DeviceRuntime) -> Result<(), DeviceError> {
+        let _gate = rt.lifecycle_gate().lock().await;
+        let res = rt.teardown().await;
         // Bookkeeping is cleared even on a failed teardown: the intent was to
         // close, and the device's own state has been torn down best-effort.
-        self.inner.runtime.note_closed();
+        rt.note_closed();
         res
     }
 

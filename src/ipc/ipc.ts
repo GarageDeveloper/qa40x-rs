@@ -41,8 +41,11 @@ export { TauriChannel };
  * Device-keyed commands accept an optional `deviceId` (issue #25 lot C):
  * omitted ⇒ the backend's default device — every existing caller is
  * unchanged. Nothing passes it yet; lot D's devices slice does. Backend
- * contract: an id that names anything but an OPEN device rejects
- * (`Unknown device: <id>`), never falls back.
+ * contract, two rules: `connect_device` accepts any ENUMERATED unit's id
+ * (it exists to open one); every other keyed command resolves only an OPEN
+ * device's id and rejects anything else (`Unknown device: <id>`), never
+ * falls back — so querying a unit's info before connecting it goes through
+ * `connect_device` first, by design.
  */
 type DeviceScoped = { deviceId?: string };
 

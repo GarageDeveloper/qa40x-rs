@@ -458,6 +458,16 @@ const MONITOR_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 /// this generation. No Tauri dependency — the caller provides the event
 /// emission as `on_lost` (testability).
 pub fn spawn_liveness_monitor(rt: DeviceRuntime, on_lost: impl FnOnce(DeviceLost) + Send + 'static) {
+    spawn_liveness_monitor_with_tick(rt, MONITOR_TICK, on_lost);
+}
+
+/// [`spawn_liveness_monitor`] with an explicit tick — the seam that lets the
+/// generation→emit path be tested without multi-second sleeps.
+pub(crate) fn spawn_liveness_monitor_with_tick(
+    rt: DeviceRuntime,
+    tick: std::time::Duration,
+    on_lost: impl FnOnce(DeviceLost) + Send + 'static,
+) {
     let gen = rt.generation();
     if !rt.monitor_claim(gen) {
         // A monitor is already watching this (re)connection.
@@ -466,7 +476,7 @@ pub fn spawn_liveness_monitor(rt: DeviceRuntime, on_lost: impl FnOnce(DeviceLost
     let device_id = rt.device_id().map(|id| id.as_str().to_string());
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(MONITOR_TICK).await;
+            tokio::time::sleep(tick).await;
 
             if rt.generation() != gen {
                 // Superseded by a newer open — its own monitor took over.
@@ -564,6 +574,73 @@ mod tests {
         // The owning monitor's release frees the slot for a fresh claim.
         rt.monitor_release(gen2);
         assert!(rt.monitor_claim(gen2));
+    }
+
+    fn opened_fake(rt: &DeviceRuntime, unit: &str) -> (DeviceId, OpenGeneration) {
+        let src = crate::device::SourceId::new("usb");
+        let id = DeviceId::new(&src, unit);
+        let gen = rt.note_open(id.clone(), crate::device::testing::fake_descriptor(&src, unit, true));
+        (id, gen)
+    }
+
+    /// The monitor's generation→emit composition (review F4): a physical
+    /// loss is reported EXACTLY once, with the lost unit's id, and the
+    /// bookkeeping is cleared. The runtime's device object was never
+    /// connected, so `check_physical_connection` reports the loss on the
+    /// first (fast, test-only) tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_monitor_reports_a_loss_exactly_once_with_the_units_id() {
+        let rt = DeviceRuntime::new();
+        opened_fake(&rt, "AB12");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeviceLost>();
+        spawn_liveness_monitor_with_tick(
+            rt.clone(),
+            std::time::Duration::from_millis(10),
+            move |lost| {
+                let _ = tx.send(lost);
+            },
+        );
+
+        let lost = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the loss must be reported within budget")
+            .expect("channel open");
+        assert_eq!(lost.device_id.as_deref(), Some("usb/AB12"));
+        assert!(rt.current().is_none(), "the monitor cleared the bookkeeping");
+        // Exactly once: the monitor task ended (its FnOnce sender dropped),
+        // so the channel closes with no second report.
+        let end = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("the monitor task must have exited");
+        assert!(end.is_none(), "no second loss report");
+    }
+
+    /// The token contract's other half (review F1's regression class): when
+    /// someone ELSE already consumed the note_closed_at token for this
+    /// generation (the flash path's bootloader detach), the monitor observes
+    /// the dead device, finds nothing left to close, and exits WITHOUT
+    /// reporting — whoever cleared the bookkeeping owns the notification.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_monitor_stays_silent_when_the_loss_was_already_bookkept() {
+        let rt = DeviceRuntime::new();
+        let (_, gen) = opened_fake(&rt, "AB12");
+        // The flash path consumed the token before the monitor could.
+        assert!(rt.note_closed_at(gen));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeviceLost>();
+        spawn_liveness_monitor_with_tick(
+            rt.clone(),
+            std::time::Duration::from_millis(10),
+            move |lost| {
+                let _ = tx.send(lost);
+            },
+        );
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the monitor must exit, not keep polling a dead device");
+        assert!(end.is_none(), "an already-bookkept loss must not be re-reported");
     }
 
     #[test]

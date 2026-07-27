@@ -5,7 +5,7 @@
  */
 import "./app.css";
 import { listen } from "@tauri-apps/api/event";
-import type { DeviceLost } from "./gen/DeviceLost";
+import type { DeviceLost } from "./gen";
 import type { Store } from "./store/store";
 import type { AppState } from "./store/state";
 import type { Ipc } from "./ipc/ipc";
