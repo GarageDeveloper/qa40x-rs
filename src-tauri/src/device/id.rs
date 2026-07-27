@@ -57,6 +57,14 @@ impl DeviceId {
         Self(format!("{}/{}", source.as_str(), unit_key))
     }
 
+    /// A full `"<source>/<unit-key>"` id as received from the wire (the
+    /// commands' optional `device_id`, issue #25 lot C). No validation — an
+    /// id that names nothing simply fails to route (`NotFound`/
+    /// `UnknownDevice`), same as any other stale id.
+    pub fn from_wire(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
     /// The source part (before the first `/`).
     pub fn source(&self) -> &str {
         self.0.split_once('/').map_or(self.0.as_str(), |(s, _)| s)

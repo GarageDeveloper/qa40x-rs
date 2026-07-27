@@ -75,3 +75,9 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # image-data feature — this only makes the dependency direct).
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+
+[dev-dependencies]
+# `tauri::test` (mock runtime + IPC harness): pins that the REAL command
+# deserialization layer resolves an omitted `device_id: Option<String>` to
+# `None` (issue #25 lot C) — the whole "old callers unchanged" contract.
+tauri = { version = "2", features = ["test"] }

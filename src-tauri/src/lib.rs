@@ -157,28 +157,53 @@ pub(crate) async fn ensure_generator_stopped(
 
 // Tauri commands
 
+/// Resolve a command's optional `device_id` (issue #25 lot C): `None` ⇒ the
+/// default device — REST/scripting and every pre-lot-C caller unchanged;
+/// `Some(id)` that names anything but an open device is an error, never a
+/// silent fallback. Scoped AppState guard around a cheap std-lock read.
+async fn runtime_for_command(
+    state: &tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<&str>,
+) -> Result<device::DeviceRuntime, String> {
+    let s = state.lock().await;
+    s.devices.runtime_for(device_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn connect_device(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<String, String> {
     info!("Connect device command called");
     let devices = { state.lock().await.devices.clone() };
 
-    // First physical unit any source offers — the pre-registry connect()
-    // behavior (the registry's USB source releases the prior claim, rescans
-    // and opens by unit key).
-    devices
-        .open_first_physical()
-        .await
-        .map_err(|e| format!("Failed to connect: {}", e))?;
+    // `device_id` picks a SPECIFIC enumerated unit (issue #25 lot C — the
+    // lot-D device bar's path, any source incl. virtual); `None` keeps the
+    // pre-registry behavior: first physical unit any source offers (the
+    // registry's USB source releases the prior claim, rescans and opens by
+    // unit key).
+    let desc = match &device_id {
+        Some(id) => devices
+            .open(&device::DeviceId::from_wire(id.clone()))
+            .await
+            .map_err(|e| format!("Failed to connect: {}", e))?,
+        None => devices
+            .open_first_physical()
+            .await
+            .map_err(|e| format!("Failed to connect: {}", e))?,
+    };
 
     // Watch THIS open for unplug (a no-op when a monitor already watches
     // this generation). The monitor lives in device::runtime — Tauri only
-    // provides the event emission.
-    device::spawn_liveness_monitor(devices.default_runtime(), move |lost| {
-        let _ = app_handle.emit("device-disconnected", lost);
-    });
+    // provides the event emission. A virtual unit never unplugs; it only
+    // disconnects through disconnect_device (the connect_virtual_device
+    // rule, kept for a virtual unit opened by id).
+    if !desc.identity.is_virtual {
+        device::spawn_liveness_monitor(devices.default_runtime(), move |lost| {
+            let _ = app_handle.emit("device-disconnected", lost);
+        });
+    }
 
     Ok("Connected successfully".to_string())
 }
@@ -201,12 +226,13 @@ async fn connect_virtual_device(
 }
 
 #[tauri::command]
-async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
+async fn disconnect_device(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<String, String> {
     info!("Disconnect device command called");
-    let (devices, rt) = {
-        let app_state = state.lock().await;
-        (app_state.devices.clone(), app_state.devices.default_runtime())
-    };
+    let devices = { state.lock().await.devices.clone() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     // The stream loop (or the gap-free generator) owns captures; closing the
     // device underneath it would only manufacture a capture error. Hand the
     // device back first — stop_and_wait returns once the loop fully exited,
@@ -220,11 +246,14 @@ async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
 }
 
 #[tauri::command]
-async fn is_device_connected(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
+async fn is_device_connected(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<bool, String> {
     // Scoped guard: never hold the AppState lock while awaiting the device
     // mutex — a long capture would otherwise park this command holding
     // AppState, stalling every sibling command behind it.
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let connected = device.lock().await.is_connected().await;
     Ok(connected)
 }
@@ -234,9 +263,10 @@ async fn is_device_connected(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> R
 #[tauri::command]
 async fn get_device_info(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<Option<qa40x::DeviceMeta>, String> {
     // Scoped guard — same rule as is_device_connected.
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let meta = device.lock().await.device_meta().await;
     Ok(meta)
 }
@@ -265,8 +295,9 @@ async fn is_hardware_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> R
 async fn set_input_gain(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     gain_dbv: i32,
+    device_id: Option<String>,
 ) -> Result<String, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
 
     let gain = InputGain::from_dbv(gain_dbv)
@@ -281,8 +312,9 @@ async fn set_input_gain(
 async fn set_output_gain(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     gain_dbv: i32,
+    device_id: Option<String>,
 ) -> Result<String, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
 
     let gain = OutputGain::from_dbv(gain_dbv)
@@ -297,8 +329,9 @@ async fn set_output_gain(
 async fn set_sample_rate(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     rate_hz: u32,
+    device_id: Option<String>,
 ) -> Result<String, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
 
     let rate = SampleRate::from_hz(rate_hz)
@@ -401,15 +434,21 @@ async fn apply_transform_chain(
 }
 
 #[tauri::command]
-async fn get_device_config(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<DeviceConfig, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+async fn get_device_config(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<DeviceConfig, String> {
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     Ok(device.get_config().await)
 }
 
 #[tauri::command]
-async fn read_device_config(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<DeviceConfig, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+async fn read_device_config(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<DeviceConfig, String> {
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     device.read_config_from_device().await
         .map_err(|e| format!("Failed to read config from device: {}", e))
@@ -424,8 +463,9 @@ async fn stream_start(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     config: stream::StreamConfig,
     on_frame: tauri::ipc::Channel<stream::StreamMsg>,
+    device_id: Option<String>,
 ) -> Result<(), String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     ctl.start(config, on_frame).await
 }
 
@@ -436,24 +476,31 @@ async fn stream_start(
 async fn stream_update(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     config: stream::StreamConfig,
+    device_id: Option<String>,
 ) -> Result<(), String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     ctl.update(config)
 }
 
 /// Stop the stream loop and wait until it has fully exited (so a restart —
 /// or a measurement program taking the device — is deterministic).
 #[tauri::command]
-async fn stream_stop(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<(), String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+async fn stream_stop(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<(), String> {
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     ctl.stop_and_wait().await;
     Ok(())
 }
 
 /// Whether the v2 stream loop is currently running.
 #[tauri::command]
-async fn stream_status(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+async fn stream_status(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<bool, String> {
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     Ok(ctl.is_running())
 }
 
@@ -462,8 +509,13 @@ async fn stream_status(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<
 /// normal STREAM_STOP + drain path — the command then rejects with
 /// "sweep cancelled". No-op when nothing sweeps (the next batch clears it).
 #[tauri::command]
-async fn sweep_stop(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<(), String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+async fn sweep_stop(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<(), String> {
+    // New behavior confined to the new arg: an unknown `device_id` errors
+    // where the arg-less call stays the unconditional no-op it always was.
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     rt.cancel_sweep();
     Ok(())
 }
@@ -474,8 +526,9 @@ async fn sweep_stop(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<(),
 #[tauri::command]
 async fn stream_reset_averaging(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<(), String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     ctl.reset_averaging();
     Ok(())
 }
@@ -486,8 +539,9 @@ async fn stream_reset_averaging(
 #[tauri::command]
 async fn stream_reset_measure_stats(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<(), String> {
-    let ctl = { state.lock().await.devices.default_runtime().stream() };
+    let ctl = runtime_for_command(&state, device_id.as_deref()).await?.stream();
     ctl.reset_measure_stats();
     Ok(())
 }
@@ -502,11 +556,12 @@ async fn stream_reset_measure_stats(
 async fn output_only_start(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     slots: Vec<mixer::MixerSlotDesc>,
+    device_id: Option<String>,
 ) -> Result<mixer::OutputOnlyStatus, String> {
     if slots.is_empty() {
         return Err("output-only: no signal source is playing".into());
     }
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let device = rt.handle();
     let mx = rt.mixer();
     rt.stream().stop_and_wait().await;
@@ -558,8 +613,11 @@ async fn output_only_start(
 
 /// Stop the continuous signal generator.
 #[tauri::command]
-async fn stop_generator(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+async fn stop_generator(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<String, String> {
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     rt.generator().ensure_stopped().await;
     Ok("Generator stopped".into())
 }
@@ -568,8 +626,9 @@ async fn stop_generator(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result
 #[tauri::command]
 async fn is_generator_running(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<bool, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     Ok(rt.generator().is_running())
 }
 
@@ -586,8 +645,9 @@ struct InputDbvOffset {
 async fn get_input_dbv_offset(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     input_channel: qa40x::Channel,
+    device_id: Option<String>,
 ) -> Result<InputDbvOffset, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     let (offset_db, calibrated) = device.input_dbv_offset(input_channel).await;
     Ok(InputDbvOffset { offset_db, calibrated })
@@ -602,8 +662,9 @@ async fn get_input_dbv_offset(
 async fn get_output_dbv_offset(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     output_channel: qa40x::Channel,
+    device_id: Option<String>,
 ) -> Result<InputDbvOffset, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     let (offset_db, calibrated) = device.output_dbv_offset(output_channel).await;
     Ok(InputDbvOffset { offset_db, calibrated })
@@ -614,8 +675,9 @@ async fn get_output_dbv_offset(
 #[tauri::command]
 async fn read_telemetry(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<qa40x::Telemetry, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     device.read_telemetry().await.map_err(|e| e.to_string())
 }
@@ -625,8 +687,9 @@ async fn read_telemetry(
 #[tauri::command]
 async fn keepalive(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<qa40x::Telemetry, String> {
-    let device = { state.lock().await.devices.default_runtime().handle() };
+    let device = runtime_for_command(&state, device_id.as_deref()).await?.handle();
     let device = device.lock().await;
     device.keepalive().await.map_err(|e| e.to_string())
 }
@@ -637,11 +700,12 @@ async fn keepalive(
 #[tauri::command]
 async fn last_telemetry(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
 ) -> Result<Option<qa40x::Telemetry>, String> {
     // Pure cache read — deliberately NOT through the exclusive device mutex:
     // this polls every second during a run, and queuing it behind a long
     // capture both delays the readout and lengthens the lock's FIFO queue.
-    let cell = { state.lock().await.devices.default_runtime().telemetry_cell() };
+    let cell = runtime_for_command(&state, device_id.as_deref()).await?.telemetry_cell();
     let t = cell.lock().await.clone();
     Ok(t)
 }
@@ -682,16 +746,15 @@ async fn flash_firmware(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     sha256: String,
+    device_id: Option<String>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     // Real flashing is enabled: the KBOOT HID transport is confirmed against NXP's
     // reference (spsdk + pyMBoot) and the capture cross-checks its shape. The
     // command still re-verifies the signature + connected model below, and the
     // frontend requires an explicit confirmation — never auto-invoked.
-    let (store, rt) = {
-        let s = state.lock().await;
-        (s.firmware_images.clone(), s.devices.default_runtime())
-    };
+    let store = { state.lock().await.firmware_images.clone() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let device = rt.handle();
     // The open generation at command entry: the bootloader detach below must
     // clear THIS open's bookkeeping, never a newer one's (a reconnect racing
@@ -791,9 +854,10 @@ async fn measure_frequency_response_multi(
     want_right: bool,
     duration_secs: f32,
     amplitude_dbfs: f32,
+    device_id: Option<String>,
 ) -> Result<Vec<qa40x::FrequencyResponseTrace>, String> {
     use measurement::MeasurementProgram;
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let mut session = measurement::Session::new(
         rt.handle(),
         rt.generator().running_flag().clone(),
@@ -919,8 +983,9 @@ async fn measure_thd_vs_frequency(
     amplitude_dbfs: f32,
     output_channel: qa40x::Channel,
     input_channel: qa40x::Channel,
+    device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -975,8 +1040,9 @@ async fn measure_thd_vs_level(
     frequency_hz: f32,
     output_channel: qa40x::Channel,
     input_channel: qa40x::Channel,
+    device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -1028,8 +1094,9 @@ async fn measure_wow_flutter(
     output_channel: qa40x::Channel,
     input_channel: qa40x::Channel,
     generate: bool,
+    device_id: Option<String>,
 ) -> Result<audio::WowFlutterResult, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     // A fresh call consumes any stale Stop click from a previous run (same
@@ -1069,8 +1136,9 @@ async fn measure_levels(
     generate: bool,
     stimulus_freq: f32,
     stimulus_dbfs: f32,
+    device_id: Option<String>,
 ) -> Result<audio::LevelResult, String> {
-    let rt = { state.lock().await.devices.default_runtime() };
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
     let device = device.lock().await;
@@ -1325,6 +1393,74 @@ mod app_state_tests {
         assert!(Arc::ptr_eq(&rt.mixer(), &rt2.mixer()));
         assert!(Arc::ptr_eq(rt.generator().running_flag(), rt2.generator().running_flag()));
         assert!(Arc::ptr_eq(rt.sweep_cancel(), rt2.sweep_cancel()));
+    }
+}
+
+#[cfg(test)]
+mod command_arg_tests {
+    use super::*;
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        cmd: &str,
+        body: serde_json::Value,
+    ) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+        tauri::test::get_ipc_response(
+            webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                // The app origin per platform (the tauri::test doc example):
+                // anything else is treated as a REMOTE origin and refused by
+                // the capability check before deserialization even runs.
+                url: if cfg!(any(windows, target_os = "android")) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .expect("url"),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+    }
+
+    /// The lot-C plan's risk R1, pinned through the REAL IPC layer (mock
+    /// runtime, actual command deserialization): an OMITTED `device_id`
+    /// resolves to `None` — every pre-lot-C caller (frontend, e2e, REST-side
+    /// invokes) sends no such key and must behave exactly as before — while
+    /// an explicit id that names nothing open errors, never falls back.
+    #[test]
+    fn an_omitted_device_id_deserializes_to_none_through_the_real_ipc_layer() {
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(Mutex::new(AppState::new())))
+            .invoke_handler(tauri::generate_handler![sweep_stop])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        // No `deviceId` key at all — the pre-lot-C wire shape. sweep_stop
+        // with no id is the unconditional no-op it always was.
+        invoke(&webview, "sweep_stop", serde_json::json!({}))
+            .expect("an omitted Option arg must deserialize to None, not error");
+
+        // An explicit id with nothing open: UnknownDevice, surfaced as the
+        // command's error string.
+        let err = invoke(
+            &webview,
+            "sweep_stop",
+            serde_json::json!({ "deviceId": "usb/NOPE" }),
+        )
+        .expect_err("an unknown device id must be an error");
+        assert!(
+            format!("{err:?}").contains("Unknown device: usb/NOPE"),
+            "unexpected error payload: {err:?}"
+        );
     }
 }
 

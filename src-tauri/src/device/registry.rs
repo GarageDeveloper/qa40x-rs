@@ -71,6 +71,27 @@ impl DeviceRegistry {
         self.inner.runtime.clone()
     }
 
+    /// Every runtime the registry owns (lot C: exactly one). The shutdown
+    /// path iterates this so lot E's N-runtime map is a routing change.
+    pub fn runtimes(&self) -> Vec<DeviceRuntime> {
+        vec![self.inner.runtime.clone()]
+    }
+
+    /// Resolve a command's optional `device_id` to its runtime. `None` ⇒ the
+    /// default device (the REST/scripting/e2e path, unchanged). `Some(id)`
+    /// that is not currently open ⇒ [`DeviceError::UnknownDevice`], never a
+    /// silent fallback: a caller naming a device that isn't there must fail.
+    /// Cheap std-lock read — never queues behind a capture.
+    pub fn runtime_for(&self, device_id: Option<&str>) -> Result<DeviceRuntime, DeviceError> {
+        match device_id {
+            None => Ok(self.default_runtime()),
+            Some(id) => match self.inner.runtime.device_id() {
+                Some(open) if open.as_str() == id => Ok(self.default_runtime()),
+                _ => Err(DeviceError::UnknownDevice(id.to_string())),
+            },
+        }
+    }
+
     /// The one device object of the session — the same `Arc` on every call.
     pub fn handle(&self) -> DeviceHandle {
         self.inner.runtime.handle()
@@ -527,6 +548,29 @@ mod tests {
         let cur = reg.current().expect("one unit open");
         assert!(cur.id == a || cur.id == b);
         assert_eq!(reg.default_runtime().generation().0, g0.0 + 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_for_resolves_none_to_the_default_and_rejects_an_unknown_id() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        // `None` always resolves to the default runtime, open or not — the
+        // REST/scripting/e2e path must behave exactly as before lot C.
+        assert!(reg.runtime_for(None).is_ok());
+        // A named unit that is not open is an error, never a fallback.
+        let err = match reg.runtime_for(Some("usb/A")) {
+            Err(e) => e,
+            Ok(_) => panic!("nothing open yet — Some(id) must not resolve"),
+        };
+        assert_eq!(err.to_string(), "Unknown device: usb/A");
+
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open");
+        let rt = reg.runtime_for(Some("usb/A")).expect("the open unit resolves");
+        assert!(Arc::ptr_eq(&rt.handle(), &reg.handle()));
+        assert!(matches!(
+            reg.runtime_for(Some("usb/Z")),
+            Err(DeviceError::UnknownDevice(_))
+        ));
     }
 
     #[tokio::test]
