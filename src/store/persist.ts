@@ -12,10 +12,12 @@
  * shape (graphs/series/trace-defs) onto the v2 state shape. v5 is the native
  * document. `migrate()` accepts any of them.
  *
- * Storage: NEW keys (`qa40x-v2-…`). The legacy frontend keeps running on its
- * own keys during the whole transition — v2 must never clobber a v4 current
- * blob the old page still reads. Legacy saves stay visible read-only through
- * `listLegacyNamed()` + the importer.
+ * Storage moved to IndexedDB (issue #44 lot 1, wsstore.ts) — this module
+ * keeps only the DOCUMENT logic (snapshot / migrate / frame codecs) plus
+ * the LEGACY v1-frontend localStorage keys, still read-only: the old page
+ * owns those blobs and v2 never writes or deletes them. The old v2
+ * localStorage keys (`qa40x-v2-ws-*`) are imported into IndexedDB once at
+ * first open, then removed (wsstore.ts).
  */
 import type { Frame, TransformStep, UserWeightingCurve } from "../gen";
 import { classifyScriptRole } from "../core/scriptrole";
@@ -52,8 +54,6 @@ import {
 
 export const WS_VERSION = 5;
 
-const CURRENT_KEY = "qa40x-v2-ws-current";
-const SAVED_PREFIX = "qa40x-v2-ws:";
 /** The legacy (v1 frontend) keys — read-only from here. */
 const LEGACY_CURRENT_KEY = "qa40x-dash-current";
 const LEGACY_SAVED_PREFIX = "qa40x-dash-ws:";
@@ -840,26 +840,12 @@ function read(raw: string | null): WorkspaceDoc | null {
 }
 
 /* ------------------------------------------------------------------ */
-/* Storage                                                             */
+/* Legacy (v1 frontend) storage — read-only                            */
 /* ------------------------------------------------------------------ */
 
-/** Auto-saved current workspace (restored on reload). Returns whether the
- * write succeeded; `onError` (issue #29 review finding #2) lets the caller
- * surface a QUOTA-EXCEEDED write (e.g. a huge embedded user curve) instead
- * of it vanishing into an empty catch — the bench keeps running either way,
- * but silently NOT auto-saving is its own kind of data loss. */
-export function saveCurrent(doc: WorkspaceDoc, onError?: (e: unknown) => void): boolean {
-  try {
-    localStorage.setItem(CURRENT_KEY, JSON.stringify(doc));
-    return true;
-  } catch (e) {
-    onError?.(e);
-    return false;
-  }
-}
-
 /** True for a storage-quota write failure (`DOMException` name or the
- * legacy numeric code some engines still use). */
+ * legacy numeric code some engines still use) — IndexedDB rejects with the
+ * same `QuotaExceededError` DOMException localStorage threw. */
 export function isQuotaExceeded(e: unknown): boolean {
   return (
     e instanceof DOMException &&
@@ -867,56 +853,39 @@ export function isQuotaExceeded(e: unknown): boolean {
   );
 }
 
-/** The blob to restore at boot: the v2 current, else the LEGACY current
- * imported once (a user upgrading mid-transition keeps their bench). */
-export function loadCurrent(): WorkspaceDoc | null {
-  return (
-    read(localStorage.getItem(CURRENT_KEY)) ??
-    read(localStorage.getItem(LEGACY_CURRENT_KEY))
-  );
-}
-
-/** Returns whether the write succeeded (same quota-safety contract as
- * `saveCurrent` — a named save is a deliberate user action, so its caller
- * MUST check this rather than assume success). */
-export function saveNamed(name: string, doc: WorkspaceDoc, onError?: (e: unknown) => void): boolean {
+/** The LEGACY frontend's auto-saved current, through the importer — the
+ * boot fallback when IndexedDB has no current doc (a user upgrading
+ * mid-transition keeps their bench). All three legacy readers guard the
+ * localStorage ACCESS itself (disabled/blocked storage throws — the same
+ * reason main.ts's theme/REST-token reads are wrapped): "no legacy blobs"
+ * is a state, an exception at boot or in the Load menu is not. */
+export function loadLegacyCurrent(): WorkspaceDoc | null {
   try {
-    localStorage.setItem(SAVED_PREFIX + name, JSON.stringify({ ...doc, name }));
-    return true;
-  } catch (e) {
-    onError?.(e);
-    return false;
+    return read(localStorage.getItem(LEGACY_CURRENT_KEY));
+  } catch {
+    return null;
   }
-}
-
-export function loadNamed(name: string): WorkspaceDoc | null {
-  return read(localStorage.getItem(SAVED_PREFIX + name));
-}
-
-export function deleteNamed(name: string): void {
-  localStorage.removeItem(SAVED_PREFIX + name);
-}
-
-function listWithPrefix(prefix: string): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(prefix)) out.push(k.slice(prefix.length));
-  }
-  return out.sort();
-}
-
-/** Names of v2 saved workspaces, sorted. */
-export function listNamed(): string[] {
-  return listWithPrefix(SAVED_PREFIX);
 }
 
 /** Names of LEGACY saved workspaces (the v1 frontend's), sorted. Loading
  * one goes through the importer; v2 never writes or deletes these. */
 export function listLegacyNamed(): string[] {
-  return listWithPrefix(LEGACY_SAVED_PREFIX);
+  const out: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(LEGACY_SAVED_PREFIX)) out.push(k.slice(LEGACY_SAVED_PREFIX.length));
+    }
+  } catch {
+    return [];
+  }
+  return out.sort();
 }
 
 export function loadLegacyNamed(name: string): WorkspaceDoc | null {
-  return read(localStorage.getItem(LEGACY_SAVED_PREFIX + name));
+  try {
+    return read(localStorage.getItem(LEGACY_SAVED_PREFIX + name));
+  } catch {
+    return null;
+  }
 }

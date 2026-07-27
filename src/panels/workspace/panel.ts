@@ -9,7 +9,8 @@ import "./panel.css";
 import type { Store } from "../../store/store";
 import type { AppState } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
-import { deleteNamed, listLegacyNamed, listNamed } from "../../store/persist";
+import { listLegacyNamed } from "../../store/persist";
+import type { WorkspaceStore } from "../../store/wsstore";
 import { templates } from "../../store/templates";
 import {
   applyWorkspaceDoc,
@@ -23,7 +24,8 @@ import { el } from "../../ui/dom";
 export function mountWorkspaceBar(
   host: HTMLElement,
   store: Store<AppState>,
-  ipc: Ipc
+  ipc: Ipc,
+  ws: WorkspaceStore
 ): void {
   const name = el("input.field.wsbar__name", {
     "data-testid": "ws-name",
@@ -43,8 +45,7 @@ export function mountWorkspaceBar(
           toast(store, "info", "Give the workspace a name first.");
           return;
         }
-        saveWorkspaceAs(store, name.value);
-        rebuildMenu();
+        void saveWorkspaceAs(store, ws, name.value).then(() => rebuildMenu());
       },
     },
     "Save"
@@ -52,6 +53,7 @@ export function mountWorkspaceBar(
 
   const menu = el("div.wsbar__menu", { "data-testid": "ws-menu" });
   menu.hidden = true;
+  let building = false;
 
   const loadBtn = el(
     "button.btn",
@@ -59,15 +61,30 @@ export function mountWorkspaceBar(
       "data-testid": "ws-load",
       onclick: (e: Event) => {
         e.stopPropagation();
-        const open = menu.hidden;
-        if (open) rebuildMenu();
-        menu.hidden = !open;
-        if (open) {
-          document.addEventListener("click", () => (menu.hidden = true), {
-            once: true,
-            capture: true,
-          });
+        if (!menu.hidden) {
+          menu.hidden = true;
+          return;
         }
+        if (building) return; // a double-click must not stack two rebuilds
+        building = true;
+        // The saved-workspace list is async now — the menu reveals once
+        // populated. The dismiss listener is armed IMMEDIATELY: a click
+        // landing while the list is still loading cancels the reveal
+        // (nothing pops open over what the user clicked next), and the
+        // same listener dismisses the open menu afterwards.
+        let cancelled = false;
+        document.addEventListener(
+          "click",
+          () => {
+            cancelled = true;
+            menu.hidden = true;
+          },
+          { once: true, capture: true }
+        );
+        void rebuildMenu().then(() => {
+          building = false;
+          if (!cancelled) menu.hidden = false;
+        });
       },
     },
     "Load ▾"
@@ -84,7 +101,18 @@ export function mountWorkspaceBar(
     );
   }
 
-  function rebuildMenu(): void {
+  async function rebuildMenu(): Promise<void> {
+    // Listed BEFORE the teardown: an IndexedDB failure must not leave the
+    // menu half-built (templates always render below) — but it must not be
+    // SILENT either: an empty "Saved" section reads as "my saves are gone".
+    let saved: string[] = [];
+    try {
+      saved = await ws.list();
+    } catch (e) {
+      saved = [];
+      toast(store, "error", `Saved workspaces are unavailable: ${e}`);
+    }
+
     menu.replaceChildren();
 
     menu.append(heading("Templates"));
@@ -99,7 +127,6 @@ export function mountWorkspaceBar(
       );
     }
 
-    const saved = listNamed();
     if (saved.length > 0) {
       menu.append(heading("Saved"));
       for (const n of saved) {
@@ -108,7 +135,7 @@ export function mountWorkspaceBar(
             "div.wsbar__menu-row",
             {},
             item(n, `ws-saved-${n}`, () => {
-              loadWorkspaceNamed(store, ipc, n, "saved");
+              void loadWorkspaceNamed(store, ipc, ws, n, "saved");
               menu.hidden = true;
             }),
             el(
@@ -118,8 +145,12 @@ export function mountWorkspaceBar(
                 title: `Delete "${n}"`,
                 onclick: (e: Event) => {
                   e.stopPropagation();
-                  deleteNamed(n);
-                  rebuildMenu();
+                  // A failed delete must not eat the gesture silently —
+                  // it IS the "free up space" recovery path.
+                  void ws
+                    .delete(n)
+                    .then(() => rebuildMenu())
+                    .catch((err) => toast(store, "error", `Deleting "${n}" failed: ${err}`));
                 },
               },
               "✕"
@@ -137,7 +168,7 @@ export function mountWorkspaceBar(
       for (const n of legacy) {
         menu.append(
           item(n, `ws-legacy-${n}`, () => {
-            loadWorkspaceNamed(store, ipc, n, "legacy");
+            void loadWorkspaceNamed(store, ipc, ws, n, "legacy");
             menu.hidden = true;
           })
         );

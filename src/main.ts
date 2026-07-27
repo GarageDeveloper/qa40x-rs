@@ -8,10 +8,12 @@ import { initialState } from "./store/state";
 import { tauriIpc } from "./ipc/ipc";
 import { scopeVM, spectrumVM, sweepVM } from "./store/selectors/chartvm";
 import { visibleTiles } from "./store/selectors/layout";
+import { createWorkspaceStore } from "./store/wsstore";
 import { mountApp } from "./app";
 import { setRestToken } from "./store/actions/rest";
 
 const store = new Store(initialState());
+const wsStore = createWorkspaceStore();
 
 // Read-only debug hook (e2e + console): the state snapshot and the exact
 // view-models the renderers are fed — values in DISPLAY units, so a spec
@@ -40,6 +42,11 @@ const store = new Store(initialState());
       : visibleTiles(s).find((t) => t.kind === "sweep");
     return tile ? sweepVM(s, tile) : { series: [], unitLabel: "", xUnit: "Hz" as const, omitted: [] };
   },
+  // Async storage probes (e2e): the auto-saved current doc's name (null
+  // when none) and the saved-workspace names — read through the SAME seam
+  // the app writes, so a spec never touches IndexedDB internals.
+  wsCurrentName: () => wsStore.loadCurrent().then((d) => d?.name ?? null),
+  wsSavedNames: () => wsStore.list(),
 };
 
 // Resolve the startup theme before first paint: stored choice, else OS.
@@ -73,4 +80,4 @@ try {
   /* no storage */
 }
 
-mountApp(document.getElementById("app")!, store, tauriIpc);
+void mountApp(document.getElementById("app")!, store, tauriIpc, wsStore);

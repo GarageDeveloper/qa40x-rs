@@ -5,7 +5,7 @@
  * without losing anything the user can see, and a v1-era blob walks the
  * whole chain v1 → v4 → v5.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import v4Blob from "../../tests/e2e/fixtures/workspace-v4.json";
 import { Store } from "./store";
 import type { AppState, SweepProgram } from "./state";
@@ -14,8 +14,6 @@ import {
   isQuotaExceeded,
   migrate,
   sanitizeCapture,
-  saveCurrent,
-  saveNamed,
   snapshotWorkspace,
   WS_VERSION,
 } from "./persist";
@@ -554,73 +552,17 @@ describe("issue #27 review finding #1: a level sweep's x-axis survives freeze + 
   });
 });
 
-describe("saveCurrent / saveNamed — quota-exceeded is reported, not swallowed (issue #29 review finding #2)", () => {
-  // Stubs the WHOLE global rather than spying on the runtime's own
-  // `Storage.prototype` — this suite doesn't rely on (or fight with)
-  // whatever localStorage backing the current Node/Vitest environment
-  // happens to provide.
-  function fakeLocalStorage(setItem: (k: string, v: string) => void): Storage {
-    const map = new Map<string, string>();
-    return {
-      getItem: (k: string) => map.get(k) ?? null,
-      setItem,
-      removeItem: (k: string) => void map.delete(k),
-      clear: () => map.clear(),
-      key: (i: number) => Array.from(map.keys())[i] ?? null,
-      get length() {
-        return map.size;
-      },
-    } as Storage;
-  }
-
-  function quotaError(): DOMException {
-    return new DOMException("The quota has been exceeded.", "QuotaExceededError");
-  }
-
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("saveCurrent returns true and calls no error callback on a normal write", () => {
-    const written = new Map<string, string>();
-    vi.stubGlobal(
-      "localStorage",
-      fakeLocalStorage((k, v) => void written.set(k, v))
-    );
-    const onError = vi.fn();
-    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
-    expect(saveCurrent(doc, onError)).toBe(true);
-    expect(onError).not.toHaveBeenCalled();
-    expect(written.size).toBe(1);
+describe("isQuotaExceeded — classifies the storage-quota DOMException", () => {
+  // The save paths themselves live behind the WorkspaceStore seam since
+  // issue #44 lot 1 — their quota behavior is covered in wsstore.test.ts
+  // and actions/workspace.test.ts.
+  it("is true for a QuotaExceededError DOMException", () => {
+    expect(
+      isQuotaExceeded(new DOMException("The quota has been exceeded.", "QuotaExceededError"))
+    ).toBe(true);
   });
 
-  it("saveCurrent returns false and reports the error when localStorage throws", () => {
-    vi.stubGlobal(
-      "localStorage",
-      fakeLocalStorage(() => {
-        throw quotaError();
-      })
-    );
-    const onError = vi.fn();
-    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
-    expect(saveCurrent(doc, onError)).toBe(false);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(isQuotaExceeded(onError.mock.calls[0][0])).toBe(true);
-  });
-
-  it("saveNamed also reports (never throws uncaught) on a quota failure", () => {
-    vi.stubGlobal(
-      "localStorage",
-      fakeLocalStorage(() => {
-        throw quotaError();
-      })
-    );
-    const onError = vi.fn();
-    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
-    expect(() => saveNamed("bench", doc, onError)).not.toThrow();
-    expect(saveNamed("bench", doc, onError)).toBe(false);
-    expect(isQuotaExceeded(onError.mock.calls[0][0])).toBe(true);
-  });
-
-  it("isQuotaExceeded is false for an unrelated error", () => {
+  it("is false for an unrelated error", () => {
     expect(isQuotaExceeded(new Error("network down"))).toBe(false);
     expect(isQuotaExceeded("not even an Error")).toBe(false);
   });
