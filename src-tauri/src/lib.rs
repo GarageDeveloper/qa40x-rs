@@ -1,4 +1,5 @@
 pub mod qa40x;
+pub mod device;
 pub mod audio;
 pub mod utils;
 pub mod storage;
@@ -25,6 +26,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Application state
 pub struct AppState {
+    /// The device registry (issue #25 lot B): enumerates units across
+    /// sources (USB bus + built-in virtual) and owns the session's ONE
+    /// device handle. Connection commands go through it; still exactly one
+    /// open device.
+    devices: device::DeviceRegistry,
+    /// Lot-B alias of `devices.handle()` — the same `Arc`, kept as a field
+    /// so the 20+ existing call sites (and the REST/script/stream
+    /// constructors) stay untouched. Removed in lot C when the per-device
+    /// handle struct arrives.
     device: Arc<Mutex<QA40xDevice>>,
     /// True while the continuous signal generator loop is running.
     generator_running: Arc<AtomicBool>,
@@ -68,13 +78,17 @@ pub struct AppState {
 
 impl AppState {
     fn new() -> Self {
-        let raw_device = QA40xDevice::new();
-        let telemetry = raw_device.telemetry_cell();
-        let device = Arc::new(Mutex::new(raw_device));
+        // The registry creates the device object and hands out the one
+        // shared handle + telemetry cell (grabbed before the device went
+        // behind its mutex, so cache readers never queue on it).
+        let devices = device::DeviceRegistry::new();
+        let device = devices.handle();
+        let telemetry = devices.telemetry_cell();
         let generator_running = Arc::new(AtomicBool::new(false));
         let generator_stop = Arc::new(AtomicBool::new(false));
         let mixer = Arc::new(std::sync::Mutex::new(mixer::Mixer::default()));
         Self {
+            devices,
             device: device.clone(),
             generator_running: generator_running.clone(),
             generator_stop: generator_stop.clone(),
@@ -199,13 +213,14 @@ pub(crate) async fn ensure_generator_stopped(
 // accumulate tasks — and each one emits `device-disconnected` on unplug.
 fn start_usb_monitoring(
     app_handle: tauri::AppHandle,
-    device: Arc<Mutex<QA40xDevice>>,
+    devices: device::DeviceRegistry,
     active: Arc<AtomicBool>,
 ) {
     if active.swap(true, Ordering::SeqCst) {
         // A monitor is already watching this (re)connection.
         return;
     }
+    let device = devices.handle();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -219,6 +234,9 @@ fn start_usb_monitoring(
 
             if !still_connected {
                 info!("Device disconnected - emitting event");
+                // The device closed outside disconnect_device — keep the
+                // registry's bookkeeping honest before telling the frontend.
+                devices.note_closed();
                 // Emit event to frontend
                 let _ = app_handle.emit("device-disconnected", ());
                 // Exit the monitoring loop
@@ -237,18 +255,21 @@ async fn connect_device(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<String, String> {
     info!("Connect device command called");
-    let app_state = state.lock().await;
-    let device = app_state.device.clone();
-    let monitor_active = app_state.usb_monitor_active.clone();
+    let (devices, monitor_active) = {
+        let app_state = state.lock().await;
+        (app_state.devices.clone(), app_state.usb_monitor_active.clone())
+    };
 
-    {
-        let device_lock = device.lock().await;
-        device_lock.connect().await
-            .map_err(|e| format!("Failed to connect: {}", e))?;
-    }
+    // First physical unit any source offers — the pre-registry connect()
+    // behavior (the registry's USB source releases the prior claim, rescans
+    // and opens by unit key).
+    devices
+        .open_first_physical()
+        .await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
 
     // Start monitoring after successful connection (no-op if one is alive)
-    start_usb_monitoring(app_handle, device, monitor_active);
+    start_usb_monitoring(app_handle, devices, monitor_active);
 
     Ok("Connected successfully".to_string())
 }
@@ -262,10 +283,9 @@ async fn connect_virtual_device(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<String, String> {
     info!("Connect virtual device (demo mode) command called");
-    let device = state.lock().await.device.clone();
-    let device_lock = device.lock().await;
-    device_lock
-        .connect_virtual()
+    let devices = state.lock().await.devices.clone();
+    devices
+        .open_virtual()
         .await
         .map_err(|e| format!("Failed to connect to the virtual device: {}", e))?;
     Ok("Connected to the virtual QA40x (demo mode)".to_string())
@@ -274,11 +294,11 @@ async fn connect_virtual_device(
 #[tauri::command]
 async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
     info!("Disconnect device command called");
-    let (stream, device, gen_running, gen_stop) = {
+    let (stream, devices, gen_running, gen_stop) = {
         let app_state = state.lock().await;
         (
             app_state.stream.clone(),
-            app_state.device.clone(),
+            app_state.devices.clone(),
             app_state.generator_running.clone(),
             app_state.generator_stop.clone(),
         )
@@ -289,9 +309,8 @@ async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
     // so its channel gets a clean Stopped, never an Error.
     stream.stop_and_wait().await;
     ensure_generator_stopped(&gen_running, &gen_stop).await;
-    let device = device.lock().await;
 
-    device.disconnect().await
+    devices.close().await
         .map(|_| "Disconnected successfully".to_string())
         .map_err(|e| format!("Failed to disconnect: {}", e))
 }
@@ -318,9 +337,8 @@ async fn get_device_info(
 /// regardless of whether we are connected to it.
 #[tauri::command]
 async fn is_device_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let app_state = state.lock().await;
-    let device = app_state.device.lock().await;
-    Ok(device.is_present().await)
+    let devices = state.lock().await.devices.clone();
+    Ok(devices.any_present().await)
 }
 
 /// Whether REAL hardware is on the USB bus — the virtual device never counts.
@@ -328,9 +346,11 @@ async fn is_device_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
 /// takes over from the simulator.
 #[tauri::command]
 async fn is_hardware_present(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let app_state = state.lock().await;
-    let device = app_state.device.lock().await;
-    Ok(device.is_hardware_present().await)
+    // Registry-side scan: same bus predicate as before, but no longer queued
+    // on the exclusive device mutex (this is polled during demo sessions,
+    // and a long capture used to delay the hand-over poll).
+    let devices = state.lock().await.devices.clone();
+    Ok(devices.physical_present().await)
 }
 
 #[tauri::command]
@@ -815,9 +835,9 @@ async fn flash_firmware(
     // reference (spsdk + pyMBoot) and the capture cross-checks its shape. The
     // command still re-verifies the signature + connected model below, and the
     // frontend requires an explicit confirmation — never auto-invoked.
-    let (store, device) = {
+    let (store, device, devices) = {
         let s = state.lock().await;
-        (s.firmware_images.clone(), s.device.clone())
+        (s.firmware_images.clone(), s.device.clone(), s.devices.clone())
     };
     let image = {
         let g = store.lock().map_err(|_| "firmware store lock poisoned".to_string())?;
@@ -870,6 +890,9 @@ async fn flash_firmware(
         .map_err(|e| format!("Could not enter the bootloader: {e}"))?;
     drop(dev);
     device.lock().await.mark_disconnected().await;
+    // The unit is detaching to re-enumerate as the bootloader — the registry
+    // must not keep reporting it open.
+    devices.note_closed();
 
     let plan = flash::build_flash_plan(&image);
     let _ = app.emit("firmware-flash-phase", "waiting-for-bootloader");
@@ -1447,6 +1470,22 @@ fn level_points(start_dbfs: f32, end_dbfs: f32, n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| lo + (hi - lo) * i as f32 / (n - 1) as f32)
         .collect()
+}
+
+#[cfg(test)]
+mod app_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_device_field_is_an_alias_of_the_registry_handle() {
+        // Lot-B invariant: `AppState.device` and the registry hand out the
+        // SAME device object — a registry that ever replaced its handle
+        // would silently detach REST/scripting/stream from the device the
+        // connection commands operate on.
+        let state = AppState::new();
+        assert!(Arc::ptr_eq(&state.device, &state.devices.handle()));
+        assert!(Arc::ptr_eq(&state.telemetry, &state.devices.telemetry_cell()));
+    }
 }
 
 #[cfg(test)]
