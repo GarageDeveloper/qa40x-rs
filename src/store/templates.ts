@@ -115,6 +115,7 @@ function doc(name: string, pattern: WorkspaceDoc["layout"]["pattern"], piece: Pi
       domains: [],
       seq: 0,
       offsetDb: null,
+      capture: null,
     };
     traces.order.push(prog.id);
     traces.byId[prog.id] = meta;

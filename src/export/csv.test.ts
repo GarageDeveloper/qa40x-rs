@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { initialState, type AppState, type TraceMeta } from "../store/state";
+import {
+  initialState,
+  DEFAULT_SWEEP_PARAMS,
+  type AppState,
+  type CaptureProvenance,
+  type TraceMeta,
+} from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
 import {
   benchProvenance,
@@ -13,6 +19,7 @@ import {
   tileSpectrumCsv,
   tileSweepCsv,
   traceFdCsv,
+  traceProvenance,
   traceSourceLine,
   traceSweepCsv,
   traceTdCsv,
@@ -31,6 +38,7 @@ function meta(over: Partial<TraceMeta> = {}): TraceMeta {
     domains: ["td", "fd"],
     seq: 1,
     offsetDb: null,
+    capture: null,
     ...over,
   };
 }
@@ -157,6 +165,126 @@ describe("benchProvenance", () => {
     expect(lines.some((l) => l.startsWith("# output_range_dbv"))).toBe(false);
     expect(lines).toContain("# calibrated=false");
     expect(lines.some((l) => l.startsWith("# offset_input"))).toBe(false);
+  });
+});
+
+describe("traceProvenance (issue #40: capture snapshot preferred over the live bench)", () => {
+  /** A snapshot that MATCHES `stateWithDevice()`'s live bench exactly. */
+  function liveMatchingCapture(over: Partial<CaptureProvenance> = {}): CaptureProvenance {
+    return {
+      device: { model: "QA403", serial: "AB12_CD34", firmware: 61, isVirtual: false },
+      sampleRateHz: 48000,
+      inputRangeDbv: 42,
+      outputRangeDbv: 18,
+      offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
+      fftSize: 32768,
+      window: "flattop",
+      averaging: { mode: "power", count: 8 },
+      capturedAt: null,
+      ...over,
+    };
+  }
+  const at = "2026-07-27T10:00:00.000Z";
+  const asLines = (s: AppState, c: CaptureProvenance | null): string[] =>
+    provenanceComments(traceProvenance(s, c, "0.3.0", at));
+
+  it("no snapshot → exactly the classic bench header", () => {
+    const s = stateWithDevice();
+    expect(traceProvenance(s, null, "0.3.0", at)).toEqual(benchProvenance(s, "0.3.0", at));
+  });
+
+  it("a LIVE snapshot matching the bench adds nothing — the header stays lean", () => {
+    const s = stateWithDevice();
+    expect(asLines(s, liveMatchingCapture())).toEqual(
+      provenanceComments(benchProvenance(s, "0.3.0", at))
+    );
+  });
+
+  it("a pinned instant (frozen ❄) emits the capture_* block and swaps the note", () => {
+    const lines = asLines(
+      stateWithDevice(),
+      liveMatchingCapture({ capturedAt: "2026-07-26T08:00:00.000Z" })
+    );
+    for (const want of [
+      "# capture_device_model=QA403",
+      "# capture_device_serial=AB12_CD34",
+      "# capture_device_firmware=61",
+      "# capture_device_virtual=false",
+      "# capture_sample_rate_hz=48000",
+      "# capture_input_range_dbv=42",
+      "# capture_output_range_dbv=18",
+      "# capture_fft_size=32768",
+      "# capture_window=flattop",
+      "# capture_averaging=power",
+      "# capture_averaging_count=8",
+      "# capture_calibrated=true",
+      "# capture_offset_input_l_db=32.1",
+      "# capture_time=2026-07-26T08:00:00.000Z",
+    ]) {
+      expect(lines).toContain(want);
+    }
+    // The export-time bench block STAYS (additive keys, format_version=1),
+    // and the note now explains the two contexts instead of disclaiming.
+    expect(lines).toContain("# device_model=QA403");
+    expect(lines).toContain("# format_version=1");
+    expect(
+      lines.some((l) => l.startsWith("# note=capture_* keys describe the bench"))
+    ).toBe(true);
+  });
+
+  it("the QA403-froze-then-bench-moved case: capture_* contradicts the live keys", () => {
+    // Measure on a QA403, freeze, reconfigure the bench (96 kHz) — the
+    // frozen trace's export must carry ITS bench, not just the current one
+    // (issue #40's founding example).
+    const s = stateWithDevice();
+    const moved: AppState = {
+      ...s,
+      device: { ...s.device, config: { ...s.device.config!, sample_rate: 96000 } },
+    };
+    const lines = asLines(moved, liveMatchingCapture({ capturedAt: at }));
+    expect(lines).toContain("# sample_rate_hz=96000");
+    expect(lines).toContain("# capture_sample_rate_hz=48000");
+  });
+
+  it("a live snapshot is ALSO emitted once the bench has moved under it (no pinned instant needed)", () => {
+    const s = stateWithDevice();
+    const moved: AppState = {
+      ...s,
+      device: { ...s.device, config: { ...s.device.config!, input_gain: 0 } },
+    };
+    const lines = asLines(moved, liveMatchingCapture());
+    expect(lines).toContain("# capture_input_range_dbv=42");
+    expect(lines).toContain("# input_range_dbv=0");
+  });
+
+  it("derived / mixed markers and the program params snapshot ride along", () => {
+    const lines = asLines(
+      stateWithDevice(),
+      liveMatchingCapture({
+        derived: true,
+        mixed: true,
+        programParams: { ...DEFAULT_SWEEP_PARAMS },
+      })
+    );
+    expect(lines).toContain("# capture_derived=true");
+    expect(lines).toContain("# capture_mixed=true");
+    const params = lines.find((l) => l.startsWith("# capture_program_params="));
+    expect(params).toBeDefined();
+    expect(JSON.parse(params!.slice("# capture_program_params=".length))).toEqual(
+      DEFAULT_SWEEP_PARAMS
+    );
+  });
+
+  it("degrades honestly: a snapshot with no device says so, unknown calibration stays SILENT", () => {
+    const lines = asLines(
+      stateWithDevice(),
+      liveMatchingCapture({ device: null, offsets: null, capturedAt: at })
+    );
+    expect(lines).toContain("# capture_device_model=none");
+    // No offsets recorded ⇒ calibration is UNKNOWN — "false" would assert
+    // an uncalibrated device nobody measured (review finding #6).
+    expect(lines.some((l) => l.startsWith("# capture_calibrated"))).toBe(false);
+    expect(lines.some((l) => l.startsWith("# capture_offset_input"))).toBe(false);
   });
 });
 

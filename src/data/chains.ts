@@ -22,7 +22,8 @@
 import type { Frame, TransformStep } from "../gen";
 import type { Ipc } from "../ipc/ipc";
 import type { Store } from "../store/store";
-import type { AppState, TraceMeta } from "../store/state";
+import type { AppState, CaptureProvenance, TraceMeta } from "../store/state";
+import { captureBenchSignature } from "../store/state";
 import type { Domain, TraceId } from "../core/model";
 import {
   clearFrames,
@@ -53,6 +54,33 @@ export function resetAllChains(): void {
   done.clear();
 }
 
+/**
+ * The capture snapshot a transform endpoint inherits (issue #40): the
+ * PRIMARY input's, marked `derived` (this data was computed, not captured).
+ * A deconvolve reference captured under a DIFFERENT bench state additionally
+ * flags the snapshot `mixed` — it then describes the primary input only.
+ */
+export function derivedCapture(
+  s: AppState,
+  input: TraceMeta,
+  steps: TransformStep[]
+): CaptureProvenance | null {
+  const base = input.capture;
+  if (!base) return null;
+  let mixed = base.mixed === true;
+  const baseSig = captureBenchSignature(base);
+  for (const st of steps) {
+    if (st.type !== "deconvolve") continue;
+    const ref = s.traces.byId[st.ref];
+    // A missing/dataless ref contributed nothing to the result; a ref WITH
+    // data but no snapshot (pre-#40 doc) is an UNKNOWN bench — silence
+    // there would vouch for data nobody stamped (review finding #5).
+    if (!ref || ref.domains.length === 0) continue;
+    if (!ref.capture || captureBenchSignature(ref.capture) !== baseSig) mixed = true;
+  }
+  return mixed ? { ...base, derived: true, mixed: true } : { ...base, derived: true };
+}
+
 /** Land a recompute on the endpoint: cache first, then ONE store update
  * carrying seq/domains/offset (plan §3.1). The seq mirrors the input's. */
 function land(
@@ -60,7 +88,8 @@ function land(
   id: TraceId,
   seq: number,
   frames: { td?: TraceFrames["td"]; fd?: TraceFrames["fd"]; sweep?: TraceFrames["sweep"] },
-  offsetDb: number | null
+  offsetDb: number | null,
+  capture: CaptureProvenance | null
 ): void {
   const domains: Domain[] = [];
   if (frames.td) domains.push("td");
@@ -71,7 +100,7 @@ function land(
   store.update("chains/land", (s) => {
     const t = s.traces.byId[id];
     if (!t || t.source.kind !== "transform") return s;
-    const next: TraceMeta = { ...t, seq: Math.max(t.seq, seq), domains, offsetDb };
+    const next: TraceMeta = { ...t, seq: Math.max(t.seq, seq), domains, offsetDb, capture };
     return { ...s, traces: { ...s.traces, byId: { ...s.traces.byId, [id]: next } } };
   });
 }
@@ -94,7 +123,7 @@ export function syncChains(store: Store<AppState>, ipc: Ipc): void {
     if (!input || !inputFrames || busy.has(id)) {
       if (!input && t.domains.length > 0) {
         done.delete(id);
-        land(store, id, t.seq, {}, null);
+        land(store, id, t.seq, {}, null, null);
       }
       continue;
     }
@@ -110,12 +139,23 @@ export function syncChains(store: Store<AppState>, ipc: Ipc): void {
         id,
         inputFrames.seq,
         { td: inputFrames.td, fd: inputFrames.fd, sweep: inputFrames.sweep },
-        input.offsetDb
+        input.offsetDb,
+        derivedCapture(s, input, steps)
       );
       continue;
     }
 
-    scheduleRun(store, ipc, id, steps, inputId, inputFrames, key, input.offsetDb);
+    scheduleRun(
+      store,
+      ipc,
+      id,
+      steps,
+      inputId,
+      inputFrames,
+      key,
+      input.offsetDb,
+      derivedCapture(s, input, steps)
+    );
   }
 }
 
@@ -128,7 +168,8 @@ function scheduleRun(
   inputId: TraceId,
   inputFrames: TraceFrames,
   key: string,
-  offsetDb: number | null
+  offsetDb: number | null,
+  capture: CaptureProvenance | null
 ): void {
   busy.add(id);
   const stepsJson = JSON.stringify(steps);
@@ -171,7 +212,8 @@ function scheduleRun(
           fd: res.fd ? wireToFd(res.fd) : undefined,
           sweep: inputFrames.sweep, // passes through, never transformed
         },
-        offsetDb
+        offsetDb,
+        capture
       );
     })
     .catch((err) => console.error("[transform chain]", err))

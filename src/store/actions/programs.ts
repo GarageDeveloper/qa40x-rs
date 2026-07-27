@@ -31,12 +31,13 @@ import { scriptRunLog } from "../../panels/programs/runlog";
 import type { Store } from "../store";
 import type {
   AppState,
+  CaptureProvenance,
   ProgramMeta,
   SweepProgramParams,
   TraceMeta,
   WowFlutterProgramResult,
 } from "../state";
-import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
+import { DEFAULT_SWEEP_PARAMS, liveCaptureProvenance, nextTraceColor } from "../state";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -117,6 +118,7 @@ export function addProgram(
     domains: [],
     seq: 0,
     offsetDb: null,
+    capture: null,
   };
   store.update("programs/add", (st) => ({
     ...st,
@@ -245,6 +247,30 @@ const sweepCancel = new Set<string>();
 let scriptDone: ((error: string | null) => void) | null = null;
 let activeScriptId: string | null = null;
 
+/** The capture snapshot a program result lands with (issue #40): device
+ * identity, the instant, and — for a sweep — the params that produced the
+ * curve. EVERYTHING else stays null, deliberately (review finding #4): a
+ * program run writes registers behind the frontend's back (`apply_config`,
+ * `auto_level`, the Rhai `set_*` verbs — "Nothing is restored"), so the
+ * UI-cached rate/ranges/offsets describe the bench BEFORE the run, not the
+ * one that produced the curve; and it captures with its own fft/window,
+ * not the live stream's settings. Unknown, never guessed — the frame-side
+ * truths (`trace_sample_rate_hz`) keep coming from the frame. */
+function programCapture(s: AppState, capturedAt: string, params?: SweepProgramParams): CaptureProvenance {
+  return {
+    device: liveCaptureProvenance(s).device,
+    sampleRateHz: null,
+    inputRangeDbv: null,
+    outputRangeDbv: null,
+    offsets: null,
+    fftSize: null,
+    window: null,
+    averaging: null,
+    capturedAt,
+    ...(params ? { programParams: { ...params } } : {}),
+  };
+}
+
 /** Land program frames: cache first, then seq/domains in one update. */
 function landProgramFrames(
   store: Store<AppState>,
@@ -253,7 +279,8 @@ function landProgramFrames(
     td?: ReturnType<typeof wireToTd>;
     fd?: ReturnType<typeof wireToFd>;
     sweep?: DecodedSweep;
-  }
+  },
+  params?: SweepProgramParams
 ): void {
   const seq = ++progSeq;
   if (!putFrames(id, seq, frames)) return;
@@ -262,12 +289,14 @@ function landProgramFrames(
   if (frames.td) domains.push("td");
   if (frames.fd) domains.push("fd");
   if (frames.sweep) domains.push("sweep");
+  // Built OUTSIDE the reducer (clock impurity stays out of store.update).
+  const capture = programCapture(store.get(), new Date().toISOString(), params);
   store.update("programs/land", (s) => {
     const t = s.traces.byId[id];
     if (!t) return s;
     return {
       ...s,
-      traces: { ...s.traces, byId: { ...s.traces.byId, [id]: { ...t, seq, domains } } },
+      traces: { ...s.traces, byId: { ...s.traces.byId, [id]: { ...t, seq, domains, capture } } },
     };
   });
 }
@@ -403,7 +432,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
     return;
   }
   const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit, yUnit);
-  if (sweep) landProgramFrames(store, id, { sweep });
+  if (sweep) landProgramFrames(store, id, { sweep }, p);
   if (wowResult) {
     const result = wowResult;
     patchProgram(store, "programs/wow-result", id, (prog2) =>

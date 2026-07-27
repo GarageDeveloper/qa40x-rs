@@ -8,14 +8,19 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Frame, TransformStep } from "../gen";
 import type { Commands, Ipc } from "../ipc/ipc";
 import { Store } from "../store/store";
-import { initialState, HW_TRACE_IDS, type AppState } from "../store/state";
+import {
+  initialState,
+  HW_TRACE_IDS,
+  type AppState,
+  type CaptureProvenance,
+} from "../store/state";
 import { addTransformTrace, configureTransform } from "../store/actions/traces";
 import {
   clearAllFrames,
   getFrames,
   putFrames,
 } from "./frames";
-import { resetAllChains, syncChains, watchChains } from "./chains";
+import { derivedCapture, resetAllChains, syncChains, watchChains } from "./chains";
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
@@ -245,6 +250,7 @@ describe("data/chains — transform endpoint scheduling", () => {
             domains: ["fd"],
             seq: 1,
             offsetDb: null,
+            capture: null,
           },
         },
       },
@@ -338,5 +344,94 @@ describe("data/chains — transform endpoint scheduling", () => {
       await flush();
       expect(calls).toHaveLength(1);
     });
+  });
+});
+
+describe("capture provenance inheritance (issue #40)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    resetAllChains();
+    hwSeq = 0;
+  });
+
+  const capture = (serial: string): CaptureProvenance => ({
+    device: { model: "QA403", serial, firmware: 61, isVirtual: false },
+    sampleRateHz: 48000,
+    inputRangeDbv: 42,
+    outputRangeDbv: 18,
+    offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
+    fftSize: 32768,
+    window: "flattop",
+    averaging: { mode: "off", count: 1 },
+    capturedAt: null,
+  });
+
+  function stampCapture(store: Store<AppState>, id: string, cap: CaptureProvenance): void {
+    store.update("test/capture", (s) => ({
+      ...s,
+      traces: {
+        ...s.traces,
+        byId: { ...s.traces.byId, [id]: { ...s.traces.byId[id], capture: cap } },
+      },
+    }));
+  }
+
+  it("an identity chain inherits its input's snapshot, marked derived", () => {
+    const store = new Store(initialState());
+    const { ipc } = fakeIpc();
+    const id = addTransformTrace(store, HW_TRACE_IDS.inputL, []);
+    ingest(store, [-40, -3]);
+    stampCapture(store, HW_TRACE_IDS.inputL, capture("AB12_CD34"));
+    syncChains(store, ipc);
+    const cap = store.get().traces.byId[id].capture!;
+    expect(cap.device!.serial).toBe("AB12_CD34");
+    expect(cap.derived).toBe(true);
+    expect(cap.mixed).toBeUndefined();
+  });
+
+  it("derivedCapture flags `mixed` when a deconvolve ref was captured on another bench", () => {
+    const store = new Store(initialState());
+    stampCapture(store, HW_TRACE_IDS.inputL, capture("AB12_CD34"));
+    store.update("test/add-ref", (s) => ({
+      ...s,
+      traces: {
+        order: [...s.traces.order, "mem-1"],
+        byId: {
+          ...s.traces.byId,
+          "mem-1": {
+            id: "mem-1",
+            label: "ref",
+            color: "#888888",
+            source: { kind: "memory", frozenFrom: HW_TRACE_IDS.inputL },
+            domains: ["fd"],
+            seq: 1,
+            offsetDb: null,
+            capture: capture("ZZ99_XX00"), // ANOTHER unit
+          },
+        },
+      },
+    }));
+    const s = store.get();
+    const input = s.traces.byId[HW_TRACE_IDS.inputL];
+    const steps: TransformStep[] = [{ type: "deconvolve", ref: "mem-1" }];
+    const cap = derivedCapture(s, input, steps)!;
+    expect(cap.mixed).toBe(true);
+    expect(cap.derived).toBe(true);
+    // The snapshot itself stays the PRIMARY input's.
+    expect(cap.device!.serial).toBe("AB12_CD34");
+
+    // Same-bench ref: no mixed flag.
+    const sameBench = derivedCapture(
+      s,
+      { ...input, capture: capture("ZZ99_XX00") },
+      steps
+    )!;
+    expect(sameBench.mixed).toBeUndefined();
+  });
+
+  it("an input without a snapshot derives none", () => {
+    const store = new Store(initialState());
+    const s = store.get();
+    expect(derivedCapture(s, s.traces.byId[HW_TRACE_IDS.inputL], [])).toBeNull();
   });
 });

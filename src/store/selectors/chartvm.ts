@@ -25,6 +25,7 @@ import {
   isRatioTrace,
   traceCurveColor,
   type AppState,
+  type CaptureProvenance,
   type TileConfig,
   type TraceMeta,
 } from "../state";
@@ -102,6 +103,10 @@ export interface ScopeTriggerVM {
    * a picture is held, and reading two different offsets for "the same"
    * conversion makes the marker jump (issue #26 review #5, #60-style). */
   sourceOffsetDb: number | null;
+  /** The latched frame's capture provenance (issue #40) — same baked-at-
+   * latch rule as `sourceOffsetDb`: an export of this picture must be
+   * signed by the bench that produced it, not the live one. */
+  capture: CaptureProvenance | null;
 }
 
 export interface ScopeVM {
@@ -502,6 +507,7 @@ export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
     position: preUsed / Math.max(1, count - 1),
     held: state === "waiting" || state === "stopped",
     sourceOffsetDb,
+    capture: snap.capture,
   };
   return { series, unitLabel: TD_UNIT_LABELS[unit], trigger };
 }

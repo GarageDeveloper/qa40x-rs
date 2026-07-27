@@ -286,6 +286,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
       sampleRate: 48000,
       samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
       offsetDb: { [HW_TRACE_IDS.inputL]: 20 }, // 10x, distinct from the live 20.81 above
+      capture: null,
       ...over,
     });
   }
@@ -320,6 +321,28 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     // marker very slightly off).
     expect(vm.trigger!.position).toBeCloseTo(240 / 479, 9);
     expect(vm.trigger!.sourceId).toBe(HW_TRACE_IDS.inputL);
+  });
+
+  it("the trigger VM carries the snapshot's OWN capture provenance (issue #40 review #3)", () => {
+    // Same baked-at-latch rule as sourceOffsetDb: an export of the HELD
+    // picture must be signed by the bench that latched it, however far the
+    // live traces' captures refreshed since.
+    const latched = {
+      device: { model: "QA403", serial: "HELD", firmware: 61, isVirtual: false },
+      sampleRateHz: 48000,
+      inputRangeDbv: 42,
+      outputRangeDbv: 18,
+      offsets: null,
+      fftSize: 32768,
+      window: "hann" as const,
+      averaging: { mode: "off" as const, count: 1 },
+      capturedAt: null,
+    };
+    seedSnapshot({ capture: latched });
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 500, frac: 0.3 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger!.capture).toBe(latched); // the latched object, by identity
   });
 
   it("clamps pre to the trigger index so the slice never starts before sample 0 (review #4/#7)", () => {
@@ -407,6 +430,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     s.traces.byId[HW_TRACE_IDS.inputL] = {
       ...s.traces.byId[HW_TRACE_IDS.inputL],
       offsetDb: 20.81 + 12,
+      capture: null,
     };
     const after = scopeVM(s, tile(s)).series[0].samples[0];
     expect(after).toBeCloseTo(before, 9);
@@ -425,6 +449,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
       domains: ["td"],
       seq: 1,
       offsetDb: 0,
+      capture: null,
     };
     tile(s).traces = [HW_TRACE_IDS.inputL, "mem-1"];
     // Explicit — the "mem-1" member has its own td frame too, which would
@@ -497,6 +522,7 @@ describe("triggerSourceOffsetDb (review #5)", () => {
       sampleRate: 48000,
       samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
       offsetDb: { [HW_TRACE_IDS.inputL]: 20 },
+      capture: null,
     });
     expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20);
     expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(
@@ -589,6 +615,7 @@ describe("ratio traces (deconvolve — M4 maintainer report)", () => {
       domains: ["fd", "td"],
       seq: 1,
       offsetDb: 20.81, // inherited from its ADC input — must NOT apply to fd
+      capture: null,
     };
     return s;
   }
@@ -637,6 +664,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     const t = s.layout.tiles["tile-1"];
     t.kind = "sweep";
@@ -671,6 +699,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-2");
     s.programs.byId["prog-2"] = {
@@ -710,6 +739,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     // Deliberately NO s.programs.byId["mem-1"] and NO s.programs.byId["prog-2"]
     // — a memory trace is never itself a program, and the original program
@@ -739,6 +769,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-3");
     s.programs.byId["prog-3"] = {
@@ -779,6 +810,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-4");
     // ...then the user opens the gear, flips axis to "level", and Applies —
@@ -827,6 +859,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
         domains: ["sweep"],
         seq: 1,
         offsetDb: null,
+        capture: null,
       };
     }
     const t = s.layout.tiles["tile-1"];
@@ -862,6 +895,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     const t = s.layout.tiles["tile-1"];
     t.kind = "sweep";

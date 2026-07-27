@@ -159,6 +159,105 @@ export type TraceSource =
   | { kind: "program" };
 
 /**
+ * Capture-time provenance snapshot (issue #40, the export-facing half of the
+ * #25 "identity rides the TRACE" constraint): the bench as it was when this
+ * trace's data was PRODUCED — device identity, converter state, acquisition
+ * parameters. Stamped at ingest for hardware endpoints (stream actions), at
+ * land time for program results, inherited (marked `derived`) by transform
+ * endpoints, copied verbatim on freeze ❄, persisted with the workspace.
+ * Exports prefer it over the live bench, which can have moved since.
+ *
+ * Nullable fields mean "unknown at capture", never "same as the current
+ * bench". `capturedAt` is null while the data is still live-refreshing (the
+ * bench IS the provenance then); freeze/program land stamp the instant.
+ *
+ * Known limits (accepted for this lot, lifted when the backend carries
+ * them on the frame like `sample_rate`): `fftSize`/`window`/`averaging`
+ * are a config-side projection — the ONE in-flight frame after a setting
+ * change is stamped with the new value while its data was computed under
+ * the old (a ❄ within ~100 ms of the change pins that one-frame lie); and
+ * an averaged curve (count N) blends N acquisitions that may straddle a
+ * range change — the snapshot describes the LAST one, `mixed` does not
+ * cover time-blending.
+ */
+export interface CaptureProvenance {
+  device: {
+    model: string;
+    serial: string;
+    firmware: number | null;
+    isVirtual: boolean;
+  } | null;
+  sampleRateHz: number | null;
+  inputRangeDbv: number | null;
+  outputRangeDbv: number | null;
+  /** The full four-offsets record (shared by every endpoint of one capture —
+   * the per-trace projection stays `TraceMeta.offsetDb`). */
+  offsets: LevelOffsetsDb | null;
+  fftSize: number | null;
+  window: WindowKind | null;
+  averaging: { mode: AveragingMode; count: number } | null;
+  /** ISO 8601; null = live data (the frame keeps refreshing). */
+  capturedAt: string | null;
+  /** Computed from another trace's data (transform chain), not captured. */
+  derived?: boolean;
+  /** Inputs from more than one bench state (e.g. a deconvolve reference
+   * captured under different settings) — the snapshot is the PRIMARY
+   * input's, flagged as not telling the whole story. */
+  mixed?: boolean;
+  /** For a program result: the params snapshot that produced the curve
+   * (issue #40's second note) — the live program's params can be edited
+   * without a re-run and go stale. */
+  programParams?: SweepProgramParams;
+}
+
+/** The bench-identity part of a capture snapshot as a comparable string —
+ * everything except `capturedAt` and the derivation markers. Shared by the
+ * ingest memoization (one frozen snapshot object per bench state) and the
+ * export's "has the bench moved since capture?" check. */
+export function captureBenchSignature(c: CaptureProvenance): string {
+  const d = c.device;
+  const o = c.offsets;
+  // JSON, not string joins: a free-text model/serial containing the join
+  // character must never collide two different benches into one signature.
+  return JSON.stringify([
+    d && [d.model, d.serial, d.firmware, d.isVirtual],
+    c.sampleRateHz,
+    c.inputRangeDbv,
+    c.outputRangeDbv,
+    o && [o.input_l, o.input_r, o.output_l, o.output_r, o.calibrated],
+    c.fftSize,
+    c.window,
+    c.averaging && [c.averaging.mode, c.averaging.count],
+  ]);
+}
+
+/** The CURRENT bench as a capture snapshot — what a frame ingested right now
+ * would be stamped with (config-side view; the ingest itself prefers the
+ * frame's own sampleRate/offsets). The export compares a trace's snapshot
+ * against this to decide whether the bench has moved since capture. */
+export function liveCaptureProvenance(s: AppState): CaptureProvenance {
+  const info = s.device.info;
+  return {
+    device: info
+      ? {
+          model: info.model,
+          serial: info.serial,
+          firmware: info.firmware_version,
+          isVirtual: info.is_virtual,
+        }
+      : null,
+    sampleRateHz: s.device.config?.sample_rate ?? null,
+    inputRangeDbv: s.device.config?.input_gain ?? null,
+    outputRangeDbv: s.device.config?.output_gain ?? null,
+    offsets: s.device.offsets,
+    fftSize: s.acquisition.fftSize,
+    window: s.acquisition.window,
+    averaging: { ...s.acquisition.averaging },
+    capturedAt: null,
+  };
+}
+
+/**
  * Metadata ONLY — never frame data (that lives in `data/frames.ts`, keyed
  * by id; `seq` is the store-side freshness stamp the ingest bumps after
  * writing the cache).
@@ -178,6 +277,10 @@ export interface TraceMeta {
    * hw_output. Null until the first frame. A chart never sees a register.
    */
   offsetDb: number | null;
+  /** Capture-time provenance (issue #40): the bench that PRODUCED this
+   * trace's data. Null until the first frame lands (and for docs predating
+   * the field) — exports then fall back to the live bench. */
+  capture: CaptureProvenance | null;
 }
 
 export interface TracesState {
@@ -556,7 +659,7 @@ function hwTrace(
   color: string,
   source: TraceSource
 ): TraceMeta {
-  return { id, label, color, source, domains: [], seq: 0, offsetDb: null };
+  return { id, label, color, source, domains: [], seq: 0, offsetDb: null, capture: null };
 }
 
 /** A transform chain containing a deconvolve step produces a RATIO spectrum

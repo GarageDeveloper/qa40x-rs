@@ -13,6 +13,7 @@ import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, initialState } from "./state";
 import {
   isQuotaExceeded,
   migrate,
+  sanitizeCapture,
   saveCurrent,
   saveNamed,
   snapshotWorkspace,
@@ -119,6 +120,7 @@ describe("v5 document", () => {
       sampleRate: 48000,
       samples: { [HW_TRACE_IDS.inputL]: Float64Array.from([0, 1, 2]) },
       offsetDb: { [HW_TRACE_IDS.inputL]: 0 },
+      capture: null,
     });
     expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeDefined();
 
@@ -358,6 +360,19 @@ describe("v4 importer (real legacy blob)", () => {
     expect(doc.traces.byId["t-thd"]?.source.kind).toBe("program");
     expect(doc.traces.byId["t-fr"]?.source.kind).toBe("program");
     expect(doc.traces.byId["t-thd"]?.label).toBe("THD vs freq");
+  });
+
+  it("a legacy blob predates capture provenance entirely (issue #40) — every imported trace lands with capture=null, never undefined", () => {
+    // A v4 blob has no concept of a capture snapshot at all; `migrate()`'s
+    // in-version hook only backfills a MISSING field on an already-v5 doc
+    // (`doc.traces.byId[...].capture === undefined`) — the v4 importer must
+    // set the field itself on every `addTrace` call, or a freshly imported
+    // program/hw trace would read `undefined` here (breaking the "null =
+    // unknown, exports fall back to the live bench" contract that the rest
+    // of the app relies on) instead of going through that hook at all.
+    for (const id of ["hw-in-left", "hw-in-right", "t-thd", "t-fr"]) {
+      expect(doc.traces.byId[id]?.capture).toBeNull();
+    }
   });
 
   it("maps graphs to tiles: kind, membership, chips, pattern", () => {
@@ -608,5 +623,128 @@ describe("saveCurrent / saveNamed — quota-exceeded is reported, not swallowed 
   it("isQuotaExceeded is false for an unrelated error", () => {
     expect(isQuotaExceeded(new Error("network down"))).toBe(false);
     expect(isQuotaExceeded("not even an Error")).toBe(false);
+  });
+});
+
+describe("v5 in-version hook: capture provenance (issue #40)", () => {
+  const capture = {
+    device: { model: "QA403", serial: "AB12_CD34", firmware: 61, isVirtual: false },
+    sampleRateHz: 48000,
+    inputRangeDbv: 42,
+    outputRangeDbv: 18,
+    offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
+    fftSize: 32768,
+    window: "flattop" as const,
+    averaging: { mode: "power" as const, count: 8 },
+    capturedAt: "2026-07-26T08:00:00.000Z",
+  };
+
+  it("a doc predating the field loads with capture=null on every trace", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    for (const t of Object.values(doc.traces.byId) as Record<string, unknown>[]) {
+      delete t.capture;
+    }
+    const migrated = migrate(doc);
+    expect(migrated).not.toBeNull();
+    for (const t of Object.values(migrated!.traces.byId)) {
+      expect(t.capture).toBeNull();
+    }
+    // Round-trip stability: loading the old doc then re-snapshotting digests
+    // identically (the same rule as every other in-version hook).
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, migrated!)).toBe(true);
+    expect(snapshotWorkspace(dest.get())).toEqual(migrated);
+  });
+
+  it("a frozen ❄ trace's capture snapshot survives the save/reload round trip", () => {
+    clearAllFrames();
+    const store = freshStore();
+    putFrames(HW_TRACE_IDS.inputL, 1, {
+      fd: { freqs: Float64Array.from([100]), magDb: Float64Array.from([-6]) },
+    });
+    store.update("test/stamp", (s) => ({
+      ...s,
+      traces: {
+        ...s.traces,
+        byId: {
+          ...s.traces.byId,
+          [HW_TRACE_IDS.inputL]: {
+            ...s.traces.byId[HW_TRACE_IDS.inputL],
+            seq: 1,
+            domains: ["fd" as const],
+            offsetDb: 32.1,
+            capture,
+          },
+        },
+      },
+    }));
+    const memId = freezeTrace(store, HW_TRACE_IDS.inputL);
+    expect(memId).not.toBeNull();
+
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))));
+    expect(doc).not.toBeNull();
+    // The ❄ copy keeps the snapshot; the LIVE endpoint sheds it with its
+    // data (it re-acquires on load, like offsetDb).
+    expect(doc!.traces.byId[memId!].capture).toEqual(capture);
+    expect(doc!.traces.byId[HW_TRACE_IDS.inputL].capture).toBeNull();
+
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
+    expect(dest.get().traces.byId[memId!].capture).toEqual(capture);
+  });
+});
+
+describe("sanitizeCapture — a hand-edited/corrupted snapshot degrades, never crashes (issue #40 review finding #1)", () => {
+  it("a non-object degrades to no snapshot at all", () => {
+    expect(sanitizeCapture(3)).toBeNull();
+    expect(sanitizeCapture("x")).toBeNull();
+    expect(sanitizeCapture(null)).toBeNull();
+  });
+
+  it("the reviewer's repro: a partial object keeps its valid fields, the rest degrade to unknown", () => {
+    // {"device":{"serial":"X"},"sampleRateHz":48000} used to throw a
+    // TypeError deep in captureProvenanceLines (`c.averaging.mode` on
+    // undefined) — an unhandled rejection with no toast and no file.
+    const c = sanitizeCapture({ device: { serial: "X" }, sampleRateHz: 48000 })!;
+    expect(c.device).toBeNull(); // model missing → identity unusable
+    expect(c.sampleRateHz).toBe(48000);
+    expect(c.window).toBeNull();
+    expect(c.averaging).toBeNull();
+    expect(c.offsets).toBeNull();
+    expect(c.capturedAt).toBeNull();
+  });
+
+  it("wrong-typed fields degrade individually (window: 42, partial offsets)", () => {
+    const c = sanitizeCapture({
+      device: { model: "QA403", serial: "S", firmware: "sixty-one", isVirtual: "yes" },
+      window: 42,
+      averaging: { mode: "sideways", count: 4 },
+      offsets: { input_l: 1, input_r: 2, output_l: 3 }, // output_r missing
+      capturedAt: 12345,
+      derived: 1,
+      mixed: true,
+    })!;
+    expect(c.device).toEqual({ model: "QA403", serial: "S", firmware: null, isVirtual: false });
+    expect(c.window).toBeNull();
+    expect(c.averaging).toBeNull();
+    expect(c.offsets).toBeNull(); // all four or nothing — never a re-mixed partial
+    expect(c.capturedAt).toBeNull();
+    expect(c.derived).toBeUndefined();
+    expect(c.mixed).toBe(true);
+  });
+
+  it("migrate() routes every loaded trace capture through it", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    (doc.traces.byId[HW_TRACE_IDS.inputL] as { capture: unknown }).capture = 3;
+    (doc.traces.byId[HW_TRACE_IDS.inputR] as { capture: unknown }).capture = {
+      device: { serial: "X" },
+      sampleRateHz: 96000,
+    };
+    const migrated = migrate(doc)!;
+    expect(migrated.traces.byId[HW_TRACE_IDS.inputL].capture).toBeNull();
+    expect(migrated.traces.byId[HW_TRACE_IDS.inputR].capture).toMatchObject({
+      device: null,
+      sampleRateHz: 96000,
+    });
   });
 });

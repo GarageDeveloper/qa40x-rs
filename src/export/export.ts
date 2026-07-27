@@ -10,7 +10,13 @@
  */
 import { save } from "@tauri-apps/plugin-dialog";
 import type { Store } from "../store/store";
-import { isRatioTrace, type AppState } from "../store/state";
+import {
+  captureBenchSignature,
+  isRatioTrace,
+  type AppState,
+  type CaptureProvenance,
+  type TileConfig,
+} from "../store/state";
 import type { Ipc } from "../ipc/ipc";
 import type { Domain, TraceId } from "../core/model";
 import {
@@ -21,10 +27,10 @@ import {
   sweepUnitLabel,
   sweepXUnit,
 } from "../store/selectors/chartvm";
+import { chipSourceTraceId, shownTraces } from "../store/selectors/layout";
 import { getFrames } from "../data/frames";
 import { toast } from "../store/actions/ui";
 import {
-  benchProvenance,
   clipScopeWindow,
   numCell,
   provenanceComments,
@@ -32,6 +38,7 @@ import {
   tileSpectrumCsv,
   tileSweepCsv,
   traceFdCsv,
+  traceProvenance,
   traceSourceLine,
   traceSweepCsv,
   traceTdCsv,
@@ -65,11 +72,71 @@ function slug(label: string): string {
   );
 }
 
-function comments(s: AppState, extra: ProvenanceLine[]): string[] {
+function comments(
+  s: AppState,
+  extra: ProvenanceLine[],
+  capture: CaptureProvenance | null = null
+): string[] {
   return provenanceComments([
-    ...benchProvenance(s, APP_VERSION, new Date().toISOString()),
+    ...traceProvenance(s, capture, APP_VERSION, new Date().toISOString()),
     ...extra,
   ]);
+}
+
+/**
+ * The capture snapshot a TILE export rides under (issue #40): the chip-
+ * source trace's — the one the tile's readouts already follow — but only
+ * while that trace is actually DRAWN (an explicit chip source the user
+ * legend-hid contributes no columns; signing the file with its bench would
+ * re-create the very bug #40 fixes — review finding #2). Falls back to the
+ * first drawn member with a snapshot.
+ *
+ * Members with data captured under DIFFERENT bench states flag the snapshot
+ * `mixed` (it then describes one member only; each member's own trace
+ * export carries its full snapshot). A drawn member WITHOUT a snapshot (a
+ * pre-#40 doc's ❄ trace) counts as its own unknown bench — silence there
+ * would vouch for data nobody stamped (review finding #5). Members without
+ * data contribute no columns and are ignored.
+ */
+export function tileCapture(s: AppState, tile: TileConfig): CaptureProvenance | null {
+  const drawn = shownTraces(tile).filter((id) => {
+    const t = s.traces.byId[id];
+    return !!t && t.domains.length > 0;
+  });
+  const chipId = chipSourceTraceId(tile);
+  let capture =
+    (chipId && drawn.includes(chipId) ? s.traces.byId[chipId]?.capture : null) ?? null;
+  if (!capture) {
+    for (const id of drawn) {
+      const c = s.traces.byId[id]?.capture;
+      if (c) {
+        capture = c;
+        break;
+      }
+    }
+  }
+  const sigs = new Set<string>();
+  for (const id of drawn) {
+    const c = s.traces.byId[id]?.capture;
+    sigs.add(c ? captureBenchSignature(c) : "unknown");
+  }
+  if (capture && sigs.size > 1) return { ...capture, mixed: true };
+  return capture;
+}
+
+/**
+ * The tile capture for the EXPORT lanes: a scope tile holding a trigger
+ * snapshot draws THAT picture (chartvm slices the held arrays with the
+ * snapshot's own rate/offsets, never the live frame) — its provenance is
+ * the one latched with it, not whatever the endpoints refreshed to since
+ * (review finding #3: a held NORMAL picture under a since-moved bench).
+ */
+function tileExportCapture(
+  s: AppState,
+  tile: TileConfig,
+  heldCapture: CaptureProvenance | null | undefined
+): CaptureProvenance | null {
+  return heldCapture ?? tileCapture(s, tile);
 }
 
 /** Save-dialog + backend write; false = user cancelled. */
@@ -166,13 +233,15 @@ export async function exportTileCsv(
   let csv: string | null = null;
   if (tile.kind === "spectrum") {
     const { vm, lines } = spectrumExport(s, tile);
-    if (vm.series.length > 0) csv = tileSpectrumCsv(vm, comments(s, lines));
+    if (vm.series.length > 0) csv = tileSpectrumCsv(vm, comments(s, lines, tileCapture(s, tile)));
   } else if (tile.kind === "scope") {
     const { vm, lines } = scopeExport(s, tile);
-    if (vm.series.length > 0) csv = tileScopeCsv(vm, comments(s, lines));
+    if (vm.series.length > 0) {
+      csv = tileScopeCsv(vm, comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)));
+    }
   } else {
     const { vm, lines } = sweepExport(s, tile);
-    if (vm.series.length > 0) csv = tileSweepCsv(vm, comments(s, lines));
+    if (vm.series.length > 0) csv = tileSweepCsv(vm, comments(s, lines, tileCapture(s, tile)));
   }
   if (csv === null) {
     toast(store, "info", "Nothing to export yet — the graph has no data.");
@@ -213,7 +282,7 @@ export async function exportTileSvg(
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines),
+      provenance: comments(s, lines, tileCapture(s, tile)),
       unitLabel: vm.unitLabel,
       xUnitLabel: "Hz",
       xLog: tile.axis.xLog,
@@ -225,7 +294,7 @@ export async function exportTileSvg(
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines),
+      provenance: comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)),
       unitLabel: vm.unitLabel,
       xUnitLabel: "s",
       xLog: false,
@@ -243,7 +312,7 @@ export async function exportTileSvg(
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines),
+      provenance: comments(s, lines, tileCapture(s, tile)),
       unitLabel: vm.unitLabel,
       xUnitLabel: vm.xUnit === "rateHz" ? "Hz (rate)" : vm.xUnit,
       // Level sweeps are linear dB steps; Hz and rate-Hz axes are log —
@@ -296,16 +365,16 @@ export async function exportTraceCsv(
   ];
   let csv: string | null = null;
   if (domain === "td" && frames?.td) {
-    csv = traceTdCsv(meta, frames.td, comments(s, extra));
+    csv = traceTdCsv(meta, frames.td, comments(s, extra, meta.capture));
   } else if (domain === "fd" && frames?.fd) {
-    csv = traceFdCsv(meta, frames.fd, comments(s, extra), isRatioTrace(meta));
+    csv = traceFdCsv(meta, frames.fd, comments(s, extra, meta.capture), isRatioTrace(meta));
   } else if (domain === "sweep" && frames?.sweep) {
     // Units resolved with the tile's own frame-first-program-fallback rule
     // (chartvm), never a bare frame read (review finding #6).
     csv = traceSweepCsv(
       meta,
       frames.sweep,
-      comments(s, extra),
+      comments(s, extra, meta.capture),
       sweepXUnit(s, traceId, frames.sweep),
       sweepUnitLabel(s, traceId, frames.sweep)
     );
@@ -331,7 +400,10 @@ export async function exportTraceCsv(
 /* PNG                                                                  */
 /* ------------------------------------------------------------------ */
 
-/** Title + short provenance footer for the composed image. */
+/** Title + short provenance footer for the composed image. The footer
+ * prefers the tile's capture snapshot (issue #40 — the PNG lane had the
+ * same export-time-bench bug as the CSV header): device/rate/fft/window/avg
+ * describe the bench that PRODUCED the drawn data whenever it's known. */
 function tileImageText(s: AppState, tileId: string): { title: string; footer: string[] } {
   const tile = s.layout.tiles[tileId];
   const kind = tile ? KIND_LABELS[tile.kind] : "Graph";
@@ -339,21 +411,44 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
     .filter((id) => !tile?.hidden.includes(id))
     .map((id) => s.traces.byId[id]?.label)
     .filter((l): l is string => !!l);
+  const cap = tile
+    ? tile.kind === "scope"
+      ? tileExportCapture(s, tile, scopeVM(s, tile).trigger?.capture)
+      : tileCapture(s, tile)
+    : null;
   const info = s.device.info;
-  const device = info
-    ? `${info.model} #${info.serial} fw${info.firmware_version}${info.is_virtual ? " (virtual)" : ""}`
-    : "no device";
-  const cfg = s.device.config;
+  const device = cap?.device
+    ? `${cap.device.model} #${cap.device.serial}` +
+      (cap.device.firmware !== null ? ` fw${cap.device.firmware}` : "") +
+      (cap.device.isVirtual ? " (virtual)" : "")
+    : info
+      ? `${info.model} #${info.serial} fw${info.firmware_version}${info.is_virtual ? " (virtual)" : ""}`
+      : "no device";
   const acq = s.acquisition;
+  const rateHz = cap?.sampleRateHz ?? s.device.config?.sample_rate ?? null;
+  const fft = cap ? cap.fftSize : acq.fftSize;
+  const window = cap ? cap.window : acq.window;
+  const averaging = cap ? cap.averaging : acq.averaging;
   const avg =
-    acq.averaging.mode === "off" ? "avg off" : `avg ${acq.averaging.mode}×${acq.averaging.count}`;
+    averaging === null
+      ? null
+      : averaging.mode === "off"
+        ? "avg off"
+        : `avg ${averaging.mode}×${averaging.count}`;
+  const acqParts = [
+    ...(fft !== null ? [`FFT ${fft}`] : []),
+    ...(window !== null ? [window] : []),
+    ...(avg !== null ? [avg] : []),
+  ];
   return {
     title: labels.length > 0 ? `${kind} — ${labels.join(", ")}` : kind,
     footer: [
       `qa40x-rs v${APP_VERSION} — ${device}` +
-        (cfg ? ` — ${cfg.sample_rate} Hz` : "") +
-        `, FFT ${acq.fftSize}, ${acq.window}, ${avg}`,
-      `exported ${new Date().toISOString()}`,
+        (rateHz !== null ? ` — ${rateHz} Hz` : "") +
+        (acqParts.length > 0 ? `, ${acqParts.join(", ")}` : "") +
+        (cap?.mixed ? " — mixed capture sources" : ""),
+      (cap?.capturedAt ? `captured ${cap.capturedAt}, ` : "") +
+        `exported ${new Date().toISOString()}`,
     ],
   };
 }
