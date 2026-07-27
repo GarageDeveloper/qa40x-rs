@@ -611,6 +611,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_keeps_an_open_unit_whose_source_starts_failing_to_enumerate() {
+        // Distinct from `list_keeps_an_open_unit_that_stopped_enumerating`:
+        // there the source keeps answering Ok, just without that unit. Here
+        // the WHOLE enumerate() call errors (bus reset, backend permission
+        // flip) — the `Err` arm must not silently drop the open unit's entry
+        // along with the rest of that source's union, since `open_descs`
+        // still holds its enriched descriptor from `runtimes()`.
+        let src = Arc::new(FakeSource::new("usb", true, &["A"]));
+        let reg = registry(vec![src.clone()]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open A");
+
+        src.fail_from_now_on();
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["usb/A".to_string()]);
+        let entry = list.devices.iter().find(|d| d.id == "usb/A").expect("still listed despite the scan error");
+        assert!(entry.open);
+        assert_eq!(entry.firmware_version, Some(42), "the enriched descriptor survives a scan error too");
+    }
+
+    #[tokio::test]
     async fn list_dedupes_by_id_keeping_the_first() {
         let reg = registry(vec![
             Arc::new(FakeSource::new("usb", true, &["A"])),

@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { initialState } from "../state";
 import type { AppState } from "../state";
-import { fakeEntry } from "../actions/devices.test";
+import { fakeEntry } from "../actions/devices.fixtures";
 import { deriveDevices } from "../actions/devices";
 import type { DeviceEntry } from "../../gen";
 import {

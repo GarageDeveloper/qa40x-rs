@@ -20,7 +20,7 @@ pub struct FakeSource {
     kind: SourceKind,
     physical: bool,
     descriptors: StdMutex<Vec<DeviceDescriptor>>,
-    fail_enumerate: bool,
+    fail_enumerate: std::sync::atomic::AtomicBool,
     /// Artificial latency inside `open()` — lets lifecycle tests hold an
     /// open in flight while racing a close/second open against it.
     open_delay: Option<std::time::Duration>,
@@ -37,16 +37,25 @@ impl FakeSource {
             kind: if physical { SourceKind::Usb } else { SourceKind::Virtual },
             physical,
             descriptors: StdMutex::new(descriptors),
-            fail_enumerate: false,
+            fail_enumerate: std::sync::atomic::AtomicBool::new(false),
             open_delay: None,
             opened: StdMutex::new(Vec::new()),
         }
     }
 
     pub fn failing(id: &str, physical: bool) -> Self {
-        let mut s = Self::new(id, physical, &[]);
-        s.fail_enumerate = true;
+        let s = Self::new(id, physical, &[]);
+        s.fail_enumerate.store(true, std::sync::atomic::Ordering::SeqCst);
         s
+    }
+
+    /// Flip a previously-healthy source into a failing one — for pinning
+    /// `list()`'s "open unit whose SOURCE now errors on enumerate" path,
+    /// distinct from `vanish()` (source still answers Ok, just without that
+    /// unit). A real source can start erroring after an open (bus reset,
+    /// backend permission flip) without the unit itself disappearing first.
+    pub fn fail_from_now_on(&self) {
+        self.fail_enumerate.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A source whose `open()` takes `delay` — for racing lifecycle tests.
@@ -107,7 +116,7 @@ impl DeviceSource for FakeSource {
     }
 
     async fn enumerate(&self) -> Result<Vec<DeviceDescriptor>, DeviceError> {
-        if self.fail_enumerate {
+        if self.fail_enumerate.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(DeviceError::Source("fake enumeration failure".into()));
         }
         Ok(self.descriptors.lock().expect("descriptors lock").clone())

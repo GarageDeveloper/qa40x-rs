@@ -7,52 +7,11 @@
 import { describe, expect, it } from "vitest";
 import { Store } from "../store";
 import { initialState } from "../state";
-import type { DeviceEntry, DeviceList } from "../../gen";
+import type { DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
+import { fakeEntry, fakeList as list } from "./devices.fixtures";
 import { deriveDevices, pickDevice, refreshDevices } from "./devices";
 import { autoConnectTick, connect } from "./device";
-
-export function fakeEntry(
-  id: string,
-  opts: { virtual?: boolean; open?: boolean; model?: "QA402" | "QA403" } = {}
-): DeviceEntry {
-  const model = opts.model ?? (opts.virtual ? "QA403" : "QA402");
-  const rates =
-    model === "QA403" ? [48000, 96000, 192000, 384000] : [48000, 96000, 192000];
-  return {
-    id,
-    source_id: opts.virtual ? "virtual" : "usb",
-    source_kind: opts.virtual ? "Virtual" : "Usb",
-    source_label: opts.virtual ? "Built-in virtual" : "USB",
-    model,
-    serial: id.split("/")[1],
-    serial_synthetic: false,
-    product: `${model} Audio Analyzer`,
-    firmware_version: opts.open ? 60 : null,
-    is_virtual: opts.virtual ?? false,
-    capabilities: {
-      model_name: model,
-      input_channels: 2,
-      output_channels: 2,
-      sample_rates_hz: rates,
-      input_ranges_dbv: [0, 6, 12, 18, 24, 30, 36, 42],
-      output_ranges_dbv: [-12, -2, 8, 18],
-      min_output_vrms: 1e-6,
-      max_output_vrms: 7.943,
-      max_input_vrms: 89.13,
-      min_measurement_hz: 5,
-      max_measurement_hz: rates[rates.length - 1] / 2,
-      calibration: opts.open ? { FactoryEeprom: { page_bytes: 512 } } : "Unknown",
-      supports_flash: false,
-      is_virtual: opts.virtual ?? false,
-    },
-    open: opts.open ?? false,
-  };
-}
-
-function list(...devices: DeviceEntry[]): DeviceList {
-  return { devices, open: devices.filter((d) => d.open).map((d) => d.id) };
-}
 
 const empty = () => initialState().devices;
 
@@ -116,6 +75,31 @@ describe("deriveDevices", () => {
     const d = deriveDevices(empty(), list(fakeEntry("virtual/V", { virtual: true })));
     expect(d.primary).toBe("virtual/V");
   });
+
+  it("a duplicate id within one answer keeps the LAST entry's fields (defensive — the registry already dedupes on the wire, see registry.rs list_dedupes_by_id_keeping_the_first)", () => {
+    const first = fakeEntry("usb/A", { model: "QA402" });
+    const second = fakeEntry("usb/A", { model: "QA403" });
+    const d = deriveDevices(empty(), list(first, second));
+    expect(d.byId["usb/A"]).toBe(second);
+    // `available` is not locally deduped — it mirrors the answer verbatim
+    // and relies on the backend invariant that this never actually happens.
+    expect(d.available).toEqual(["usb/A", "usb/A"]);
+    expect(d.order).toEqual(["usb/A"]);
+  });
+
+  it("a unit dropped ENTIRELY from a later answer leaves a stale byId entry that must not resurrect as primary", () => {
+    // Unlike the backend's list() (which keeps an open-but-unplugged unit
+    // listed, see registry.rs), this pins the fold defensively for whatever
+    // answer actually arrives: derivePrimary's open-check walks `available`,
+    // so a stale byId.open=true for an id no longer in `available` must be
+    // inert, not resurrect the vanished unit as primary.
+    let d = deriveDevices(empty(), list(fakeEntry("usb/A", { open: true })));
+    expect(d.primary).toBe("usb/A");
+    d = deriveDevices(d, { devices: [], open: [] });
+    expect(d.available).toEqual([]);
+    expect(d.byId["usb/A"].open).toBe(true);
+    expect(d.primary).toBeNull();
+  });
 });
 
 describe("refreshDevices", () => {
@@ -136,6 +120,39 @@ describe("refreshDevices", () => {
     await refreshDevices(store, good);
     const bad: Ipc = { call: () => Promise.reject(new Error("transient USB")) };
     await refreshDevices(store, bad);
+    expect(store.get().devices.available).toEqual(["usb/A"]);
+    expect(store.get().devices.primary).toBe("usb/A");
+    expect(store.get().devices.enumerating).toBe(false);
+  });
+
+  it("two overlapping refreshes: the LAST answer to resolve wins the state, and `enumerating` ends false either way", async () => {
+    // Two ticks fire close together (boot tick + a manual refresh, say).
+    // Nothing serializes the two `ipc.call`s, so whichever PROMISE resolves
+    // last decides the final fold — that's the accepted last-write-wins
+    // behavior. The one invariant that must hold regardless of ordering is
+    // that `enumerating` never gets stuck true.
+    const store = new Store(initialState(), { freeze: true });
+    let resolveA!: (v: DeviceList) => void;
+    let resolveB!: (v: DeviceList) => void;
+    const answerA = new Promise<DeviceList>((r) => (resolveA = r));
+    const answerB = new Promise<DeviceList>((r) => (resolveB = r));
+    let n = 0;
+    const ipc: Ipc = {
+      call: () => (n++ === 0 ? answerA : answerB) as never,
+    };
+
+    const p1 = refreshDevices(store, ipc);
+    const p2 = refreshDevices(store, ipc);
+    expect(store.get().devices.enumerating).toBe(true);
+
+    // The SECOND call's answer lands first, the FIRST call's answer lands
+    // last — so the final state must reflect A, not B, even though A was
+    // requested first.
+    resolveB(list(fakeEntry("usb/B")));
+    await p2;
+    resolveA(list(fakeEntry("usb/A")));
+    await p1;
+
     expect(store.get().devices.available).toEqual(["usb/A"]);
     expect(store.get().devices.primary).toBe("usb/A");
     expect(store.get().devices.enumerating).toBe(false);
@@ -228,6 +245,21 @@ describe("pickDevice", () => {
     expect(store.get().devices.primary).toBe("usb/B");
     pickDevice(store, null);
     expect(store.get().devices.pick).toBeNull();
+    expect(store.get().devices.primary).toBe("usb/A");
+  });
+
+  it("picking an id that is not in the list is defensive: it is remembered but never derives a primary", async () => {
+    // A stale click (unit unplugged between the picker rendering and the
+    // click landing) must not crash derivePrimary or leave it pointing at
+    // nothing usable — P2's `available.includes(pick)` guard must hold.
+    const store = new Store(initialState(), { freeze: true });
+    const ipc: Ipc = {
+      call: () => Promise.resolve(list(fakeEntry("usb/A")) as never),
+    };
+    await refreshDevices(store, ipc);
+    pickDevice(store, "usb/does-not-exist");
+    expect(store.get().devices.pick).toBe("usb/does-not-exist");
+    // Falls through P2's availability guard straight to the first physical.
     expect(store.get().devices.primary).toBe("usb/A");
   });
 });
