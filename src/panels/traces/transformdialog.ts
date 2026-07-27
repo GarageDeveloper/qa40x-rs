@@ -103,6 +103,11 @@ export function openTransformDialog(
       }
       stagedCurve = parsed.curve;
       stagedCurveName = file.name;
+      // Nobody imports a curve for any other reason: a successful import
+      // selects "User curve…" so Apply can't silently build an unweighted
+      // chain because the select was left on its default (field-tested:
+      // exactly what happened on the ITU-R 468 first try).
+      weighting.value = "user";
       const parts = [describeUserCurve(stagedCurve)];
       if (parsed.decimated) {
         parts.push(`decimated from ${parsed.originalPoints}`);

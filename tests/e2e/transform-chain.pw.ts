@@ -116,7 +116,10 @@ test("User curve…: CSV import → workspace curve → embedded in the weightin
     "No curve loaded"
   );
 
-  await app.setSelect(`fx-weighting-${fx}`, "user");
+  // Deliberately do NOT touch the weighting select first: a successful
+  // import must flip it to "user" by itself (field-tested — importing with
+  // the select left on "None" used to Apply an unweighted identity chain
+  // with no error, and the two curves sat exactly on top of each other).
 
   // Import a simple "freq_hz, gain_db" CSV through the real file input (a
   // File + change event — the harness never Playwright-shortcuts around a
@@ -139,6 +142,14 @@ test("User curve…: CSV import → workspace curve → embedded in the weightin
   await expect
     .poll(() => app.drv.text(`[data-testid="fx-usercurve-status-${fx}"]`))
     .toBe('"my-curve.csv": 3 points, 100 Hz–10 kHz');
+
+  // …and the weighting select auto-flipped to "User curve…".
+  const selectedWeighting = await app.drv.eval(
+    (testid: string) =>
+      (document.querySelector(`[data-testid="${testid}"]`) as HTMLSelectElement).value,
+    `fx-weighting-${fx}`
+  );
+  expect(selectedWeighting).toBe("user");
 
   // STAGED, not yet committed (review finding #7): a mere file pick must
   // NOT touch the bench's workspace-persisted curve (and so must not touch
