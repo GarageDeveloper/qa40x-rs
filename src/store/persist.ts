@@ -855,22 +855,37 @@ export function isQuotaExceeded(e: unknown): boolean {
 
 /** The LEGACY frontend's auto-saved current, through the importer — the
  * boot fallback when IndexedDB has no current doc (a user upgrading
- * mid-transition keeps their bench). */
+ * mid-transition keeps their bench). All three legacy readers guard the
+ * localStorage ACCESS itself (disabled/blocked storage throws — the same
+ * reason main.ts's theme/REST-token reads are wrapped): "no legacy blobs"
+ * is a state, an exception at boot or in the Load menu is not. */
 export function loadLegacyCurrent(): WorkspaceDoc | null {
-  return read(localStorage.getItem(LEGACY_CURRENT_KEY));
+  try {
+    return read(localStorage.getItem(LEGACY_CURRENT_KEY));
+  } catch {
+    return null;
+  }
 }
 
 /** Names of LEGACY saved workspaces (the v1 frontend's), sorted. Loading
  * one goes through the importer; v2 never writes or deletes these. */
 export function listLegacyNamed(): string[] {
   const out: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(LEGACY_SAVED_PREFIX)) out.push(k.slice(LEGACY_SAVED_PREFIX.length));
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(LEGACY_SAVED_PREFIX)) out.push(k.slice(LEGACY_SAVED_PREFIX.length));
+    }
+  } catch {
+    return [];
   }
   return out.sort();
 }
 
 export function loadLegacyNamed(name: string): WorkspaceDoc | null {
-  return read(localStorage.getItem(LEGACY_SAVED_PREFIX + name));
+  try {
+    return read(localStorage.getItem(LEGACY_SAVED_PREFIX + name));
+  } catch {
+    return null;
+  }
 }

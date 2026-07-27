@@ -139,11 +139,13 @@ test("a legacy v4 save imports: source, programs and tiles land in their panels"
 test("a pre-#44 v2 localStorage save migrates to IndexedDB at boot, key removed (issue #44 lot 1)", async ({
   app,
 }) => {
-  // Seed the localStorage-era blobs behind the app's back, then reboot —
-  // the storage seam imports them at first IndexedDB open.
-  await app.putLocalStorage("qa40x-v2-ws:LS bench", V5_LS_BLOB);
-  await app.putLocalStorage("qa40x-v2-ws-current", V5_LS_BLOB);
-  await app.boot();
+  // Reboot into the localStorage era (clean IndexedDB + seeded blobs, set
+  // before any app script runs) — the storage seam imports them at first
+  // IndexedDB open.
+  await app.bootLocalStorageEra({
+    "qa40x-v2-ws:LS bench": V5_LS_BLOB,
+    "qa40x-v2-ws-current": V5_LS_BLOB,
+  });
 
   // The auto-saved current came back through IndexedDB: the restored bench
   // IS the seeded one (name + collapsed panel + the frozen ❄ trace).

@@ -13,7 +13,9 @@
  * Record shape: the v5 `WorkspaceDoc` with `refFrames` swapped for a
  * binary twin — td/fd sample data as `Float32Array` (exact for 24-bit
  * converter samples: a 24-bit mantissa holds k/2^23 exactly; ~4× smaller
- * than Float64 and ~9× smaller than decimal JSON), sweep results kept
+ * than Float64 and ~9× smaller than decimal JSON — a frozen TRANSFORM
+ * output's arbitrary doubles do quantize, ~1.2e-7 relative ≈ a −138 dBFS
+ * floor, ~20 dB under the QA403's own residual), sweep results kept
  * `Float64Array` (a sweep is ~10²/point-sized — negligible — and it is a
  * *measurement record*, so it keeps full precision). The JSON `Frame`
  * shape exists only at the seam boundary: `load()` rebuilds it and runs
@@ -62,27 +64,38 @@ type StoredDoc = Omit<WorkspaceDoc, "refFrames"> & {
   refFrames: Record<TraceId, StoredFrames>;
 };
 
+/** NaN/±Infinity pin to 0 — exactly what the localStorage era did
+ * (`JSON.stringify` → `null` → `Number(null)` = 0): a frozen frame with a
+ * −Inf magnitude must not start poisoning the y-autoscale `Math.min` just
+ * because the serialization changed (adversarial review #10 of this lot). */
+function f32(a: ArrayLike<number>): Float32Array {
+  return Float32Array.from(a, (v) => (Number.isFinite(v) ? v : 0));
+}
+function f64(a: ArrayLike<number>): Float64Array {
+  return Float64Array.from(a, (v) => (Number.isFinite(v) ? v : 0));
+}
+
 function encodeFrames(p: PersistedFrames): StoredFrames {
   const out: StoredFrames = {};
   if (p.td?.domain === "td") {
     out.td = {
       sampleRate: p.td.sample_rate,
-      samples: Float32Array.from(p.td.samples),
+      samples: f32(p.td.samples),
     };
   }
   if (p.fd?.domain === "fd") {
     out.fd = {
-      freqs: Float32Array.from(p.fd.freqs),
-      magDb: Float32Array.from(p.fd.mag_db),
+      freqs: f32(p.fd.freqs),
+      magDb: f32(p.fd.mag_db),
     };
   }
   if (p.sweep?.domain === "sweep") {
     out.sweep = {
-      freqs: Float64Array.from(p.sweep.freqs),
+      freqs: f64(p.sweep.freqs),
       curves: p.sweep.curves.map((c) => ({
         label: c.label,
-        values: Float64Array.from(c.values),
-        phaseDeg: c.phase_deg ? Float64Array.from(c.phase_deg) : null,
+        values: f64(c.values),
+        phaseDeg: c.phase_deg ? f64(c.phase_deg) : null,
       })),
     };
     if (p.sweepXUnit) out.sweepXUnit = p.sweepXUnit;
@@ -91,36 +104,49 @@ function encodeFrames(p: PersistedFrames): StoredFrames {
   return out;
 }
 
+/** A stored numeric array back to plain numbers, or null if the field is
+ * not an array at all (a hand-tampered or corrupted record — adversarial
+ * review #5 of this lot: a malformed sub-frame must DEGRADE, not throw). */
+function nums(v: unknown): number[] | null {
+  if (Array.isArray(v)) return v.map(Number);
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView)) {
+    return Array.from(v as unknown as ArrayLike<number>);
+  }
+  return null;
+}
+
 function decodeFrames(s: StoredFrames): PersistedFrames {
   const out: PersistedFrames = {};
-  if (s.td) {
-    out.td = {
-      domain: "td",
-      sample_rate: s.td.sampleRate,
-      t0: 0,
-      samples: Array.from(s.td.samples),
-    };
+  if (s.td && typeof s.td === "object") {
+    const samples = nums(s.td.samples);
+    if (samples && typeof s.td.sampleRate === "number") {
+      out.td = { domain: "td", sample_rate: s.td.sampleRate, t0: 0, samples };
+    }
   }
-  if (s.fd) {
-    out.fd = {
-      domain: "fd",
-      freqs: Array.from(s.fd.freqs),
-      mag_db: Array.from(s.fd.magDb),
-      phase_deg: null,
-    };
+  if (s.fd && typeof s.fd === "object") {
+    const freqs = nums(s.fd.freqs);
+    const magDb = nums(s.fd.magDb);
+    if (freqs && magDb) {
+      out.fd = { domain: "fd", freqs, mag_db: magDb, phase_deg: null };
+    }
   }
-  if (s.sweep) {
-    out.sweep = {
-      domain: "sweep",
-      freqs: Array.from(s.sweep.freqs),
-      curves: s.sweep.curves.map((c) => ({
-        label: c.label,
-        values: Array.from(c.values),
-        phase_deg: c.phaseDeg ? Array.from(c.phaseDeg) : null,
-      })),
-    };
-    if (s.sweepXUnit) out.sweepXUnit = s.sweepXUnit;
-    if (s.sweepYUnit) out.sweepYUnit = s.sweepYUnit;
+  if (s.sweep && typeof s.sweep === "object") {
+    const freqs = nums(s.sweep.freqs);
+    if (freqs && Array.isArray(s.sweep.curves)) {
+      const curves: { label: string; values: number[]; phase_deg: number[] | null }[] = [];
+      for (const c of s.sweep.curves) {
+        const values = c && typeof c === "object" ? nums(c.values) : null;
+        if (!values) continue;
+        curves.push({
+          label: typeof c.label === "string" ? c.label : "",
+          values,
+          phase_deg: c.phaseDeg ? nums(c.phaseDeg) : null,
+        });
+      }
+      out.sweep = { domain: "sweep", freqs, curves };
+      if (s.sweepXUnit) out.sweepXUnit = s.sweepXUnit;
+      if (s.sweepYUnit) out.sweepYUnit = s.sweepYUnit;
+    }
   }
   return out;
 }
@@ -137,15 +163,21 @@ export function encodeDoc(doc: WorkspaceDoc): StoredDoc {
  * corrupt or hand-tampered record degrades to null / field defaults, the
  * same contract as every other document ingest path. */
 export function decodeDoc(raw: unknown): WorkspaceDoc | null {
-  if (!raw || typeof raw !== "object") return null;
-  const rec = raw as StoredDoc;
-  const refFrames: Record<TraceId, PersistedFrames> = {};
-  if (rec.refFrames && typeof rec.refFrames === "object") {
-    for (const [id, s] of Object.entries(rec.refFrames)) {
-      if (s && typeof s === "object") refFrames[id] = decodeFrames(s);
+  try {
+    if (!raw || typeof raw !== "object") return null;
+    const rec = raw as StoredDoc;
+    const refFrames: Record<TraceId, PersistedFrames> = {};
+    if (rec.refFrames && typeof rec.refFrames === "object") {
+      for (const [id, s] of Object.entries(rec.refFrames)) {
+        if (s && typeof s === "object") refFrames[id] = decodeFrames(s);
+      }
     }
+    return migrate({ ...rec, refFrames });
+  } catch {
+    // Whatever slipped past the field guards: an unreadable record IS
+    // "no record", never a crash (same contract as migrate()).
+    return null;
   }
-  return migrate({ ...rec, refFrames });
 }
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +230,10 @@ class IdbWorkspaceStore implements WorkspaceStore {
           db.createObjectStore(CURRENT_STORE);
         }
       };
+      // NOTE an open can stay pending (blocked by another connection, or a
+      // webview storage stall) — mountApp races the boot restore against a
+      // timeout so a hung open degrades to "mount anyway, restore when it
+      // lands" instead of a blank window (adversarial review #4).
       const db = await req(openReq as IDBRequest<IDBDatabase>);
       // If a version rollback or an externally-created empty DB left the
       // stores missing, fail loudly rather than throwing on every tx.
@@ -208,7 +244,15 @@ class IdbWorkspaceStore implements WorkspaceStore {
         db.close();
         throw new Error("workspace DB is missing its object stores");
       }
-      await importFromLocalStorage(db);
+      // Best-effort: a failing import must never brick the store — every
+      // method funnels through open(), so a rejection here would take
+      // list/load/save/delete down with it, INCLUDING the "delete an old
+      // workspace to free space" recovery path (adversarial review #3).
+      try {
+        await importFromLocalStorage(db);
+      } catch {
+        /* keys stay in place; retried at next boot */
+      }
       return db;
     })();
     this.dbPromise = p;
@@ -280,14 +324,19 @@ function parseDoc(raw: string | null): WorkspaceDoc | null {
 /**
  * Import every `qa40x-v2-ws-*` localStorage blob, then remove its key —
  * freeing the 5 MB quota is the point. Rules:
- *  - a key is removed only once its document verifiably sits in IndexedDB
- *    (imported now, or already there from a previous partial run);
- *  - an existing IndexedDB record always wins over the localStorage blob
- *    (IndexedDB is the newer store — a re-import must not roll it back);
+ *  - a key is removed only when ITS document was imported into IndexedDB
+ *    just now — never on a skip: if an IndexedDB record already exists we
+ *    cannot know which of the two is newer (a downgrade/upgrade cycle can
+ *    make the localStorage one newer), so the loser's blob is left in
+ *    place rather than destroyed (adversarial review #11 of this lot);
+ *  - an existing IndexedDB record wins for what the app LOADS (IndexedDB
+ *    is the store of record going forward — a re-import must not roll it
+ *    back), the localStorage twin just stops being read;
  *  - an unparsable blob is left in place (never destroy user data we
- *    could not read; it costs a few KB, not the quota).
- * Idempotent by construction: after one full pass there is nothing left
- * to import.
+ *    could not read; it costs a few KB, not the quota);
+ *  - per-key best-effort: one blob failing to import (e.g. its put hits a
+ *    full disk) must not stop the others, and never rejects open().
+ * Idempotent: after one clean pass there is nothing left to import.
  */
 async function importFromLocalStorage(db: IDBDatabase): Promise<void> {
   let ls: Storage;
@@ -298,17 +347,22 @@ async function importFromLocalStorage(db: IDBDatabase): Promise<void> {
   }
 
   // Current doc.
-  const rawCurrent = ls.getItem(LS_CURRENT_KEY);
-  if (rawCurrent !== null) {
-    const doc = parseDoc(rawCurrent);
+  try {
+    const doc = parseDoc(ls.getItem(LS_CURRENT_KEY));
     if (doc) {
       const tx = db.transaction(CURRENT_STORE, "readwrite");
       const store = tx.objectStore(CURRENT_STORE);
       const existing = await req(store.count(CURRENT_KEY));
-      if (existing === 0) store.put(encodeDoc(doc), CURRENT_KEY);
-      await txDone(tx);
-      ls.removeItem(LS_CURRENT_KEY);
+      if (existing === 0) {
+        store.put(encodeDoc(doc), CURRENT_KEY);
+        await txDone(tx);
+        ls.removeItem(LS_CURRENT_KEY);
+      } else {
+        await txDone(tx);
+      }
     }
+  } catch {
+    /* key stays; retried at next boot */
   }
 
   // Named saves.
@@ -318,15 +372,23 @@ async function importFromLocalStorage(db: IDBDatabase): Promise<void> {
     if (k && k.startsWith(LS_SAVED_PREFIX)) names.push(k.slice(LS_SAVED_PREFIX.length));
   }
   for (const name of names) {
-    const key = LS_SAVED_PREFIX + name;
-    const doc = parseDoc(ls.getItem(key));
-    if (!doc) continue;
-    const tx = db.transaction(NAMED_STORE, "readwrite");
-    const store = tx.objectStore(NAMED_STORE);
-    const existing = await req(store.count(name));
-    if (existing === 0) store.put(encodeDoc({ ...doc, name }), name);
-    await txDone(tx);
-    ls.removeItem(key);
+    try {
+      const key = LS_SAVED_PREFIX + name;
+      const doc = parseDoc(ls.getItem(key));
+      if (!doc) continue;
+      const tx = db.transaction(NAMED_STORE, "readwrite");
+      const store = tx.objectStore(NAMED_STORE);
+      const existing = await req(store.count(name));
+      if (existing === 0) {
+        store.put(encodeDoc({ ...doc, name }), name);
+        await txDone(tx);
+        ls.removeItem(key);
+      } else {
+        await txDone(tx);
+      }
+    } catch {
+      continue; // this blob stays; the others still get their chance
+    }
   }
 }
 
@@ -357,8 +419,10 @@ export function createMemoryWorkspaceStore(): WorkspaceStore {
 /**
  * The app's workspace store: IndexedDB, with an in-memory fallback if the
  * webview somehow has none (the bench still runs; saves just don't
- * survive the session). Also asks the browser to exempt the origin from
- * storage eviction — best-effort, ignored where unsupported.
+ * survive the session — but the pre-#44 localStorage blobs are still
+ * READ, so an upgrading user's benches stay reachable; their keys are
+ * never removed on this path). Also asks the browser to exempt the origin
+ * from storage eviction — best-effort, ignored where unsupported.
  */
 export function createWorkspaceStore(): WorkspaceStore {
   try {
@@ -368,7 +432,20 @@ export function createWorkspaceStore(): WorkspaceStore {
   }
   if (typeof indexedDB === "undefined") {
     console.warn("qa40x: IndexedDB unavailable — workspace saves are session-only.");
-    return createMemoryWorkspaceStore();
+    const mem = createMemoryWorkspaceStore();
+    try {
+      const cur = parseDoc(localStorage.getItem(LS_CURRENT_KEY));
+      if (cur) void mem.saveCurrent(cur);
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || !k.startsWith(LS_SAVED_PREFIX)) continue;
+        const doc = parseDoc(localStorage.getItem(k));
+        if (doc) void mem.save(k.slice(LS_SAVED_PREFIX.length), doc);
+      }
+    } catch {
+      /* no localStorage either — start empty */
+    }
+    return mem;
   }
   return new IdbWorkspaceStore();
 }

@@ -116,6 +116,67 @@ describe("IndexedDB WorkspaceStore — named saves", () => {
     expect(await ws.load("never existed")).toBeNull();
   });
 
+  it("deleting a name that was never saved does not throw (e.g. a double-click on the ✕ button)", async () => {
+    const ws = createWorkspaceStore();
+    await expect(ws.delete("never existed")).resolves.toBeUndefined();
+    expect(await ws.list()).toEqual([]);
+    // Same again on a store that already has OTHER named saves — the
+    // missing key must not abort the transaction and take them with it.
+    await ws.save("kept", baseDoc());
+    await ws.delete("also never existed");
+    expect(await ws.list()).toEqual(["kept"]);
+  });
+
+  it("NaN/±Infinity in frame data pin to 0 — the localStorage-era JSON behavior (review #10)", async () => {
+    const ws = createWorkspaceStore();
+    const doc = docWithFrames("nonfinite");
+    doc.refFrames["mem-1"].fd = {
+      domain: "fd",
+      freqs: [93.75, 187.5],
+      mag_db: [-Infinity, NaN],
+      phase_deg: null,
+    };
+    await ws.save("nonfinite", doc);
+    const fd = (await ws.load("nonfinite"))!.refFrames["mem-1"].fd;
+    if (fd?.domain !== "fd") throw new Error("round trip lost the fd frame");
+    // JSON.stringify used to turn these into null → 0; the binary path must
+    // not start leaking -Infinity into the y-autoscale Math.min.
+    expect(fd.mag_db).toEqual([0, 0]);
+  });
+
+  it("a record with PARTIALLY corrupt frames degrades field-by-field, never throws (review #5)", async () => {
+    const ws = createWorkspaceStore();
+    await ws.save("partial", docWithFrames("partial"));
+    // Vandalize just the frames: td loses its samples array, sweep loses
+    // its curves; fd stays intact.
+    await new Promise<void>((resolve, reject) => {
+      const open = indexedDB.open("qa40x-v2", 1);
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction("ws-named", "readwrite");
+        const get = tx.objectStore("ws-named").get("partial");
+        get.onsuccess = () => {
+          const rec = get.result;
+          rec.refFrames["mem-1"].td = { sampleRate: 48000 }; // no samples
+          rec.refFrames["mem-1"].sweep = { freqs: rec.refFrames["mem-1"].sweep.freqs }; // no curves
+          tx.objectStore("ws-named").put(rec, "partial");
+        };
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      open.onerror = () => reject(open.error);
+    });
+    const loaded = await ws.load("partial");
+    expect(loaded).not.toBeNull();
+    const f = loaded!.refFrames["mem-1"];
+    expect(f.td).toBeUndefined();
+    expect(f.sweep).toBeUndefined();
+    expect(f.fd?.domain).toBe("fd"); // the intact domain survives
+  });
+
   it("a corrupted record degrades to null instead of crashing the load", async () => {
     const ws = createWorkspaceStore();
     await ws.save("ok", baseDoc());
@@ -172,7 +233,7 @@ describe("one-shot localStorage → IndexedDB import", () => {
     expect(localStorage.getItem("qa40x-dash-ws:Legacy")).toBe("{}");
   });
 
-  it("an existing IndexedDB record wins over a stale localStorage blob (and the key still goes)", async () => {
+  it("an existing IndexedDB record wins over a localStorage twin — and the loser's blob is NOT destroyed", async () => {
     // First run: the doc lands in IndexedDB.
     const first = createWorkspaceStore();
     const idbDoc = baseDoc("Bench");
@@ -180,18 +241,22 @@ describe("one-shot localStorage → IndexedDB import", () => {
     await first.save("Bench", idbDoc);
     await first.saveCurrent(idbDoc);
 
-    // A stale localStorage twin appears (e.g. an older app version wrote it).
-    const stale = baseDoc("Bench");
-    stale.collapsed = ["sources"];
-    localStorage.setItem(SAVED + "Bench", JSON.stringify(stale));
-    localStorage.setItem(LS_CURRENT, JSON.stringify(stale));
+    // A localStorage twin appears (an older app version wrote it — after a
+    // downgrade/upgrade cycle it may even be NEWER than the IDB record).
+    const twin = baseDoc("Bench");
+    twin.collapsed = ["sources"];
+    localStorage.setItem(SAVED + "Bench", JSON.stringify(twin));
+    localStorage.setItem(LS_CURRENT, JSON.stringify(twin));
 
-    // Second run (fresh seam instance, same DB): import must not roll back.
+    // Second run (fresh seam instance, same DB): import must not roll the
+    // IndexedDB records back — but since the twin was NOT imported, its key
+    // must survive: a skipped blob is potentially the newer document and
+    // deleting it would be silent data destruction (issue #44 review #11).
     const second = createWorkspaceStore();
     expect((await second.load("Bench"))?.collapsed).toEqual(["programs"]);
     expect((await second.loadCurrent())?.collapsed).toEqual(["programs"]);
-    expect(localStorage.getItem(SAVED + "Bench")).toBeNull();
-    expect(localStorage.getItem(LS_CURRENT)).toBeNull();
+    expect(localStorage.getItem(SAVED + "Bench")).not.toBeNull();
+    expect(localStorage.getItem(LS_CURRENT)).not.toBeNull();
   });
 
   it("an unparsable blob is left in place (never destroy what we could not read)", async () => {
@@ -199,6 +264,13 @@ describe("one-shot localStorage → IndexedDB import", () => {
     const ws = createWorkspaceStore();
     expect(await ws.list()).toEqual([]);
     expect(localStorage.getItem(SAVED + "Broken")).toBe("{not json");
+  });
+
+  it("an unparsable CURRENT blob is left in place too, and the current doc stays null", async () => {
+    localStorage.setItem(LS_CURRENT, "{not json either");
+    const ws = createWorkspaceStore();
+    expect(await ws.loadCurrent()).toBeNull();
+    expect(localStorage.getItem(LS_CURRENT)).toBe("{not json either");
   });
 });
 

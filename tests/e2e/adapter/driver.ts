@@ -34,6 +34,12 @@ export interface Driver {
    * Playwright and WebdriverIO serialize it by source.
    */
   eval<A, T>(fn: (arg: A) => T, arg: A): Promise<T>;
+  /**
+   * Register a function to run in the page BEFORE any of its scripts, on
+   * every subsequent navigation (WebdriverIO twin: `browser.addInitScript`).
+   * Same self-containment rule as `eval`.
+   */
+  addInitScript<A>(fn: (arg: A) => void, arg: A): Promise<void>;
   /** Poll a page-side predicate until it returns true (or time out). */
   waitUntil<A>(fn: (arg: A) => boolean, arg: A, opts?: { timeoutMs?: number }): Promise<void>;
   /** Full-page screenshot written to `absPath`. */
@@ -76,6 +82,10 @@ export class PlaywrightDriver implements Driver {
 
   async eval<A, T>(fn: (arg: A) => T, arg: A): Promise<T> {
     return this.page.evaluate(fn, arg);
+  }
+
+  async addInitScript<A>(fn: (arg: A) => void, arg: A): Promise<void> {
+    await this.page.addInitScript(fn, arg);
   }
 
   async waitUntil<A>(

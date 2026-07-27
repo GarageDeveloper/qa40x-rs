@@ -1136,6 +1136,29 @@ export class AppV2 {
 
   /* ---- M5: workspace persistence -------------------------------------- */
 
+  /**
+   * Reboot into a localStorage-era state: the workspace IndexedDB is
+   * deleted and `seeds` land in localStorage BEFORE any app script runs —
+   * so the first-boot import (issue #44 lot 1) sees exactly these blobs,
+   * deterministically (the fixture's initial boot may already have
+   * auto-saved a current doc to IndexedDB; a seed-after-boot approach
+   * would race that).
+   */
+  async bootLocalStorageEra(seeds: Record<string, string>): Promise<void> {
+    await this.drv.addInitScript(
+      (s: Record<string, string>) => {
+        try {
+          indexedDB.deleteDatabase("qa40x-v2");
+        } catch {
+          /* no IDB — nothing to clear */
+        }
+        for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v);
+      },
+      seeds
+    );
+    await this.boot();
+  }
+
   /** Seed a raw localStorage blob (e.g. a legacy v4 save). */
   async putLocalStorage(key: string, value: string): Promise<void> {
     await this.drv.eval(

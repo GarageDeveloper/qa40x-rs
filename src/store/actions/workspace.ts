@@ -178,20 +178,41 @@ export async function loadWorkspaceNamed(
  * any old v2 localStorage blobs at first open — else the legacy v4 current
  * through the importer). Without one, the initialState() bench stands — the
  * maintainer-validated first-run defaults, not a template.
+ *
+ * Returns whether the CURRENT-doc read provably succeeded (a doc, or a
+ * definitive "none saved"). `false` means the record may exist but could
+ * not be read — the caller must NOT enable the auto-save then: its first
+ * tick would overwrite the very record we failed to read with the empty
+ * initial bench (adversarial review #1 of this lot).
  */
 export async function restoreWorkspaceAtBoot(
   store: Store<AppState>,
   ipc: Ipc,
   ws: WorkspaceStore
-): Promise<void> {
+): Promise<boolean> {
   let doc: WorkspaceDoc | null = null;
+  let readOk = true;
   try {
     doc = await ws.loadCurrent();
   } catch {
     doc = null; // an unusable DB must never block the boot
+    readOk = false;
   }
-  doc ??= loadLegacyCurrent();
+  if (!doc) {
+    try {
+      doc = loadLegacyCurrent();
+    } catch {
+      // localStorage itself can throw (disabled/blocked storage — the same
+      // reason main.ts's theme/REST-token reads and wsstore.ts's importer
+      // guard every access) — the boot must degrade to initialState(),
+      // never abort. `mountApp` awaits this call (issue #44 lot 1), so an
+      // uncaught rejection here would leave the app unmounted, not just
+      // the workspace unrestored.
+      doc = null;
+    }
+  }
   if (doc) applyWorkspaceDoc(store, ipc, doc);
+  return readOk;
 }
 
 const AUTO_SAVE_DEBOUNCE_MS = 500;
@@ -205,7 +226,14 @@ const AUTO_SAVE_DEBOUNCE_MS = 500;
  */
 export function initAutoSave(store: Store<AppState>, ws: WorkspaceStore): void {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let lastJson = "";
+  // The dedupe compares against the last ENQUEUED document, not the last
+  // committed one — with a write slower than one debounce period, comparing
+  // against the committed json would skip the corrective write of an
+  // A → B → A edit sequence and leave B on disk while the live bench is A
+  // (adversarial review #2 of this lot). On failure the queued json rolls
+  // back to the committed one so the next tick retries.
+  let lastWritten = "";
+  let lastQueued = "";
   let chain: Promise<void> = Promise.resolve();
   // A full quota won't clear itself between ticks — warn once per session,
   // not every 500 ms (issue #29 review finding #2), but keep trying: the
@@ -217,13 +245,16 @@ export function initAutoSave(store: Store<AppState>, ws: WorkspaceStore): void {
       timer = null;
       const doc = snapshotWorkspace(store.get());
       const json = JSON.stringify(doc);
-      if (json === lastJson) return;
+      if (json === lastQueued) return;
+      lastQueued = json;
       chain = chain.then(async () => {
         try {
           await ws.saveCurrent(doc);
-          lastJson = json;
+          lastWritten = json;
           warned = false;
         } catch (e) {
+          // Only roll back if no NEWER write was enqueued meanwhile.
+          if (lastQueued === json) lastQueued = lastWritten;
           if (!warned) {
             warned = true;
             toast(store, "error", quotaOrGenericMessage("Workspace auto-save", e));
