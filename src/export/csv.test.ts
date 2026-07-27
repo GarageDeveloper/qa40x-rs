@@ -275,13 +275,15 @@ describe("traceProvenance (issue #40: capture snapshot preferred over the live b
     );
   });
 
-  it("degrades honestly: a snapshot with no device says so", () => {
+  it("degrades honestly: a snapshot with no device says so, unknown calibration stays SILENT", () => {
     const lines = asLines(
       stateWithDevice(),
       liveMatchingCapture({ device: null, offsets: null, capturedAt: at })
     );
     expect(lines).toContain("# capture_device_model=none");
-    expect(lines).toContain("# capture_calibrated=false");
+    // No offsets recorded ⇒ calibration is UNKNOWN — "false" would assert
+    // an uncalibrated device nobody measured (review finding #6).
+    expect(lines.some((l) => l.startsWith("# capture_calibrated"))).toBe(false);
     expect(lines.some((l) => l.startsWith("# capture_offset_input"))).toBe(false);
   });
 });

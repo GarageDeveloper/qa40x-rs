@@ -71,8 +71,12 @@ export function derivedCapture(
   const baseSig = captureBenchSignature(base);
   for (const st of steps) {
     if (st.type !== "deconvolve") continue;
-    const refCap = s.traces.byId[st.ref]?.capture;
-    if (refCap && captureBenchSignature(refCap) !== baseSig) mixed = true;
+    const ref = s.traces.byId[st.ref];
+    // A missing/dataless ref contributed nothing to the result; a ref WITH
+    // data but no snapshot (pre-#40 doc) is an UNKNOWN bench — silence
+    // there would vouch for data nobody stamped (review finding #5).
+    if (!ref || ref.domains.length === 0) continue;
+    if (!ref.capture || captureBenchSignature(ref.capture) !== baseSig) mixed = true;
   }
   return mixed ? { ...base, derived: true, mixed: true } : { ...base, derived: true };
 }

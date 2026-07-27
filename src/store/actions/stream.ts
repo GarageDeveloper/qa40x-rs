@@ -173,7 +173,7 @@ export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): Captur
       : null,
     sampleRateHz: frame.sampleRate,
     inputRangeDbv: s.device.config?.input_gain ?? null,
-    outputRangeDbv: frame.mix.fitted_output_range_dbv ?? s.device.config?.output_gain ?? null,
+    outputRangeDbv: frame.mix.fitted_output_range_dbv,
     offsets: frame.offsets,
     fftSize: s.acquisition.fftSize,
     window: s.acquisition.window,
@@ -183,6 +183,12 @@ export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): Captur
   const sig = captureBenchSignature(next);
   if (lastCapture && sig === lastCaptureSig) return lastCapture;
   lastCaptureSig = sig;
+  // Children frozen too: the store's dev-mode deepFreeze stops at an
+  // already-frozen object, so a shallow freeze here would leave
+  // `capture.device`/`capture.averaging` mutable behind the guard.
+  Object.freeze(next.device);
+  Object.freeze(next.averaging);
+  Object.freeze(next.offsets);
   lastCapture = Object.freeze(next);
   return lastCapture;
 }
@@ -203,6 +209,10 @@ let ingestSeq = 0;
 export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
   const seq = ++ingestSeq;
   const off = frame.offsets;
+  // One snapshot for the whole frame (issue #40), computed BEFORE the cache
+  // writes so the trigger latch below can bake it — the update callback
+  // reuses it (same state, cache-first rule intact).
+  const capture = frameCaptureProvenance(store.get(), frame);
   // Each endpoint buffers its OWN converter's offset — ADC for inputs, DAC
   // for outputs (the #48/#50/#51/#58/#60 class: four values, never one).
   const written: Array<{ id: string; offsetDb: number; hasTd: boolean; hasFd: boolean }> = [];
@@ -308,13 +318,13 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
         sampleRate: frame.sampleRate,
         samples: snapSamples,
         offsetDb: snapOffsets,
+        capture,
       });
     }
   }
 
   store.update("stream/frame", (s) => {
     const byId = { ...s.traces.byId };
-    const capture = frameCaptureProvenance(s, frame);
     for (const w of written) {
       const t = byId[w.id];
       if (!t) continue;

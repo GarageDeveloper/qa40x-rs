@@ -196,8 +196,12 @@ export function captureProvenanceLines(c: CaptureProvenance): ProvenanceLine[] {
       lines.push({ key: "capture_averaging_count", value: String(c.averaging.count) });
     }
   }
-  lines.push({ key: "capture_calibrated", value: String(c.offsets?.calibrated === true) });
+  // Unlike the live-bench block, calibration is only CLAIMED when the
+  // offsets were actually recorded — "false" on an unknown bench would
+  // assert an uncalibrated device nobody measured (review finding #6:
+  // nullable means unknown, never a default claim).
   if (c.offsets) {
+    lines.push({ key: "capture_calibrated", value: String(c.offsets.calibrated === true) });
     lines.push(
       { key: "capture_offset_input_l_db", value: numCell(c.offsets.input_l) },
       { key: "capture_offset_input_r_db", value: numCell(c.offsets.input_r) },

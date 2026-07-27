@@ -26,6 +26,7 @@ import type { FdUnit, TdUnit, TraceId } from "../core/model";
 import type {
   AcquisitionState,
   AppState,
+  CaptureProvenance,
   ExtraTone,
   LayoutPattern,
   LayoutState,
@@ -666,6 +667,78 @@ export function importV4(ws: RawV4): WorkspaceDoc {
   };
 }
 
+/**
+ * Validate a loaded capture snapshot (issue #40) field by field: every
+ * malformed field degrades to its "unknown" value (null / absent marker), a
+ * non-object degrades to no snapshot at all. Never throws — the same
+ * contract as `sanitizeUserCurve`.
+ */
+export function sanitizeCapture(raw: unknown): CaptureProvenance | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+
+  let device: CaptureProvenance["device"] = null;
+  if (c.device && typeof c.device === "object") {
+    const d = c.device as Record<string, unknown>;
+    if (typeof d.model === "string" && typeof d.serial === "string") {
+      device = {
+        model: d.model,
+        serial: d.serial,
+        firmware: numOrNull(d.firmware),
+        isVirtual: d.isVirtual === true,
+      };
+    }
+  }
+
+  let offsets: CaptureProvenance["offsets"] = null;
+  if (c.offsets && typeof c.offsets === "object") {
+    const o = c.offsets as Record<string, unknown>;
+    const il = numOrNull(o.input_l);
+    const ir = numOrNull(o.input_r);
+    const ol = numOrNull(o.output_l);
+    const or = numOrNull(o.output_r);
+    if (il !== null && ir !== null && ol !== null && or !== null) {
+      offsets = {
+        input_l: il,
+        input_r: ir,
+        output_l: ol,
+        output_r: or,
+        calibrated: o.calibrated === true,
+      };
+    }
+  }
+
+  let averaging: CaptureProvenance["averaging"] = null;
+  if (c.averaging && typeof c.averaging === "object") {
+    const a = c.averaging as Record<string, unknown>;
+    const count = numOrNull(a.count);
+    if ((a.mode === "off" || a.mode === "power" || a.mode === "coherent") && count !== null) {
+      averaging = { mode: a.mode, count };
+    }
+  }
+
+  const out: CaptureProvenance = {
+    device,
+    sampleRateHz: numOrNull(c.sampleRateHz),
+    inputRangeDbv: numOrNull(c.inputRangeDbv),
+    outputRangeDbv: numOrNull(c.outputRangeDbv),
+    offsets,
+    fftSize: numOrNull(c.fftSize),
+    window: c.window === "hann" || c.window === "rect" || c.window === "flattop" ? c.window : null,
+    averaging,
+    capturedAt: typeof c.capturedAt === "string" ? c.capturedAt : null,
+  };
+  if (c.derived === true) out.derived = true;
+  if (c.mixed === true) out.mixed = true;
+  if (c.programParams && typeof c.programParams === "object") {
+    // The export only ever JSON-stringifies it — an object is enough.
+    out.programParams = c.programParams as SweepProgramParams;
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* migrate: any known version → v5                                     */
 /* ------------------------------------------------------------------ */
@@ -730,9 +803,14 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
     }
   }
   // Issue #40: a doc predating the capture snapshot has none — the exports
-  // then fall back to the live bench, exactly the pre-#40 behavior.
+  // then fall back to the live bench, exactly the pre-#40 behavior. Any doc
+  // that DOES carry one gets the same shape/value validation as the user
+  // weighting curve below (typeof-checks, review-#1-of-this-lot): a
+  // hand-edited or corrupted snapshot must degrade field-by-field to
+  // "unknown", never crash the export with `capture_window=undefined` or a
+  // TypeError deep in `captureProvenanceLines`.
   for (const t of Object.values(doc.traces.byId)) {
-    if (t.capture === undefined) t.capture = null;
+    t.capture = t.capture === undefined ? null : sanitizeCapture(t.capture);
   }
   if (!doc.triggers || typeof doc.triggers !== "object") doc.triggers = {};
   // A SINGLE arm is a live-session gesture, never a saved-bench fact — any

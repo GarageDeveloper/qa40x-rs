@@ -85,21 +85,58 @@ function comments(
 
 /**
  * The capture snapshot a TILE export rides under (issue #40): the chip-
- * source trace's — the one the tile's readouts already follow. Members
- * captured under DIFFERENT bench states flag the snapshot `mixed` (it then
- * describes the chip source only; each member's own trace export carries
- * its own full snapshot).
+ * source trace's — the one the tile's readouts already follow — but only
+ * while that trace is actually DRAWN (an explicit chip source the user
+ * legend-hid contributes no columns; signing the file with its bench would
+ * re-create the very bug #40 fixes — review finding #2). Falls back to the
+ * first drawn member with a snapshot.
+ *
+ * Members with data captured under DIFFERENT bench states flag the snapshot
+ * `mixed` (it then describes one member only; each member's own trace
+ * export carries its full snapshot). A drawn member WITHOUT a snapshot (a
+ * pre-#40 doc's ❄ trace) counts as its own unknown bench — silence there
+ * would vouch for data nobody stamped (review finding #5). Members without
+ * data contribute no columns and are ignored.
  */
-function tileCapture(s: AppState, tile: TileConfig): CaptureProvenance | null {
+export function tileCapture(s: AppState, tile: TileConfig): CaptureProvenance | null {
+  const drawn = shownTraces(tile).filter((id) => {
+    const t = s.traces.byId[id];
+    return !!t && t.domains.length > 0;
+  });
   const chipId = chipSourceTraceId(tile);
-  const capture = (chipId ? s.traces.byId[chipId]?.capture : null) ?? null;
+  let capture =
+    (chipId && drawn.includes(chipId) ? s.traces.byId[chipId]?.capture : null) ?? null;
+  if (!capture) {
+    for (const id of drawn) {
+      const c = s.traces.byId[id]?.capture;
+      if (c) {
+        capture = c;
+        break;
+      }
+    }
+  }
   const sigs = new Set<string>();
-  for (const id of shownTraces(tile)) {
+  for (const id of drawn) {
     const c = s.traces.byId[id]?.capture;
-    if (c) sigs.add(captureBenchSignature(c));
+    sigs.add(c ? captureBenchSignature(c) : "unknown");
   }
   if (capture && sigs.size > 1) return { ...capture, mixed: true };
   return capture;
+}
+
+/**
+ * The tile capture for the EXPORT lanes: a scope tile holding a trigger
+ * snapshot draws THAT picture (chartvm slices the held arrays with the
+ * snapshot's own rate/offsets, never the live frame) — its provenance is
+ * the one latched with it, not whatever the endpoints refreshed to since
+ * (review finding #3: a held NORMAL picture under a since-moved bench).
+ */
+function tileExportCapture(
+  s: AppState,
+  tile: TileConfig,
+  heldCapture: CaptureProvenance | null | undefined
+): CaptureProvenance | null {
+  return heldCapture ?? tileCapture(s, tile);
 }
 
 /** Save-dialog + backend write; false = user cancelled. */
@@ -199,7 +236,9 @@ export async function exportTileCsv(
     if (vm.series.length > 0) csv = tileSpectrumCsv(vm, comments(s, lines, tileCapture(s, tile)));
   } else if (tile.kind === "scope") {
     const { vm, lines } = scopeExport(s, tile);
-    if (vm.series.length > 0) csv = tileScopeCsv(vm, comments(s, lines, tileCapture(s, tile)));
+    if (vm.series.length > 0) {
+      csv = tileScopeCsv(vm, comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)));
+    }
   } else {
     const { vm, lines } = sweepExport(s, tile);
     if (vm.series.length > 0) csv = tileSweepCsv(vm, comments(s, lines, tileCapture(s, tile)));
@@ -255,7 +294,7 @@ export async function exportTileSvg(
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines, tileCapture(s, tile)),
+      provenance: comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)),
       unitLabel: vm.unitLabel,
       xUnitLabel: "s",
       xLog: false,
@@ -372,7 +411,11 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
     .filter((id) => !tile?.hidden.includes(id))
     .map((id) => s.traces.byId[id]?.label)
     .filter((l): l is string => !!l);
-  const cap = tile ? tileCapture(s, tile) : null;
+  const cap = tile
+    ? tile.kind === "scope"
+      ? tileExportCapture(s, tile, scopeVM(s, tile).trigger?.capture)
+      : tileCapture(s, tile)
+    : null;
   const info = s.device.info;
   const device = cap?.device
     ? `${cap.device.model} #${cap.device.serial}` +

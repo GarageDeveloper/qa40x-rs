@@ -170,6 +170,15 @@ export type TraceSource =
  * Nullable fields mean "unknown at capture", never "same as the current
  * bench". `capturedAt` is null while the data is still live-refreshing (the
  * bench IS the provenance then); freeze/program land stamp the instant.
+ *
+ * Known limits (accepted for this lot, lifted when the backend carries
+ * them on the frame like `sample_rate`): `fftSize`/`window`/`averaging`
+ * are a config-side projection — the ONE in-flight frame after a setting
+ * change is stamped with the new value while its data was computed under
+ * the old (a ❄ within ~100 ms of the change pins that one-frame lie); and
+ * an averaged curve (count N) blends N acquisitions that may straddle a
+ * range change — the snapshot describes the LAST one, `mixed` does not
+ * cover time-blending.
  */
 export interface CaptureProvenance {
   device: {
@@ -208,16 +217,18 @@ export interface CaptureProvenance {
 export function captureBenchSignature(c: CaptureProvenance): string {
   const d = c.device;
   const o = c.offsets;
-  return [
-    d ? `${d.model}|${d.serial}|${d.firmware ?? ""}|${d.isVirtual}` : "none",
-    c.sampleRateHz ?? "",
-    c.inputRangeDbv ?? "",
-    c.outputRangeDbv ?? "",
-    o ? `${o.input_l}|${o.input_r}|${o.output_l}|${o.output_r}|${o.calibrated}` : "none",
-    c.fftSize ?? "",
-    c.window ?? "",
-    c.averaging ? `${c.averaging.mode}|${c.averaging.count}` : "none",
-  ].join(";");
+  // JSON, not string joins: a free-text model/serial containing the join
+  // character must never collide two different benches into one signature.
+  return JSON.stringify([
+    d && [d.model, d.serial, d.firmware, d.isVirtual],
+    c.sampleRateHz,
+    c.inputRangeDbv,
+    c.outputRangeDbv,
+    o && [o.input_l, o.input_r, o.output_l, o.output_r, o.calibrated],
+    c.fftSize,
+    c.window,
+    c.averaging && [c.averaging.mode, c.averaging.count],
+  ]);
 }
 
 /** The CURRENT bench as a capture snapshot — what a frame ingested right now

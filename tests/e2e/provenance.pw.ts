@@ -61,9 +61,25 @@ test("a tile mixing capture states flags capture_mixed", async ({ app }) => {
   // Freeze at 48 kHz, then move the bench and let a FRESH live frame land —
   // tile-1 now draws a live 96 kHz curve next to a frozen 48 kHz one.
   await app.drv.click('[data-testid="tile-freeze-tile-1"]');
-  const seq = await app.maxSeriesSeq();
   await app.setSelect("sample-rate", "96000");
-  await app.waitForSeries("Input L", seq + 1);
+  // Wait on the REAL condition, not a frame counter: a 48 kHz frame in
+  // flight during the select round-trip satisfies "one more frame" and
+  // exports a not-yet-moved live capture (review finding #8).
+  await app.drv.waitUntil(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: {
+            state(): {
+              traces: {
+                byId: Record<string, { capture: { sampleRateHz: number | null } | null }>;
+              };
+            };
+          };
+        }
+      ).qa40xV2Debug.state().traces.byId["hw-in-left"].capture?.sampleRateHz === 96000,
+    undefined as void
+  );
 
   await app.setSelect("tile-export-tile-1", "csv");
   await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
@@ -72,4 +88,45 @@ test("a tile mixing capture states flags capture_mixed", async ({ app }) => {
   expect(lines).toContain("# capture_mixed=true");
   // The block describes the CHIP SOURCE (the live Input L, post-move).
   expect(lines).toContain("# capture_sample_rate_hz=96000");
+});
+
+test("the SVG lane carries the SAME capture_* provenance as CSV, embedded in its <metadata> (not just the lean live-bench case)", async ({
+  app,
+}) => {
+  // The existing SVG export spec (export.pw.ts) only exercises a LIVE trace
+  // matching the bench — the lean pre-#40 header, no capture_* keys at all.
+  // export.ts threads the SAME `tileCapture()` result into both the CSV and
+  // SVG lanes (`comments(s, lines, tileCapture(s, tile))`); this pins that
+  // the SVG lane actually carries it too, on the exact "bench moved" setup
+  // as the capture_mixed CSV test above.
+  await app.drv.click('[data-testid="tile-freeze-tile-1"]');
+  await app.setSelect("sample-rate", "96000");
+  // Wait on the REAL condition, not a frame counter: a 48 kHz frame in
+  // flight during the select round-trip satisfies "one more frame" and
+  // exports a not-yet-moved live capture (review finding #8).
+  await app.drv.waitUntil(
+    () =>
+      (
+        window as unknown as {
+          qa40xV2Debug: {
+            state(): {
+              traces: {
+                byId: Record<string, { capture: { sampleRateHz: number | null } | null }>;
+              };
+            };
+          };
+        }
+      ).qa40xV2Debug.state().traces.byId["hw-in-left"].capture?.sampleRateHz === 96000,
+    undefined as void
+  );
+
+  await app.setSelect("tile-export-tile-1", "svg");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [f] = await app.exportedFiles();
+  expect(f.path).toMatch(/\.svg$/);
+  // The metadata block is the SAME "# key=value" lines as the CSV export,
+  // XML-escaped and newline-joined inside <metadata>.
+  expect(f.text).toContain("<metadata>");
+  expect(f.text).toContain("# capture_mixed=true");
+  expect(f.text).toContain("# capture_sample_rate_hz=96000");
 });

@@ -248,17 +248,25 @@ let scriptDone: ((error: string | null) => void) | null = null;
 let activeScriptId: string | null = null;
 
 /** The capture snapshot a program result lands with (issue #40): device
- * identity + converter state at land time (the run JUST used this bench),
- * stamped with the instant and — for a sweep — the params that produced the
- * curve. The acquisition trio stays null: a program captures with its OWN
- * fft/window, not the live stream's settings. */
-function programCapture(s: AppState, params?: SweepProgramParams): CaptureProvenance {
+ * identity, the instant, and — for a sweep — the params that produced the
+ * curve. EVERYTHING else stays null, deliberately (review finding #4): a
+ * program run writes registers behind the frontend's back (`apply_config`,
+ * `auto_level`, the Rhai `set_*` verbs — "Nothing is restored"), so the
+ * UI-cached rate/ranges/offsets describe the bench BEFORE the run, not the
+ * one that produced the curve; and it captures with its own fft/window,
+ * not the live stream's settings. Unknown, never guessed — the frame-side
+ * truths (`trace_sample_rate_hz`) keep coming from the frame. */
+function programCapture(s: AppState, capturedAt: string, params?: SweepProgramParams): CaptureProvenance {
   return {
-    ...liveCaptureProvenance(s),
+    device: liveCaptureProvenance(s).device,
+    sampleRateHz: null,
+    inputRangeDbv: null,
+    outputRangeDbv: null,
+    offsets: null,
     fftSize: null,
     window: null,
     averaging: null,
-    capturedAt: new Date().toISOString(),
+    capturedAt,
     ...(params ? { programParams: { ...params } } : {}),
   };
 }
@@ -281,10 +289,11 @@ function landProgramFrames(
   if (frames.td) domains.push("td");
   if (frames.fd) domains.push("fd");
   if (frames.sweep) domains.push("sweep");
+  // Built OUTSIDE the reducer (clock impurity stays out of store.update).
+  const capture = programCapture(store.get(), new Date().toISOString(), params);
   store.update("programs/land", (s) => {
     const t = s.traces.byId[id];
     if (!t) return s;
-    const capture = programCapture(s, params);
     return {
       ...s,
       traces: { ...s.traces, byId: { ...s.traces.byId, [id]: { ...t, seq, domains, capture } } },

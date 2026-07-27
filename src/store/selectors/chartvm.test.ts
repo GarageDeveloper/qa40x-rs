@@ -286,6 +286,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
       sampleRate: 48000,
       samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
       offsetDb: { [HW_TRACE_IDS.inputL]: 20 }, // 10x, distinct from the live 20.81 above
+      capture: null,
       ...over,
     });
   }
@@ -320,6 +321,28 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     // marker very slightly off).
     expect(vm.trigger!.position).toBeCloseTo(240 / 479, 9);
     expect(vm.trigger!.sourceId).toBe(HW_TRACE_IDS.inputL);
+  });
+
+  it("the trigger VM carries the snapshot's OWN capture provenance (issue #40 review #3)", () => {
+    // Same baked-at-latch rule as sourceOffsetDb: an export of the HELD
+    // picture must be signed by the bench that latched it, however far the
+    // live traces' captures refreshed since.
+    const latched = {
+      device: { model: "QA403", serial: "HELD", firmware: 61, isVirtual: false },
+      sampleRateHz: 48000,
+      inputRangeDbv: 42,
+      outputRangeDbv: 18,
+      offsets: null,
+      fftSize: 32768,
+      window: "hann" as const,
+      averaging: { mode: "off" as const, count: 1 },
+      capturedAt: null,
+    };
+    seedSnapshot({ capture: latched });
+    const s = stateWithTrigger();
+    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 500, frac: 0.3 };
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger!.capture).toBe(latched); // the latched object, by identity
   });
 
   it("clamps pre to the trigger index so the slice never starts before sample 0 (review #4/#7)", () => {
@@ -499,6 +522,7 @@ describe("triggerSourceOffsetDb (review #5)", () => {
       sampleRate: 48000,
       samples: { [HW_TRACE_IDS.inputL]: Float64Array.from({ length: 1000 }, (_, i) => i) },
       offsetDb: { [HW_TRACE_IDS.inputL]: 20 },
+      capture: null,
     });
     expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(20);
     expect(triggerSourceOffsetDb(s, HW_TRACE_IDS.inputL)).toBe(

@@ -660,4 +660,56 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
     expect(cap.sampleRateHz).toBe(96000);
     expect(cap.inputRangeDbv).toBeNull(); // no config read yet — unknown, never guessed
   });
+
+  it("the module-level memo is keyed on BENCH CONTENT, not on call order or store identity — a differently-configured store right after another's ingest gets its OWN fresh snapshot", () => {
+    // `lastCaptureSig`/`lastCapture` (stream.ts) are module-scope, not
+    // per-store — deliberate (one physical device, one capture, shared by
+    // every trace). That single shared memo persists across every test in
+    // this file/module, so it's worth pinning explicitly that a genuinely
+    // DIFFERENT bench occurring right after a prior ingest is never served
+    // the stale object: content-addressing (the signature), not
+    // last-call-wins, is what makes reuse across unrelated tests safe.
+    const storeA = connectedStore(); // QA403 / AB12_CD34, 42/18 dBV, 20/20.5
+    ingestFrame(storeA, frame());
+    const capA = storeA.get().traces.byId[HW_TRACE_IDS.inputL].capture;
+    expect(capA!.device?.serial).toBe("AB12_CD34");
+
+    const storeB = new Store(initialState(), { freeze: true });
+    storeB.update("test/connect-other", (s) => ({
+      ...s,
+      device: {
+        ...s.device,
+        info: {
+          model: "QA402",
+          firmware_version: 12,
+          serial: "ZZ99_OTHER",
+          product: "QA402 Audio Analyzer",
+          sample_rates: [48000],
+          supports_flash: true,
+          capabilities: {} as never,
+          is_virtual: true,
+        },
+        config: { input_gain: 6, output_gain: -2, sample_rate: 48000 },
+      },
+    }));
+    ingestFrame(
+      storeB,
+      frame({ offsets: { input_l: 0, input_r: 0, output_l: 0, output_r: 0, calibrated: false } })
+    );
+    const capB = storeB.get().traces.byId[HW_TRACE_IDS.inputL].capture;
+
+    // storeB's own bench, not a leftover from storeA's ingest just above.
+    expect(capB).not.toBe(capA);
+    expect(capB!.device).toEqual({
+      model: "QA402",
+      serial: "ZZ99_OTHER",
+      firmware: 12,
+      isVirtual: true,
+    });
+    expect(capB!.inputRangeDbv).toBe(6);
+    expect(capB!.outputRangeDbv).toBe(8); // frame's own fitted_output_range_dbv wins over config's -2
+
+    // …and storeA is untouched by storeB's ingest (no cross-store bleed).
+    expect(storeA.get().traces.byId[HW_TRACE_IDS.inputL].capture).toBe(capA);
+  });
 });

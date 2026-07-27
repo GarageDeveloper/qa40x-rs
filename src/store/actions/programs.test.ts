@@ -297,6 +297,101 @@ describe("actions/programs — the device lock", () => {
 });
 
 /**
+ * A program result's capture snapshot (issue #40, "programs.ts::programCapture
+ * with programParams" — the pilot lot's own gap list): the DEVICE IDENTITY a
+ * sweep landed under, PLUS the exact params that produced the curve, frozen
+ * at land time so a later edit to the (idle) program can't retroactively
+ * change what an already-landed curve says it was measured with. Everything
+ * else (rate/ranges/offsets AND the fft/window/averaging trio) stays null,
+ * deliberately (adversarial review finding #4): a program run writes
+ * registers behind the frontend's back (`apply_config`, `auto_level`, the
+ * Rhai `set_*` verbs, nothing restored), so the UI-cached values describe
+ * the bench BEFORE the run — stamping them would contradict the frame-side
+ * truths (`trace_sample_rate_hz`) in the same exported file. Unknown, never
+ * guessed.
+ */
+describe("actions/programs — capture provenance stamped at land (issue #40)", () => {
+  beforeEach(() => clearAllFrames());
+
+  function connectedDeviceStreamingState(): AppState {
+    const s = connectedStreamingState();
+    return {
+      ...s,
+      device: {
+        ...s.device,
+        info: {
+          model: "QA403",
+          firmware_version: 61,
+          serial: "AB12-CD34",
+          product: "QA403 Audio Analyzer",
+          sample_rates: [48000],
+          supports_flash: false,
+          capabilities: {} as never,
+          is_virtual: false,
+        },
+        config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+        offsets: { input_l: 20, input_r: 20.5, output_l: 1, output_r: 1.5, calibrated: true },
+      },
+    };
+  }
+
+  it("lands a THD sweep's result with the device identity, a frozen programParams copy, a pinned instant — and NO UI-cached bench values", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-27T10:00:00.000Z"));
+    try {
+      const store = new Store(connectedDeviceStreamingState());
+      const { ipc, release } = stubIpc();
+      release(); // no need to observe the in-flight lock here
+      const id = addProgram(store, "thd");
+      const progAtRun = store.get().programs.byId[id];
+      if (progAtRun.kind !== "sweep") throw new Error("expected a sweep program");
+
+      await runProgram(store, ipc, id);
+
+      const capture = store.get().traces.byId[id].capture;
+      expect(capture).not.toBeNull();
+      expect(capture!.device).toEqual({
+        model: "QA403",
+        serial: "AB12-CD34",
+        firmware: 61,
+        isVirtual: false,
+      });
+      // Rate/ranges/offsets are the UI's PRE-RUN cache — the run may have
+      // rewritten every one of them backend-side (`apply_config`,
+      // `auto_level`, Rhai `set_*`; nothing restored). Unknown, never
+      // guessed (review finding #4).
+      expect(capture!.sampleRateHz).toBeNull();
+      expect(capture!.inputRangeDbv).toBeNull();
+      expect(capture!.outputRangeDbv).toBeNull();
+      expect(capture!.offsets).toBeNull();
+      // A program captures with its OWN fft/window/averaging, never the live
+      // stream's — `programCapture`'s explicit override, never a value
+      // leaking from `acquisition`.
+      expect(capture!.fftSize).toBeNull();
+      expect(capture!.window).toBeNull();
+      expect(capture!.averaging).toBeNull();
+      expect(capture!.capturedAt).toBe("2026-07-27T10:00:00.000Z");
+      expect(capture!.programParams).toEqual(progAtRun.params);
+
+      // The snapshot is a COPY frozen at land time: reconfiguring the
+      // (still-idle) program afterward must NOT retroactively change what
+      // the ALREADY-LANDED curve says it was measured with (issue #40's
+      // second note — "the live program's params can be edited without a
+      // re-run and go stale").
+      configureSweepProgram(store, id, {
+        label: store.get().traces.byId[id].label,
+        params: { ...progAtRun.params, levelDbfs: -20 },
+      });
+      const captureAfter = store.get().traces.byId[id].capture;
+      expect(captureAfter!.programParams!.levelDbfs).toBe(progAtRun.params.levelDbfs);
+      expect(captureAfter!.programParams!.levelDbfs).not.toBe(-20);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
  * Wow & flutter as a PROGRAM (issue #28 second pass): it fits the SAME
  * "sweep" program kind — device lock, ▶/⏹, freeze, persistence — as
  * THD/FR, not its own dialog. These tests mirror the choreography above
