@@ -44,11 +44,6 @@ pub struct AppState {
     /// REST server, sharing the default runtime's device handle (per-device
     /// script selection is lot F).
     script: script::ScriptControl,
-    /// True while a USB-monitoring task is alive. Guards `connect_device`
-    /// against spawning a second monitor: a reconnect inside the monitor's
-    /// 2 s tick used to leak one task per cycle, and every leaked task then
-    /// emitted its own `device-disconnected` on unplug (duplicate toasts).
-    usb_monitor_active: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -68,7 +63,6 @@ impl AppState {
                 rt.generator().running_flag().clone(),
                 rt.generator().stop_flag().clone(),
             ),
-            usb_monitor_active: Arc::new(AtomicBool::new(false)),
             devices,
         }
     }
@@ -161,46 +155,6 @@ pub(crate) async fn ensure_generator_stopped(
         .await;
 }
 
-// Background USB monitoring task. At most ONE instance runs at a time: a
-// monitor survives a disconnect+reconnect that lands inside its 2 s tick
-// (it just sees "still connected"), so respawning on every connect would
-// accumulate tasks — and each one emits `device-disconnected` on unplug.
-fn start_usb_monitoring(
-    app_handle: tauri::AppHandle,
-    devices: device::DeviceRegistry,
-    active: Arc<AtomicBool>,
-) {
-    if active.swap(true, Ordering::SeqCst) {
-        // A monitor is already watching this (re)connection.
-        return;
-    }
-    let device = devices.handle();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-            log::debug!("usb-monitor: tick — acquiring device lock");
-            let guard = device.lock().await;
-            log::debug!("usb-monitor: lock acquired — checking physical presence");
-            let still_connected = guard.check_physical_connection().await;
-            drop(guard);
-            log::debug!("usb-monitor: check done → {still_connected}");
-
-            if !still_connected {
-                info!("Device disconnected - emitting event");
-                // The device closed outside disconnect_device — keep the
-                // registry's bookkeeping honest before telling the frontend.
-                devices.note_closed();
-                // Emit event to frontend
-                let _ = app_handle.emit("device-disconnected", ());
-                // Exit the monitoring loop
-                active.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-    });
-}
-
 // Tauri commands
 
 #[tauri::command]
@@ -209,10 +163,7 @@ async fn connect_device(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<String, String> {
     info!("Connect device command called");
-    let (devices, monitor_active) = {
-        let app_state = state.lock().await;
-        (app_state.devices.clone(), app_state.usb_monitor_active.clone())
-    };
+    let devices = { state.lock().await.devices.clone() };
 
     // First physical unit any source offers — the pre-registry connect()
     // behavior (the registry's USB source releases the prior claim, rescans
@@ -222,8 +173,12 @@ async fn connect_device(
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
 
-    // Start monitoring after successful connection (no-op if one is alive)
-    start_usb_monitoring(app_handle, devices, monitor_active);
+    // Watch THIS open for unplug (a no-op when a monitor already watches
+    // this generation). The monitor lives in device::runtime — Tauri only
+    // provides the event emission.
+    device::spawn_liveness_monitor(devices.default_runtime(), move |lost| {
+        let _ = app_handle.emit("device-disconnected", lost);
+    });
 
     Ok("Connected successfully".to_string())
 }
@@ -733,14 +688,15 @@ async fn flash_firmware(
     // reference (spsdk + pyMBoot) and the capture cross-checks its shape. The
     // command still re-verifies the signature + connected model below, and the
     // frontend requires an explicit confirmation — never auto-invoked.
-    let (store, device, devices) = {
+    let (store, rt) = {
         let s = state.lock().await;
-        (
-            s.firmware_images.clone(),
-            s.devices.default_runtime().handle(),
-            s.devices.clone(),
-        )
+        (s.firmware_images.clone(), s.devices.default_runtime())
     };
+    let device = rt.handle();
+    // The open generation at command entry: the bootloader detach below must
+    // clear THIS open's bookkeeping, never a newer one's (a reconnect racing
+    // the flash).
+    let flash_gen = rt.generation();
     let image = {
         let g = store.lock().map_err(|_| "firmware store lock poisoned".to_string())?;
         g.get(&sha256).cloned()
@@ -793,8 +749,9 @@ async fn flash_firmware(
     drop(dev);
     device.lock().await.mark_disconnected().await;
     // The unit is detaching to re-enumerate as the bootloader — the registry
-    // must not keep reporting it open.
-    devices.note_closed();
+    // must not keep reporting it open. Generation-keyed: a stale flash can't
+    // wipe a newer open's bookkeeping.
+    rt.note_closed_at(flash_gen);
 
     let plan = flash::build_flash_plan(&image);
     let _ = app.emit("firmware-flash-phase", "waiting-for-bootloader");

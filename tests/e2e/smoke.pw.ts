@@ -58,6 +58,21 @@ test("duplicate device-disconnected events produce ONE toast", async ({
     .toBe(0);
 });
 
+test("a payload-carrying device-disconnected behaves exactly like the payload-less one", async ({
+  app,
+}) => {
+  await app.waitConnected();
+
+  // Issue #25 lot C: the backend event now names the lost unit. While the
+  // UI holds a single device the id is accepted and ignored — one info
+  // toast, controls greyed, same as the legacy payload-less emit above.
+  await app.emit("device-disconnected", { device_id: "usb/AB12_CD34" });
+
+  await expect.poll(() => app.connectLabel()).toBe("Connect");
+  expect(await app.toastCount("Device disconnected")).toBe(1);
+  expect(await app.controlsDisabled()).toBe(true);
+});
+
 test("controls are greyed out while disconnected", async ({ app }) => {
   await app.waitConnected();
   expect(await app.controlsDisabled()).toBe(false);

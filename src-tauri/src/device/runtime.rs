@@ -113,6 +113,13 @@ struct LifecycleState {
     /// The unit currently open, per the bookkeeping (the device's own state
     /// remains the truth — see the registry module doc).
     current: Option<OpenDevice>,
+    /// The open generation a liveness monitor is watching, if any. Replaces
+    /// the old process-wide `usb_monitor_active` AtomicBool: claims are
+    /// per-generation, so a reconnect HANDS OVER to a fresh monitor (the
+    /// superseded one exits quietly on its next tick) instead of relying on
+    /// the old monitor surviving the swap — and only the current-generation
+    /// monitor can ever report the loss.
+    monitor_generation: Option<u64>,
 }
 
 struct RuntimeInner {
@@ -319,6 +326,31 @@ impl DeviceRuntime {
         *self.inner.teardown_fault.lock().expect("fault lock") = Some(err);
     }
 
+    /* ---- liveness monitor ---------------------------------------------- */
+
+    /// Claim the liveness-monitor slot for `gen`. `false` when a monitor is
+    /// already watching that same generation (the caller must not spawn a
+    /// second one — the old duplicate-toast bug); a claim for a NEWER
+    /// generation displaces the previous one, whose monitor exits quietly on
+    /// its next tick.
+    pub fn monitor_claim(&self, gen: OpenGeneration) -> bool {
+        let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
+        if st.monitor_generation == Some(gen.0) {
+            return false;
+        }
+        st.monitor_generation = Some(gen.0);
+        true
+    }
+
+    /// Release the monitor slot IF still owned by `gen` (a displaced
+    /// monitor's release must not clear the newer claim).
+    pub fn monitor_release(&self, gen: OpenGeneration) {
+        let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
+        if st.monitor_generation == Some(gen.0) {
+            st.monitor_generation = None;
+        }
+    }
+
     /// Spawn the gap-free DAC loop: the buffer repeats until the stop flag
     /// is set. The caller has already stopped any previous loop and checked
     /// the connection; this flips the running/stop flags and detaches the
@@ -349,6 +381,66 @@ impl Default for DeviceRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// `device-disconnected` event payload: which unit was lost. `device_id` is
+/// `None` only for a device opened outside the registry; old frontends (and
+/// the e2e fake, which emits the event payload-less) ignore it.
+#[derive(Clone, Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct DeviceLost {
+    pub device_id: Option<String>,
+}
+
+/// Cadence of the liveness monitor's physical-presence poll.
+const MONITOR_TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Watch the runtime's CURRENT open for physical disappearance (USB unplug):
+/// every 2 s, take the device mutex and probe the bus; on loss, clear the
+/// bookkeeping and call `on_lost` — but only if this monitor's generation is
+/// still the live one, so exactly ONE report per loss, never a stale one.
+///
+/// Claims the monitor slot itself: a no-op when a monitor already watches
+/// this generation. No Tauri dependency — the caller provides the event
+/// emission as `on_lost` (testability).
+pub fn spawn_liveness_monitor(rt: DeviceRuntime, on_lost: impl FnOnce(DeviceLost) + Send + 'static) {
+    let gen = rt.generation();
+    if !rt.monitor_claim(gen) {
+        // A monitor is already watching this (re)connection.
+        return;
+    }
+    let device_id = rt.device_id().map(|id| id.as_str().to_string());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(MONITOR_TICK).await;
+
+            if rt.generation() != gen {
+                // Superseded by a newer open — its own monitor took over.
+                break;
+            }
+            log::debug!("usb-monitor: tick — acquiring device lock");
+            let handle = rt.handle();
+            let guard = handle.lock().await;
+            log::debug!("usb-monitor: lock acquired — checking physical presence");
+            let still_connected = guard.check_physical_connection().await;
+            drop(guard);
+            log::debug!("usb-monitor: check done → {still_connected}");
+
+            if !still_connected {
+                // The device closed outside disconnect_device — keep the
+                // bookkeeping honest before telling the frontend. A stale
+                // race (disconnect_device or a newer open landed first)
+                // reports nothing: whoever cleared the bookkeeping told
+                // the user already.
+                if rt.note_closed_at(gen) {
+                    log::info!("Device disconnected - emitting event");
+                    on_lost(DeviceLost { device_id });
+                }
+                break;
+            }
+        }
+        rt.monitor_release(gen);
+    });
 }
 
 #[cfg(test)]
@@ -396,6 +488,28 @@ mod tests {
         flags.ensure_stopped().await;
         assert!(!flags.is_running());
         bg.await.expect("loop task");
+    }
+
+    #[test]
+    fn monitor_claim_admits_one_monitor_per_generation_and_hands_over_on_reopen() {
+        let rt = DeviceRuntime::new();
+        let gen1 = OpenGeneration(1);
+        let gen2 = OpenGeneration(2);
+
+        // First claim wins; a duplicate for the SAME generation is refused
+        // (the duplicate-toast bug's guard, now per-generation).
+        assert!(rt.monitor_claim(gen1));
+        assert!(!rt.monitor_claim(gen1));
+
+        // A newer open hands over: its claim displaces the old one…
+        assert!(rt.monitor_claim(gen2));
+        // …and the displaced monitor's release must NOT clear the new claim.
+        rt.monitor_release(gen1);
+        assert!(!rt.monitor_claim(gen2), "gen2's claim must have survived gen1's release");
+
+        // The owning monitor's release frees the slot for a fresh claim.
+        rt.monitor_release(gen2);
+        assert!(rt.monitor_claim(gen2));
     }
 
     #[test]
