@@ -8,7 +8,12 @@ import type { DeviceEntry, DeviceList } from "../../gen";
 
 export function fakeEntry(
   id: string,
-  opts: { virtual?: boolean; open?: boolean; model?: "QA402" | "QA403" } = {}
+  opts: {
+    virtual?: boolean;
+    open?: boolean;
+    model?: "QA402" | "QA403";
+    slot?: number;
+  } = {}
 ): DeviceEntry {
   const model = opts.model ?? (opts.virtual ? "QA403" : "QA402");
   const rates =
@@ -41,6 +46,9 @@ export function fakeEntry(
       is_virtual: opts.virtual ?? false,
     },
     open: opts.open ?? false,
+    // Backend rule: an open unit carries its runtime slot (slot 0 = the
+    // default device); a closed one never does.
+    slot: opts.open ? opts.slot ?? 0 : null,
   };
 }
 

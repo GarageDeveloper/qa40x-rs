@@ -26,11 +26,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Application state
 pub struct AppState {
-    /// The device registry (issue #25 lots B/C): enumerates units across
-    /// sources (USB bus + built-in virtual) and owns the default device's
-    /// [`device::DeviceRuntime`] — device handle, telemetry cell, mixer,
-    /// generator flags, sweep cancel, stream control. Still exactly one
-    /// open device; lot E turns the single runtime slot into a map.
+    /// The device registry (issue #25 lots B/C/E): enumerates units across
+    /// sources (USB bus + built-in virtual) and owns the runtime SLOTS —
+    /// each a [`device::DeviceRuntime`] (device handle, telemetry cell,
+    /// mixer, generator flags, sweep cancel, stream control). Slot 0 is the
+    /// default device (REST/scripting/unrouted commands); additional units
+    /// open onto further slots via `connect_additional_device`.
     devices: device::DeviceRegistry,
     /// Carved firmware image bytes, keyed by SHA-256 hex, for a later flash
     /// phase. Populated by the firmware extraction commands.
@@ -119,15 +120,12 @@ async fn safe_shutdown(state: Arc<Mutex<AppState>>) {
     log::info!("exit: safe-teardown entered");
     let registry = { state.lock().await.devices.clone() };
     // Per-device budget, equal to the callers' outer 20 s timeout so
-    // single-device behavior is unchanged. Lot E turns this loop into a
-    // join_all under the same outer budget. The sweep-cancel / stream /
-    // generator ordering lives in DeviceRuntime::shutdown.
+    // single-device behavior is unchanged; the slots tear down CONCURRENTLY
+    // (issue #25 lot E) so one wedged device never starves its siblings'
+    // teardown window. The sweep-cancel / stream / generator ordering lives
+    // in DeviceRuntime::shutdown.
     const DEVICE_SHUTDOWN_BUDGET: tokio::time::Duration = tokio::time::Duration::from_secs(20);
-    for rt in registry.runtimes() {
-        if tokio::time::timeout(DEVICE_SHUTDOWN_BUDGET, rt.shutdown()).await.is_err() {
-            log::warn!("exit: a device's safe teardown exceeded its 20 s budget");
-        }
-    }
+    registry.shutdown_all(DEVICE_SHUTDOWN_BUDGET).await;
 }
 
 /// Stop the continuous generator (if running) and wait until its loop exits, so
@@ -193,6 +191,38 @@ async fn connect_device(
     // the unit just opened, not "the default" (review F3): if a racing
     // connect already superseded this open, there is nothing left for this
     // command to monitor — the winner spawned its own.
+    if !desc.identity.is_virtual {
+        if let Ok(rt) = devices.runtime_for(Some(desc.id.as_str())) {
+            device::spawn_liveness_monitor(rt, move |lost| {
+                let _ = app_handle.emit("device-disconnected", lost);
+            });
+        }
+    }
+
+    Ok("Connected successfully".to_string())
+}
+
+/// Open `device_id` as an ADDITIONAL device on a free runtime slot (issue
+/// #25 lot E — the traces panel's add-device path). Unlike `connect_device`,
+/// the id is REQUIRED and a unit already open anywhere is rejected
+/// (`Device already open: <id>`) instead of superseded — adding must never
+/// steal an open unit's claim. Any enumerated unit qualifies, virtual
+/// included (a virtual unit never unplugs, so no monitor is spawned for it).
+#[tauri::command]
+async fn connect_additional_device(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: String,
+) -> Result<String, String> {
+    info!("Connect additional device command called ({device_id})");
+    let devices = { state.lock().await.devices.clone() };
+    let desc = devices
+        .open_additional(&device::DeviceId::from_wire(device_id))
+        .await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    // Watch THIS open for unplug — same rules as connect_device: resolved by
+    // the unit just opened (never "the default"), physical units only.
     if !desc.identity.is_virtual {
         if let Ok(rt) = devices.runtime_for(Some(desc.id.as_str())) {
             device::spawn_liveness_monitor(rt, move |lost| {
@@ -1246,6 +1276,7 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             connect_device,
+            connect_additional_device,
             connect_virtual_device,
             disconnect_device,
             is_hardware_present,
