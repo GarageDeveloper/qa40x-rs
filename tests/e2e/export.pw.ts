@@ -8,8 +8,10 @@
  *   - a trace ⤓ CSV export writes the frames-cache WIRE units (dBFS /
  *     full-scale samples) plus the derived absolute column, and names the
  *     trace's source in the header;
- *   - PNG export writes a real PNG file; "Copy image" hands the backend an
- *     RGBA buffer whose size matches its declared dimensions;
+ *   - PNG export writes a real PNG file; "Copy image" ships the same PNG
+ *     bytes (decoded backend-side for the clipboard);
+ *   - SVG export writes a standalone vector drawing with the provenance
+ *     block embedded in <metadata>;
  *   - a cancelled save dialog writes nothing (and breaks nothing);
  *   - the App drawer's Export section lists every displayed graph with the
  *     same actions (the "future export section" the drawer reserved).
@@ -55,12 +57,13 @@ test("tile ⤓ CSV: provenance header + display-unit columns", async ({ app }) =
   expect(lines.some((l) => l.startsWith("# window="))).toBe(true);
   expect(lines.some((l) => l.startsWith("# calibrated="))).toBe(true);
 
-  // Header row + at least one data row, '.' decimals (no locale commas:
-  // every non-comment row splits into exactly 2 cells).
+  // Header row + at least one data row: ';' separator + '.' decimals (the
+  // locale-proof pair — a comma-decimal spreadsheet opens it correctly),
+  // every non-comment row splitting into exactly 2 cells.
   const data = lines.filter((l) => l.length > 0 && !l.startsWith("#"));
-  expect(data[0]).toBe("frequency_hz,Input L (dBV)");
+  expect(data[0]).toBe("frequency_hz;Input L (dBV)");
   expect(data.length).toBeGreaterThan(10);
-  const cells = data[1].split(",");
+  const cells = data[1].split(";");
   expect(cells).toHaveLength(2);
   expect(Number.parseFloat(cells[0])).not.toBeNaN();
 });
@@ -79,7 +82,7 @@ test("scope tile ⤓ CSV: time_s + volts columns", async ({ app }) => {
   expect(lines).toContain("# unit=V");
 
   const data = lines.filter((l) => l.length > 0 && !l.startsWith("#"));
-  expect(data[0]).toBe("time_s,Input L (V)");
+  expect(data[0]).toBe("time_s;Input L (V)");
   // The file matches the DRAWN extent, not the whole capture (review
   // finding #3): default 10 ms window @ 48 kHz → exactly 480 samples, not
   // the 32 768-sample frame — and the window is in the provenance.
@@ -87,8 +90,8 @@ test("scope tile ⤓ CSV: time_s + volts columns", async ({ app }) => {
   expect(data.length).toBe(1 + 480);
   // The time axis starts at 0 and is strictly increasing — derived from the
   // series' own sample rate, not a stray index or the frequency axis.
-  const t0 = Number.parseFloat(data[1].split(",")[0]);
-  const t1 = Number.parseFloat(data[2].split(",")[0]);
+  const t0 = Number.parseFloat(data[1].split(";")[0]);
+  const t1 = Number.parseFloat(data[2].split(";")[0]);
   expect(t0).toBe(0);
   expect(t1).toBeGreaterThan(t0);
 });
@@ -114,7 +117,7 @@ test("tile ⤓ CSV in dBr mode: header and provenance carry the dBr unit", async
   expect(lines.some((l) => l.startsWith("# dbr_ref="))).toBe(true);
   expect(lines).toContain("# dbr_ref_unit=dBV");
   const data = lines.filter((l) => l.length > 0 && !l.startsWith("#"));
-  expect(data[0]).toBe("frequency_hz,Input L (dBr)");
+  expect(data[0]).toBe("frequency_hz;Input L (dBr)");
 });
 
 test("trace ⤓ CSV: wire units + derived absolute column + source line", async ({ app }) => {
@@ -128,7 +131,7 @@ test("trace ⤓ CSV: wire units + derived absolute column + source line", async 
   expect(lines).toContain("# trace_source=hardware input L");
   expect(lines.some((l) => l.startsWith("# trace_offset_dbv="))).toBe(true);
   expect(lines.filter((l) => !l.startsWith("#"))[0]).toBe(
-    "frequency_hz,magnitude_dbfs,magnitude_dbv"
+    "frequency_hz;magnitude_dbfs;magnitude_dbv"
   );
 
   // The same trace also offers its waveform (td) frame.
@@ -137,7 +140,25 @@ test("trace ⤓ CSV: wire units + derived absolute column + source line", async 
   f = (await app.exportedFiles())[1];
   lines = f.text.split("\n");
   expect(lines.some((l) => l.startsWith("# trace_sample_rate_hz=48000"))).toBe(true);
-  expect(lines.filter((l) => !l.startsWith("#"))[0]).toBe("time_s,amplitude_fs,amplitude_v");
+  expect(lines.filter((l) => !l.startsWith("#"))[0]).toBe("time_s;amplitude_fs;amplitude_v");
+});
+
+test("tile ⤓ SVG: a vector drawing with curves and embedded provenance", async ({ app }) => {
+  await app.setSelect("tile-export-tile-1", "svg");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [f] = await app.exportedFiles();
+
+  expect(f.path).toMatch(/^\/e2e\/qa40x-spectrum-\d{8}-\d{6}\.svg$/);
+  expect(f.text.startsWith("<svg xmlns=")).toBe(true);
+  // A real vector rendering: at least one curve path stroked in the Input L
+  // trace color, not a bitmap smuggled into an <image> tag.
+  expect(f.text).toContain('stroke="#3987e5"');
+  expect(f.text).toContain('<path d="M');
+  expect(f.text).not.toContain("<image");
+  // The SAME provenance block as the CSV export rides in <metadata>.
+  expect(f.text).toContain("# device_serial=E2E-FAKE-0001");
+  expect(f.text).toContain("# graph=spectrum");
+  expect(f.text).toContain("Input L");
 });
 
 test("tile ⤓ PNG writes a real PNG; Copy ships the same PNG lane", async ({

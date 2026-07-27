@@ -14,7 +14,7 @@ import type { Ipc } from "../../ipc/ipc";
 import { refreshRest, REST_TOKEN_KEY, setRestExposed, setRestToken } from "../../store/actions/rest";
 import { setTheme } from "../../store/actions/ui";
 import { visibleTiles } from "../../store/selectors/layout";
-import { copyTilePng, exportTileCsv, exportTilePng } from "../../export/export";
+import { copyTilePng, exportTileCsv, exportTilePng, exportTileSvg } from "../../export/export";
 import { openDrawer } from "../../ui/drawer";
 import { el } from "../../ui/dom";
 
@@ -123,6 +123,15 @@ export function openAppDrawer(store: Store<AppState>, ipc: Ipc): void {
               onclick: () => void exportTilePng(store, ipc, t.id),
             },
             "PNG…"
+          ),
+          el(
+            "button.btn.btn--small",
+            {
+              "data-testid": `app-export-svg-${t.id}`,
+              title: "Export the graph as a vector SVG drawing",
+              onclick: () => void exportTileSvg(store, ipc, t.id),
+            },
+            "SVG…"
           ),
           el(
             "button.btn.btn--small",

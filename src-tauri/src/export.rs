@@ -9,13 +9,13 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
-/// The only two things this app exports. Rejecting anything else keeps a
+/// The only things this app exports. Rejecting anything else keeps a
 /// hypothetical future frontend-content injection from escalating into an
 /// arbitrary file write (review hardening note) at zero UX cost: the save
 /// dialog's filters always produce one of these.
 fn allowed_extension(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.ends_with(".csv") || lower.ends_with(".png")
+    lower.ends_with(".csv") || lower.ends_with(".png") || lower.ends_with(".svg")
 }
 
 /// Write `contents_base64` (decoded) to `path` — the path comes from the
@@ -97,7 +97,14 @@ mod tests {
             .unwrap()
             .starts_with("# qa40x-rs data export"));
 
-        // Anything but .csv/.png is refused BEFORE touching the filesystem.
+        // .svg (the vector export lane) is also allowed.
+        let svg = dir.join("out.svg");
+        export_write_file(svg.to_string_lossy().into_owned(), B64.encode(b"<svg/>"))
+            .await
+            .expect("svg write");
+        assert!(svg.exists());
+
+        // Anything but .csv/.png/.svg is refused BEFORE touching the filesystem.
         let err = export_write_file(dir.join("out.sh").to_string_lossy().into_owned(), payload)
             .await
             .unwrap_err();

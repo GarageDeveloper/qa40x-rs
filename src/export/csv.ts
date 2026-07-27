@@ -15,8 +15,13 @@
  *
  * File shape (pattern borrowed from Phonalyser's `.fft`): `# key=value`
  * provenance comment lines, then one explicit-unit header row, then data
- * rows. `.` decimal separator always (JS number formatting), `,` field
- * separator, non-finite values (digital silence at -∞ dB) as empty cells.
+ * rows. `.` decimal separator always (JS number formatting), `;` field
+ * separator — NOT `,`: a comma-decimal locale's spreadsheet (French Excel/
+ * Numbers) treats `,` as the decimal mark and opens a comma-separated file
+ * as one column per row (maintainer report on PR #41); `;` is what those
+ * tools expect AND what Phonalyser's own exports use, with `.` decimals
+ * keeping the values locale-proof. Non-finite values (digital silence at
+ * -∞ dB) become empty cells.
  */
 import type { AppState, TraceMeta } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
@@ -33,9 +38,14 @@ export function numCell(v: number): string {
   return Number.isFinite(v) ? String(v) : "";
 }
 
-/** Quote a text cell only when it needs it (comma, quote, newline). */
+/** The field separator — see the module doc for why `;`, not `,`. */
+export const CSV_SEP = ";";
+
+/** Quote a text cell only when it needs it (separator, quote, newline —
+ * `,` too, so a comma-bearing label stays one cell for comma-separator
+ * parsers reading a `;` file). */
 export function textCell(s: string): string {
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /[";,\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 export interface CsvColumn {
@@ -47,9 +57,11 @@ export interface CsvColumn {
  * length are padded with empty cells (side-by-side series export). */
 export function columnsCsv(comments: string[], columns: CsvColumn[]): string {
   const rows = Math.max(0, ...columns.map((c) => c.values.length));
-  const out: string[] = [...comments, columns.map((c) => textCell(c.header)).join(",")];
+  const out: string[] = [...comments, columns.map((c) => textCell(c.header)).join(CSV_SEP)];
   for (let i = 0; i < rows; i++) {
-    out.push(columns.map((c) => (i < c.values.length ? numCell(c.values[i]) : "")).join(","));
+    out.push(
+      columns.map((c) => (i < c.values.length ? numCell(c.values[i]) : "")).join(CSV_SEP)
+    );
   }
   return out.join("\n") + "\n";
 }

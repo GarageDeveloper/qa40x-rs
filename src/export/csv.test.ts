@@ -89,7 +89,7 @@ describe("csv cells", () => {
       { header: "a", values: Float64Array.from([1, 2, 3]) },
       { header: "b", values: Float64Array.from([9]) },
     ]);
-    expect(rows(csv)).toEqual(["a,b", "1,9", "2,", "3,"]);
+    expect(rows(csv)).toEqual(["a;b", "1;9", "2;", "3;"]);
   });
 });
 
@@ -219,9 +219,9 @@ describe("tileSpectrumCsv", () => {
     const csv = tileSpectrumCsv(vm, ["# a=b"]);
     expect(rows(csv)).toEqual([
       "# a=b",
-      "frequency_hz,Input L (dBV),Input R (dBV)",
-      "0,-3,-9",
-      "10,-6,-12",
+      "frequency_hz;Input L (dBV);Input R (dBV)",
+      "0;-3;-9",
+      "10;-6;-12",
     ]);
   });
 
@@ -233,7 +233,7 @@ describe("tileSpectrumCsv", () => {
       series: [series("A", [0, 10], [-3, -6]), series("B", [0, 5, 10], [-1, -2, -3])],
     };
     const head = dataRows(tileSpectrumCsv(vm, []))[0];
-    expect(head).toBe("frequency_hz (A),A (dBFS),frequency_hz (B),B (dBFS)");
+    expect(head).toBe("frequency_hz (A);A (dBFS);frequency_hz (B);B (dBFS)");
   });
 
   it("quotes a series label that itself contains a comma", () => {
@@ -248,7 +248,7 @@ describe("tileSpectrumCsv", () => {
       series: [series("Left, 2nd", [0, 10], [-3, -6])],
     };
     const head = rows(tileSpectrumCsv(vm, []))[0];
-    expect(head).toBe('frequency_hz,"Left, 2nd (dBV)"');
+    expect(head).toBe('frequency_hz;"Left, 2nd (dBV)"');
   });
 });
 
@@ -299,11 +299,11 @@ describe("tileScopeCsv", () => {
       ],
     };
     expect(dataRows(tileScopeCsv(vm, []))).toEqual([
-      "time_s,Input L (V)",
-      "0,0",
-      "0.25,1",
-      "0.5,0",
-      "0.75,-1",
+      "time_s;Input L (V)",
+      "0;0",
+      "0.25;1",
+      "0.5;0",
+      "0.75;-1",
     ]);
   });
 });
@@ -331,9 +331,9 @@ describe("tileSweepCsv", () => {
       ],
     };
     expect(dataRows(tileSweepCsv(vm, []))).toEqual([
-      "frequency_hz,FR Left (dB),FR Left phase (deg)",
-      "20,-0.1,0",
-      "20000,-3,-90",
+      "frequency_hz;FR Left (dB);FR Left phase (deg)",
+      "20;-0.1;0",
+      "20000;-3;-90",
     ]);
   });
 
@@ -371,7 +371,7 @@ describe("tileSweepCsv", () => {
       ],
     };
     expect(dataRows(tileSweepCsv(vm, []))[0]).toBe(
-      "frequency_hz,THD dB (dB),THD pct (%)"
+      "frequency_hz;THD dB (dB);THD pct (%)"
     );
   });
 
@@ -411,11 +411,11 @@ describe("tileSweepCsv", () => {
     };
     const csvRows = dataRows(tileSweepCsv(vm, []));
     expect(csvRows[0]).toBe(
-      "frequency_hz (FR Left),FR Left (dB),FR Left phase (deg),frequency_hz (FR Right),FR Right (dB)"
+      "frequency_hz (FR Left);FR Left (dB);FR Left phase (deg);frequency_hz (FR Right);FR Right (dB)"
     );
     expect(csvRows).toHaveLength(4); // header + the longer series' 3 rows
     // The shorter series' row 3 pads with empty cells, not zeros.
-    expect(csvRows[3]).toBe("20000,-3,-90,,");
+    expect(csvRows[3]).toBe("20000;-3;-90;;");
   });
 });
 
@@ -430,14 +430,14 @@ describe("traceTdCsv", () => {
     const csv = traceTdCsv(meta({ offsetDb: 20 }), td, []);
     expect(rows(csv)).toEqual([
       "# trace_sample_rate_hz=2",
-      "time_s,amplitude_fs,amplitude_v",
-      "0,0.5,5",
-      "0.5,-0.5,-5",
+      "time_s;amplitude_fs;amplitude_v",
+      "0;0.5;5",
+      "0.5;-0.5;-5",
     ]);
   });
 
   it("omits the volts column with no converter offset yet", () => {
-    expect(dataRows(traceTdCsv(meta(), td, []))[0]).toBe("time_s,amplitude_fs");
+    expect(dataRows(traceTdCsv(meta(), td, []))[0]).toBe("time_s;amplitude_fs");
   });
 });
 
@@ -446,14 +446,14 @@ describe("traceFdCsv", () => {
 
   it("writes dBFS plus a derived dBV column when the offset is known", () => {
     expect(dataRows(traceFdCsv(meta({ offsetDb: 32 }), fd, [], false))).toEqual([
-      "frequency_hz,magnitude_dbfs,magnitude_dbv",
-      "100,-6,26",
+      "frequency_hz;magnitude_dbfs;magnitude_dbv",
+      "100;-6;26",
     ]);
   });
 
   it("labels a ratio trace relative — no absolute columns", () => {
     expect(dataRows(traceFdCsv(meta({ offsetDb: 32 }), fd, [], true))[0]).toBe(
-      "frequency_hz,magnitude_db_rel"
+      "frequency_hz;magnitude_db_rel"
     );
   });
 });
@@ -470,9 +470,9 @@ describe("traceSweepCsv", () => {
       yUnit: "%" as const,
     };
     expect(dataRows(traceSweepCsv(meta({ label: "W&F" }), sweep, [], "rateHz", "%"))).toEqual([
-      "rate_hz,W&F Left (%),W&F Right (%)",
-      "0.5,0.1,0.2",
-      "4,0.05,0.1",
+      "rate_hz;W&F Left (%);W&F Right (%)",
+      "0.5;0.1;0.2",
+      "4;0.05;0.1",
     ]);
   });
 
@@ -490,9 +490,9 @@ describe("traceSweepCsv", () => {
       yUnit: "dB" as const,
     };
     expect(dataRows(traceSweepCsv(meta({ label: "FR" }), sweep, [], "Hz", "dB"))).toEqual([
-      "frequency_hz,FR (dB),FR phase (deg)",
-      "20,-0.1,0",
-      "20000,-3,-90",
+      "frequency_hz;FR (dB);FR phase (deg)",
+      "20;-0.1;0",
+      "20000;-3;-90",
     ]);
   });
 });
