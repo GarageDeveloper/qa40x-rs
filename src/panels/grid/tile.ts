@@ -419,6 +419,12 @@ export function createTile(
   // measurement — side by side in the header; the strip keeps the chips
   // and their source picker.
   const strip = el("div.tile__strip", {}, chipsHost, chipSrcSel);
+  // Two DELIBERATE header rows (maintainer feedback on PR #41 — the
+  // flex-wrap fallback broke ⚙/❄/⛶ onto a second line at random points,
+  // differently per tile): row 1 drives the VIEW (kind/unit/scope
+  // controls, display toggles, freeze/focus/gear stay top-right where
+  // they always were), row 2 COMPOSES it (add trace ＋, add measurement
+  // Σ, export ⤓). Wrap stays on both rows as a narrow-window backstop.
   const root = el(
     "section.tile",
     { "data-testid": `tile-${tileId}` },
@@ -432,15 +438,13 @@ export function createTile(
       trigWrap,
       armBtn,
       el("span.tile__spacer"),
-      addSel,
-      chipAddSel,
       phaseBtn,
       harmBtn,
-      exportSel,
       freezeBtn,
       focusBtn,
       gearBtn
     ),
+    el("div.tile__head.tile__head--tools", {}, addSel, chipAddSel, exportSel),
     strip,
     chartHost,
     legend

@@ -93,15 +93,22 @@
   flex: none;
 }
 
-/* The header's control row WRAPS when the tile is narrower than its
+/* The header's control rows WRAP when the tile is narrower than their
  * controls (maintainer report: at the default 1440 px window the 2×2
- * grid's scope tiles clipped ⤓ ❄ ⛶ ⚙ behind the tile's overflow:hidden —
- * the head's min-content width grew past the tile with the lot A/B
- * trigger controls, then the export ⤓). Wrapping only engages when the
- * row no longer fits: wide windows render the same single row as before. */
+ * grid's scope tiles clipped ⤓ ❄ ⛶ ⚙ behind the tile's overflow:hidden).
+ * The split into a view row + a tools row below is deliberate (second
+ * maintainer pass): wrap alone broke ⚙/❄/⛶ onto a second line at
+ * arbitrary points, differently per tile kind. */
 .tile__head {
   flex-wrap: wrap;
   row-gap: 2px;
+}
+
+/* Second header row: compose/export tools (＋ trace, Σ measurement,
+ * ⤓ export) — tucked under the view row, no top padding so the pair
+ * reads as one header block. */
+.tile__head--tools {
+  padding-top: 0;
 }
 
 .tile__strip:empty {
