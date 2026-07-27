@@ -93,6 +93,17 @@
   flex: none;
 }
 
+/* The header's control row WRAPS when the tile is narrower than its
+ * controls (maintainer report: at the default 1440 px window the 2×2
+ * grid's scope tiles clipped ⤓ ❄ ⛶ ⚙ behind the tile's overflow:hidden —
+ * the head's min-content width grew past the tile with the lot A/B
+ * trigger controls, then the export ⤓). Wrapping only engages when the
+ * row no longer fits: wide windows render the same single row as before. */
+.tile__head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
 .tile__strip:empty {
   display: none;
 }
