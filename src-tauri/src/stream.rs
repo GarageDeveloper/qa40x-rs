@@ -419,6 +419,11 @@ pub struct StreamFrame {
     /// (Serialized as a JSON number — no frame count reaches 2^53.)
     #[ts(type = "number")]
     pub seq: u64,
+    /// The unit this frame was captured on (issue #25 lot C) — the frame
+    /// carries its device identity the same way it carries its own
+    /// [`LevelOffsetsDb`]. `None` when the device was opened outside the
+    /// registry (the examples' legacy path); lot D/E route on it.
+    pub device_id: Option<String>,
     pub captured: AudioData,
     /// The summed stimulus actually sent this frame (`None` in monitor mode).
     pub stimulus: Option<StereoFrame>,
@@ -511,6 +516,10 @@ pub struct StreamControl {
     device: Arc<Mutex<QA40xDevice>>,
     generator: crate::device::GeneratorFlags,
     mixer: Arc<std::sync::Mutex<Mixer>>,
+    /// The runtime's "what is open on me" cell — the loop stamps it into
+    /// every frame (a cheap std-lock read, never across an await). Shared
+    /// WITH the runtime, not a back-reference to it (no Arc cycle).
+    open_unit: crate::device::OpenUnitCell,
     running: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     /// Serializes start/stop transitions. Tauri commands run CONCURRENTLY:
@@ -539,11 +548,13 @@ impl StreamControl {
         device: Arc<Mutex<QA40xDevice>>,
         generator: crate::device::GeneratorFlags,
         mixer: Arc<std::sync::Mutex<Mixer>>,
+        open_unit: crate::device::OpenUnitCell,
     ) -> Self {
         Self {
             device,
             generator,
             mixer,
+            open_unit,
             running: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             control: Arc::new(Mutex::new(())),
@@ -1359,6 +1370,9 @@ async fn run_stream_loop(
 
         let msg = StreamMsg::Frame(Box::new(StreamFrame {
             seq,
+            // This frame's device identity, from the runtime's open-unit
+            // cell (std lock, held for a clone only).
+            device_id: ctl.open_unit.get().map(|id| id.as_str().to_string()),
             captured,
             stimulus,
             spectra: analysis.spectra,

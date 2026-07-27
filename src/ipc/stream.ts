@@ -31,6 +31,10 @@ export interface DecodedTd {
 /** One decoded frame, ready for the frames cache. */
 export interface DecodedFrame {
   seq: number;
+  /** The unit this frame was captured on (issue #25 lot C); null on an
+   * old/registry-less payload. Nothing consumes it yet — lot D/E route
+   * ingest by it. */
+  deviceId: string | null;
   sampleRate: number;
   input: { l: DecodedTd; r: DecodedTd };
   /** The summed stimulus actually sent; null in monitor mode. */
@@ -86,6 +90,7 @@ export function decodeFrame(msg: WireFrame): DecodedFrame {
   });
   return {
     seq: Number(msg.seq),
+    deviceId: msg.device_id ?? null,
     sampleRate,
     input: { l: td(msg.captured.left_channel), r: td(msg.captured.right_channel) },
     output: msg.stimulus

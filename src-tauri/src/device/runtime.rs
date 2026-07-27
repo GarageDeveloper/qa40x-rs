@@ -177,7 +177,13 @@ impl DeviceRuntime {
         let handle: DeviceHandle = Arc::new(TokioMutex::new(device));
         let mixer = Arc::new(StdMutex::new(Mixer::default()));
         let generator = GeneratorFlags::default();
-        let stream = StreamControl::new(handle.clone(), generator.clone(), mixer.clone());
+        let open_unit = OpenUnitCell::default();
+        let stream = StreamControl::new(
+            handle.clone(),
+            generator.clone(),
+            mixer.clone(),
+            open_unit.clone(),
+        );
         Self {
             inner: Arc::new(RuntimeInner {
                 handle,
@@ -186,7 +192,7 @@ impl DeviceRuntime {
                 generator,
                 sweep_cancel: Arc::new(AtomicBool::new(false)),
                 stream,
-                open_unit: OpenUnitCell::default(),
+                open_unit,
                 lifecycle_gate: LifecycleGate::new(()),
                 lifecycle: StdMutex::new(LifecycleState::default()),
                 #[cfg(test)]

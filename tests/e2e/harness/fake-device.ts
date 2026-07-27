@@ -1157,6 +1157,9 @@ export class FakeDevice {
     ch.onmessage({
       type: "frame",
       seq: this.streamSeq,
+      // Issue #25 lot C: every frame carries its device identity — the fake
+      // exercises the same contract as the real registry-stamped payload.
+      device_id: "virtual/E2E-FAKE-0001",
       captured: { left_channel: cap.left, right_channel: cap.right, sample_rate: sr },
       stimulus: tone ? { left, right } : null,
       spectra,
