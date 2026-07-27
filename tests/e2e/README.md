@@ -71,13 +71,17 @@ mixer slot rendering (sine/square/triangle/sawtooth/tones/noise/chirp/
 multitone at correct RMS levels, routed and summed), a range-correct
 loopback capture with a small noise floor, real windowed FFTs and crude
 derived metrics, telemetry, in-memory storage stubs. THREE measurement
-programs: the THD-vs-frequency sweep (`measure_thd_vs_frequency`), its
-sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) and wow &
-flutter (`measure_wow_flutter`, issue #28) — all stub RESULTS (used only by
-the device-lock family, the level-sweep spec and `wow-flutter.pw.ts`, which
-assert lock/plumbing semantics around them, never their numbers), gateable
-with `app.holdPrograms()` / `releasePrograms()` so the locked UI can be
-observed instead of raced.
+programs, same discipline (a stub RESULT, gateable with `app.holdPrograms()`
+/ `releasePrograms()` so the locked UI can be observed instead of raced,
+never asserted by value):
+- the THD-vs-frequency sweep (`measure_thd_vs_frequency`) — log-spaced
+  points at the ideal floor;
+- its sibling THD-vs-level sweep (`measure_thd_vs_level`, issue #27) —
+  linear dBFS steps at a fixed tone;
+- wow & flutter (`measure_wow_flutter`, issue #28) — synthesizes the result
+  of a known 4 Hz / 0.15 %-peak wow with the real backend's own
+  decimation/window/cap constants; genuinely cancellable while held (Stop
+  rejects it), unlike the instantaneous THD stubs.
 
 Does NOT: Rhai script execution (refused with a named error), other
 measurement programs / sweeps (unimplemented commands throw), converter

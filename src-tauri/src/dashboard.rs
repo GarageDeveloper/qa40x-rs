@@ -239,8 +239,11 @@ pub fn measure_frames(td: &Option<Frame>, fd: &Option<Frame>) -> FrameMeasures {
 /* Transform chain (Traces V2 Phase C — moved from src/dashboard/transform.ts) */
 /* -------------------------------------------------------------------------- */
 
-/// The frequency weighting a `TransformStep::Weighting` applies (the chain
-/// only offers the fixed curves; the USER curve is a display-side feature).
+/// The frequency weighting a `TransformStep::Weighting` applies. A/C/RIAA are
+/// the fixed curves; `User` carries an ad-hoc curve loaded by the user (issue
+/// #29 — the dashboard transformer's counterpart to `measure_levels`' A/C
+/// levels), supplied inline via the step's `curve` field (never module-global
+/// state — the caller owns it, like every other user-editable knob here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export)]
 #[serde(rename_all = "lowercase")]
@@ -248,6 +251,7 @@ pub enum WeightingStepMode {
     A,
     C,
     Riaa,
+    User,
 }
 
 impl From<WeightingStepMode> for crate::measurements::weighting::WeightingMode {
@@ -257,6 +261,7 @@ impl From<WeightingStepMode> for crate::measurements::weighting::WeightingMode {
             WeightingStepMode::A => W::A,
             WeightingStepMode::C => W::C,
             WeightingStepMode::Riaa => W::Riaa,
+            WeightingStepMode::User => W::User,
         }
     }
 }
@@ -266,8 +271,15 @@ impl From<WeightingStepMode> for crate::measurements::weighting::WeightingMode {
 #[ts(export)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TransformStep {
-    /// A / C / RIAA per-bin dB gain on the spectrum.
-    Weighting { mode: WeightingStepMode },
+    /// A / C / RIAA / User per-bin dB gain on the spectrum. `curve` is only
+    /// consulted for `WeightingStepMode::User`; absent (the common case)
+    /// serializes as no key at all rather than `null`.
+    Weighting {
+        mode: WeightingStepMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        curve: Option<crate::measurements::weighting::UserWeightingCurve>,
+    },
     /// RBJ biquad notch — filters the scope samples (td) and shapes the
     /// spectrum (fd) by the filter's response.
     Notch {
@@ -346,10 +358,29 @@ pub fn apply_transform_chain(
 
     for step in steps {
         match step {
-            TransformStep::Weighting { mode } => {
-                if let Some(Frame::Fd { freqs, mag_db, .. }) = fd.as_mut() {
-                    for (m, &f) in mag_db.iter_mut().zip(freqs.iter()) {
-                        *m += weighting_gain_db((*mode).into(), f as f64, None) as f32;
+            TransformStep::Weighting { mode, curve } => {
+                // A malformed user curve (freq ≤ 0, not strictly ascending,
+                // mismatched lengths) — reachable only via a hand-crafted
+                // `TransformStep` over IPC/REST, never through the
+                // frontend's own CSV import — is treated as NO weighting,
+                // the same policy as a deconvolve step whose reference is
+                // missing: never poison the spectrum with NaN (issue #29
+                // review finding #5). Validated ONCE here, not per bin.
+                let curve_ok = match (mode, curve) {
+                    (WeightingStepMode::User, Some(c)) => match c.validate() {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("transform chain: invalid user weighting curve, skipping: {e}");
+                            false
+                        }
+                    },
+                    _ => true,
+                };
+                if curve_ok {
+                    if let Some(Frame::Fd { freqs, mag_db, .. }) = fd.as_mut() {
+                        for (m, &f) in mag_db.iter_mut().zip(freqs.iter()) {
+                            *m += weighting_gain_db((*mode).into(), f as f64, curve.as_ref()) as f32;
+                        }
                     }
                 }
             }
@@ -502,16 +533,59 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        assert_eq!(steps[0], TransformStep::Weighting { mode: WeightingStepMode::A });
+        assert_eq!(
+            steps[0],
+            TransformStep::Weighting { mode: WeightingStepMode::A, curve: None }
+        );
         assert_eq!(steps[1], TransformStep::Notch { freq: 60.0, q: None });
         assert_eq!(steps[2], TransformStep::Deconvolve { r#ref: "hw-out-left".into() });
         assert!(matches!(&steps[3], TransformStep::Script { source } if source.contains("mag_db")));
         // riaa mode round-trips lowercase.
         let json = serde_json::to_string(&TransformStep::Weighting {
             mode: WeightingStepMode::Riaa,
+            curve: None,
         })
         .unwrap();
         assert!(json.contains("\"riaa\""), "got {json}");
+        // A step with no curve omits the key entirely (not `"curve":null`).
+        assert!(!json.contains("curve"), "got {json}");
+    }
+
+    #[test]
+    fn user_weighting_curve_round_trips_and_shapes_the_spectrum() {
+        use crate::measurements::weighting::UserWeightingCurve;
+        let curve = UserWeightingCurve { freqs: vec![100.0, 1000.0], gains: vec![0.0, 12.0] };
+        let step = TransformStep::Weighting {
+            mode: WeightingStepMode::User,
+            curve: Some(curve.clone()),
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("\"mode\":\"user\""), "got {json}");
+        assert!(json.contains("\"curve\""), "got {json}");
+        let back: TransformStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, step);
+
+        // Pinned: at 1 kHz the curve is +12 dB, applied on top of the input.
+        let (td, fd) = input_frames();
+        let out = apply_transform_chain(td, fd, &[step], &HashMap::new());
+        let Some(Frame::Fd { freqs, mag_db, .. }) = out.fd else { panic!("fd missing") };
+        let i = freqs.iter().position(|&f| f == 1000.0).unwrap();
+        assert!((mag_db[i] as f64 - (-3.0 + 12.0)).abs() < 1e-4, "got {}", mag_db[i]);
+    }
+
+    #[test]
+    fn an_invalid_user_curve_is_a_no_op_not_a_nan_spectrum() {
+        // freq 0 would poison ln() with NaN for a curve nobody validated
+        // (e.g. crafted straight over IPC/REST) — the chain must leave the
+        // spectrum untouched instead (issue #29 review finding #5).
+        use crate::measurements::weighting::UserWeightingCurve;
+        let curve = UserWeightingCurve { freqs: vec![0.0, 1000.0], gains: vec![0.0, 12.0] };
+        let (td, fd) = input_frames();
+        let step = TransformStep::Weighting { mode: WeightingStepMode::User, curve: Some(curve) };
+        let out = apply_transform_chain(td, fd.clone(), &[step], &HashMap::new());
+        assert_eq!(out.fd, fd, "invalid curve must leave the spectrum unchanged");
+        let Some(Frame::Fd { mag_db, .. }) = out.fd else { panic!("fd missing") };
+        assert!(mag_db.iter().all(|v| v.is_finite()), "got {mag_db:?}");
     }
 
     #[test]
@@ -521,7 +595,7 @@ mod tests {
         let out = apply_transform_chain(
             td.clone(),
             fd,
-            &[TransformStep::Weighting { mode: WeightingStepMode::A }],
+            &[TransformStep::Weighting { mode: WeightingStepMode::A, curve: None }],
             &HashMap::new(),
         );
         let Some(Frame::Fd { freqs, mag_db, .. }) = out.fd else { panic!("fd missing") };
@@ -616,7 +690,7 @@ mod tests {
             None,
             fd.clone(),
             &[
-                TransformStep::Weighting { mode: WeightingStepMode::A },
+                TransformStep::Weighting { mode: WeightingStepMode::A, curve: None },
                 TransformStep::Script { source: "mag_db.push(-1.0);".into() },
             ],
             &HashMap::new(),

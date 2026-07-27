@@ -13,11 +13,13 @@ import { clearAllFrames, putFrames } from "../../data/frames";
 import { clearAllMeasures } from "../../data/measures";
 import { clearTriggerSnapshots } from "../../data/triggered";
 import { resetAllChains, syncChains } from "../../data/chains";
+import { sanitizeUserCurve } from "../../core/weightingcurve";
 import type { Store } from "../store";
 import type { AppState } from "../state";
 import type { WorkspaceDoc } from "../persist";
 import {
   docToFrames,
+  isQuotaExceeded,
   loadCurrent,
   loadLegacyNamed,
   loadNamed,
@@ -27,6 +29,16 @@ import {
 } from "../persist";
 import { syncStream } from "./stream";
 import { toast } from "./ui";
+
+/** A quota-exceeded save is either a one-off (a huge curve on THIS save) or
+ * a standing condition (storage already full) — either way, warn once per
+ * session rather than on every 500 ms auto-save tick. */
+function quotaOrGenericMessage(action: string, e: unknown): string {
+  return isQuotaExceeded(e)
+    ? `${action} failed: local storage is full — free up space (a large imported ` +
+        "weighting curve is the usual cause) or clear an old saved workspace."
+    : `${action} failed: ${e}`;
+}
 
 /**
  * Replace the bench with `doc`. Refuses while a measurement program owns
@@ -90,6 +102,14 @@ export function applyWorkspaceDoc(
     layout: { ...doc.layout, focus: null },
     workspace: { name: doc.name, collapsed: [...doc.collapsed] },
     triggers: doc.triggers,
+    // Sanitized again here (not just trusting `migrate()` ran) — a
+    // template or any other caller can hand `applyWorkspaceDoc` a doc that
+    // never passed through `migrate()` (issue #29 review finding #5).
+    weighting: {
+      userCurve: sanitizeUserCurve(doc.userWeightingCurve),
+      userCurveName:
+        typeof doc.userWeightingCurveName === "string" ? doc.userWeightingCurveName : null,
+    },
   }));
 
   // A running stream keeps running and simply follows the new bench (its
@@ -122,8 +142,13 @@ export function saveWorkspaceAs(store: Store<AppState>, name: string): void {
   const trimmed = name.trim();
   if (!trimmed) return;
   setWorkspaceName(store, trimmed);
-  saveNamed(trimmed, snapshotWorkspace(store.get()));
-  toast(store, "success", `Workspace "${trimmed}" saved.`);
+  let error: unknown = null;
+  const ok = saveNamed(trimmed, snapshotWorkspace(store.get()), (e) => (error = e));
+  if (ok) {
+    toast(store, "success", `Workspace "${trimmed}" saved.`);
+  } else {
+    toast(store, "error", quotaOrGenericMessage(`Saving workspace "${trimmed}"`, error));
+  }
 }
 
 export function loadWorkspaceNamed(
@@ -163,6 +188,10 @@ const AUTO_SAVE_DEBOUNCE_MS = 500;
 export function initAutoSave(store: Store<AppState>): void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let lastJson = "";
+  // A full quota won't clear itself between ticks — warn once per session,
+  // not every 500 ms (issue #29 review finding #2), but keep trying: the
+  // user may have freed space (deleted a saved workspace) in the meantime.
+  let warned = false;
   store.subscribe(() => {
     if (timer !== null) return;
     timer = setTimeout(() => {
@@ -170,8 +199,15 @@ export function initAutoSave(store: Store<AppState>): void {
       const doc = snapshotWorkspace(store.get());
       const json = JSON.stringify(doc);
       if (json === lastJson) return;
-      lastJson = json;
-      saveCurrent(doc);
+      let error: unknown = null;
+      const ok = saveCurrent(doc, (e) => (error = e));
+      if (ok) {
+        lastJson = json;
+        warned = false;
+      } else if (!warned) {
+        warned = true;
+        toast(store, "error", quotaOrGenericMessage("Workspace auto-save", error));
+      }
     }, AUTO_SAVE_DEBOUNCE_MS);
   });
 }

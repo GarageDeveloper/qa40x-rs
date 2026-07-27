@@ -17,10 +17,11 @@
  * blob the old page still reads. Legacy saves stay visible read-only through
  * `listLegacyNamed()` + the importer.
  */
-import type { Frame, TransformStep } from "../gen";
+import type { Frame, TransformStep, UserWeightingCurve } from "../gen";
 import { classifyScriptRole } from "../core/scriptrole";
 import { getFrames, wireToFd, wireToSweep, wireToTd, type TraceFrames } from "../data/frames";
 import { measureByKey } from "../core/measure";
+import { sanitizeUserCurve } from "../core/weightingcurve";
 import type { FdUnit, TdUnit, TraceId } from "../core/model";
 import type {
   AcquisitionState,
@@ -96,6 +97,10 @@ export interface WorkspaceDoc {
    * `HW_TRACE_IDS.*`. `armEpoch` is normalized to 0 on save/load — a SINGLE
    * arm is a live-session gesture, never a saved-bench fact. */
   triggers: Record<TraceId, TriggerSettings>;
+  /** The bench's loaded user weighting curve (issue #29), or null if none
+   * was ever imported. `userWeightingCurveName` is display-only. */
+  userWeightingCurve: UserWeightingCurve | null;
+  userWeightingCurveName: string | null;
 }
 
 function framesToDoc(f: TraceFrames): PersistedFrames {
@@ -200,6 +205,8 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
     },
     refFrames,
     triggers,
+    userWeightingCurve: s.weighting.userCurve,
+    userWeightingCurveName: s.weighting.userCurveName,
   };
 }
 
@@ -646,6 +653,9 @@ export function importV4(ws: RawV4): WorkspaceDoc {
     refFrames,
     // Not a v4 concept — the trigger arrives with Lot A (issue #26).
     triggers: {},
+    // Not a v4 concept either (issue #29).
+    userWeightingCurve: null,
+    userWeightingCurveName: null,
   };
 }
 
@@ -718,6 +728,15 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   for (const t of Object.values(doc.triggers)) {
     if (t && typeof t === "object") t.armEpoch = 0;
   }
+  // A doc predating the user weighting curve (issue #29) has none — and
+  // ANY doc's curve gets the same shape/value validation as a fresh CSV
+  // import (typeof-checks, like this hook's other siblings, not just an
+  // `undefined` check — a hand-edited or corrupted blob must degrade to
+  // "no curve" rather than crash `describeUserCurve`/the transform dialog
+  // later, review finding #5).
+  doc.userWeightingCurve = sanitizeUserCurve(doc.userWeightingCurve);
+  doc.userWeightingCurveName =
+    typeof doc.userWeightingCurveName === "string" ? doc.userWeightingCurveName : null;
   return doc;
 }
 
@@ -734,13 +753,28 @@ function read(raw: string | null): WorkspaceDoc | null {
 /* Storage                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Auto-saved current workspace (restored on reload). */
-export function saveCurrent(doc: WorkspaceDoc): void {
+/** Auto-saved current workspace (restored on reload). Returns whether the
+ * write succeeded; `onError` (issue #29 review finding #2) lets the caller
+ * surface a QUOTA-EXCEEDED write (e.g. a huge embedded user curve) instead
+ * of it vanishing into an empty catch — the bench keeps running either way,
+ * but silently NOT auto-saving is its own kind of data loss. */
+export function saveCurrent(doc: WorkspaceDoc, onError?: (e: unknown) => void): boolean {
   try {
     localStorage.setItem(CURRENT_KEY, JSON.stringify(doc));
-  } catch {
-    /* storage full / disabled — non-fatal */
+    return true;
+  } catch (e) {
+    onError?.(e);
+    return false;
   }
+}
+
+/** True for a storage-quota write failure (`DOMException` name or the
+ * legacy numeric code some engines still use). */
+export function isQuotaExceeded(e: unknown): boolean {
+  return (
+    e instanceof DOMException &&
+    (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22)
+  );
 }
 
 /** The blob to restore at boot: the v2 current, else the LEGACY current
@@ -752,8 +786,17 @@ export function loadCurrent(): WorkspaceDoc | null {
   );
 }
 
-export function saveNamed(name: string, doc: WorkspaceDoc): void {
-  localStorage.setItem(SAVED_PREFIX + name, JSON.stringify({ ...doc, name }));
+/** Returns whether the write succeeded (same quota-safety contract as
+ * `saveCurrent` — a named save is a deliberate user action, so its caller
+ * MUST check this rather than assume success). */
+export function saveNamed(name: string, doc: WorkspaceDoc, onError?: (e: unknown) => void): boolean {
+  try {
+    localStorage.setItem(SAVED_PREFIX + name, JSON.stringify({ ...doc, name }));
+    return true;
+  } catch (e) {
+    onError?.(e);
+    return false;
+  }
 }
 
 export function loadNamed(name: string): WorkspaceDoc | null {

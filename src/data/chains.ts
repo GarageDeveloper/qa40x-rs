@@ -184,6 +184,39 @@ function scheduleRun(
 }
 
 /**
+ * A user weighting curve's cheap IDENTITY (issue #29 review finding #2):
+ * the watcher below stringifies its whole signature on EVERY store batch
+ * (every live frame, not just a chain edit) to detect changes — embedding
+ * the actual curve array there would re-serialize it that often too. Curve
+ * OBJECTS are only ever created at Apply time (core/transforms.ts snapshots
+ * one into the step); the same object reference rides unchanged through
+ * every batch until the next Apply, so a `WeakMap`-assigned integer id
+ * stands in for the whole array with the same change-detection power at
+ * O(1) instead of O(points).
+ */
+const curveIds = new WeakMap<object, number>();
+let nextCurveId = 1;
+function curveIdentity(curve: object): number {
+  let id = curveIds.get(curve);
+  if (id === undefined) {
+    id = nextCurveId++;
+    curveIds.set(curve, id);
+  }
+  return id;
+}
+
+/** A transform step, lightened for the watcher's signature: a "user"
+ * weighting step's curve array is replaced by its cheap identity number
+ * (see `curveIdentity`) — every other step shape is small already and
+ * rides through unchanged. */
+function lightStep(step: TransformStep): unknown {
+  if (step.type === "weighting" && step.mode === "user" && step.curve) {
+    return { ...step, curve: curveIdentity(step.curve) };
+  }
+  return step;
+}
+
+/**
  * Mount the chain watcher: recompute when any transform definition, any
  * input's freshness, or a deconvolve reference moves. One subscription for
  * the whole pool (signature-keyed, fires once per store batch).
@@ -198,7 +231,8 @@ export function watchChains(store: Store<AppState>, ipc: Ipc): void {
         const refSeqs = t.source.steps
           .filter((st) => st.type === "deconvolve")
           .map((st) => (st.type === "deconvolve" ? (s.traces.byId[st.ref]?.seq ?? -1) : -1));
-        sig.push([id, t.source, s.traces.byId[t.source.input]?.seq ?? -1, refSeqs]);
+        const lightSource = { ...t.source, steps: t.source.steps.map(lightStep) };
+        sig.push([id, lightSource, s.traces.byId[t.source.input]?.seq ?? -1, refSeqs]);
       }
       return JSON.stringify(sig);
     },

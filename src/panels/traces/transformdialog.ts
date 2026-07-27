@@ -7,6 +7,8 @@
  * model itself is an ordered `TransformStep[]`, so a richer editor can
  * replace this without a schema change.
  */
+import "./transformdialog.css";
+import type { UserWeightingCurve } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import type { AppState } from "../../store/state";
@@ -15,7 +17,10 @@ import {
   stepsToDialogModel,
   transformLabel,
 } from "../../core/transforms";
+import { describeUserCurve, parseUserCurveCsv } from "../../core/weightingcurve";
 import { configureTransform } from "../../store/actions/traces";
+import { setUserWeightingCurve } from "../../store/actions/weighting";
+import { toast } from "../../store/actions/ui";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
 
@@ -54,9 +59,71 @@ export function openTransformDialog(
     el("option", { value: "none" }, "None (Z)"),
     el("option", { value: "a" }, "A-weighting"),
     el("option", { value: "c" }, "C-weighting"),
-    el("option", { value: "riaa" }, "RIAA de-emphasis")
+    el("option", { value: "riaa" }, "RIAA de-emphasis"),
+    el("option", { value: "user" }, "User curve…")
   );
   weighting.value = model.weighting;
+
+  // STAGED, not committed (review finding #7): a freshly-picked file only
+  // lives in this dialog's own local state until Apply — never writes
+  // `s.weighting` (and so never the auto-save) on a mere file choice, so
+  // Cancel truly cancels. Seeded from THIS STEP's own embedded curve when
+  // it was already "user" (never silently substituted for whatever the
+  // bench currently holds, even if the step's own curve is null — review
+  // finding #6); a step that ISN'T "user" yet prefills from the bench as a
+  // convenience for switching the select to "User curve…" in THIS session.
+  let stagedCurve: UserWeightingCurve | null =
+    model.weighting === "user" ? model.userCurve : s.weighting.userCurve;
+  let stagedCurveName: string | null =
+    model.weighting === "user" ? null : s.weighting.userCurveName;
+
+  const userCurveFile = el("input", {
+    type: "file",
+    accept: ".csv,text/csv",
+    "data-testid": `fx-usercurve-file-${id}`,
+    title: 'Import a "freq_hz, gain_db" CSV — staged here, committed to the bench on Apply',
+  }) as HTMLInputElement;
+  // Always present, no layout shift: "No curve loaded" / a point-count
+  // summary / a parse error, but the row itself never appears or vanishes.
+  const userCurveStatus = el(
+    "span.transformdialog__usercurve-status",
+    { "data-testid": `fx-usercurve-status-${id}` },
+    describeUserCurve(stagedCurve)
+  );
+  userCurveFile.addEventListener("change", () => {
+    const file = userCurveFile.files?.[0];
+    userCurveFile.value = ""; // allow re-picking the same file
+    if (!file) return;
+    void file.text().then((text) => {
+      const parsed = parseUserCurveCsv(text);
+      if ("error" in parsed) {
+        userCurveStatus.textContent = `"${file.name}": ${parsed.error}`;
+        toast(store, "error", `Could not read "${file.name}": ${parsed.error}`);
+        return;
+      }
+      stagedCurve = parsed.curve;
+      stagedCurveName = file.name;
+      // Nobody imports a curve for any other reason: a successful import
+      // selects "User curve…" so Apply can't silently build an unweighted
+      // chain because the select was left on its default (field-tested:
+      // exactly what happened on the ITU-R 468 first try).
+      weighting.value = "user";
+      const parts = [describeUserCurve(stagedCurve)];
+      if (parsed.decimated) {
+        parts.push(`decimated from ${parsed.originalPoints}`);
+      }
+      if (parsed.skipped > 0) {
+        parts.push(`${parsed.skipped} row(s) skipped`);
+      }
+      userCurveStatus.textContent = `"${file.name}": ${parts.join(", ")}`;
+    });
+  });
+  const userCurveRow = el(
+    "div.transformdialog__usercurve",
+    {},
+    userCurveFile,
+    userCurveStatus
+  );
 
   const notch = el("input", { type: "checkbox", "data-testid": `fx-notch-${id}` });
   notch.checked = model.notch;
@@ -85,7 +152,8 @@ export function openTransformDialog(
 
   const readModel = () => ({
     input: input.value,
-    weighting: weighting.value as "none" | "a" | "c" | "riaa",
+    weighting: weighting.value as "none" | "a" | "c" | "riaa" | "user",
+    userCurve: stagedCurve,
     notch: notch.checked,
     notchFreq: Number(notchFreq.value) || 60,
     deconvolve: deconvolve.value,
@@ -97,7 +165,24 @@ export function openTransformDialog(
     {
       "data-testid": `fx-apply-${id}`,
       onclick: () => {
+        // Review finding #6: "User curve…" with nothing staged must refuse,
+        // clearly — never silently drop the weighting step or (worse, on a
+        // re-edit) silently pick up whatever the bench happens to hold now.
+        if (weighting.value === "user" && !stagedCurve) {
+          toast(
+            store,
+            "error",
+            "Pick a \"freq_hz, gain_db\" CSV for the user curve before applying."
+          );
+          return;
+        }
         const steps = dialogModelToSteps(readModel());
+        // Only committed to the bench NOW — Cancel never touched it, and a
+        // re-applied EXISTING curve (no new file picked this session) is
+        // still worth keeping as the bench default (review finding #7).
+        if (weighting.value === "user" && stagedCurve) {
+          setUserWeightingCurve(store, stagedCurveName ?? "user curve", stagedCurve);
+        }
         // The label follows the chain until the user renames it by hand.
         const auto = name.value.trim() === "" || name.value === t.label;
         const stillAuto = t.label === transformLabel(t.source.kind === "transform" ? t.source.steps : []);
@@ -120,6 +205,7 @@ export function openTransformDialog(
       row("Name", name),
       row("Input trace", input),
       row("Weighting", weighting),
+      row("User curve", userCurveRow),
       row("Notch (hum removal)", notch),
       row("Notch frequency (Hz)", notchFreq),
       row("Deconvolve by", deconvolve),

@@ -169,7 +169,6 @@ export interface Commands {
     };
     result: WowFlutterResult;
   };
-
   // Measurement scripts (M4): the run streams `script-log` / `script-frame`
   // / `script-state` events; one script at a time.
   script_run: { args: { source: string; role: ScriptRole }; result: null };

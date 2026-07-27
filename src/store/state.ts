@@ -18,6 +18,7 @@ import type {
   Telemetry,
   TransformStep,
   TriggerState,
+  UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
 
@@ -406,6 +407,20 @@ export interface UiState {
   peakHoldEpoch: number;
 }
 
+/**
+ * The frontend's currently loaded user weighting curve (issue #29): display
+ * configuration, persisted in the WORKSPACE document (never keyed on "the
+ * device" — issue #25 — a curve is a bench-wide setting, like a notch's Q).
+ * `name` is display-only (the imported file's name); the backend never sees
+ * it — each `TransformStep::Weighting { mode: "user" }` step embeds its own
+ * snapshot of `curve` at Apply time, so the backend stays a pure function of
+ * its parameters.
+ */
+export interface WeightingState {
+  userCurve: UserWeightingCurve | null;
+  userCurveName: string | null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Layout (M3): the multi-tile graph grid.                              */
 /* ------------------------------------------------------------------ */
@@ -514,6 +529,8 @@ export interface AppState {
   /** Per-endpoint trigger settings, keyed by `HW_TRACE_IDS.*` (plan §3.2).
    * Read-through default: an absent entry means `DEFAULT_TRIGGER` ("off"). */
   triggers: Record<TraceId, TriggerSettings>;
+  /** The bench's loaded user weighting curve (issue #29), workspace-persisted. */
+  weighting: WeightingState;
 }
 
 export const FFT_SIZES = [
@@ -718,5 +735,6 @@ export function initialState(): AppState {
       peakHoldEpoch: 0,
     },
     triggers: {},
+    weighting: { userCurve: null, userCurveName: null },
   };
 }

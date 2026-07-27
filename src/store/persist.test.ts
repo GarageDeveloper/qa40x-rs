@@ -5,12 +5,19 @@
  * without losing anything the user can see, and a v1-era blob walks the
  * whole chain v1 → v4 → v5.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import v4Blob from "../../tests/e2e/fixtures/workspace-v4.json";
 import { Store } from "./store";
 import type { AppState, SweepProgram } from "./state";
 import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, initialState } from "./state";
-import { migrate, snapshotWorkspace, WS_VERSION } from "./persist";
+import {
+  isQuotaExceeded,
+  migrate,
+  saveCurrent,
+  saveNamed,
+  snapshotWorkspace,
+  WS_VERSION,
+} from "./persist";
 import { applyWorkspaceDoc } from "./actions/workspace";
 import { addProgram, removeProgram } from "./actions/programs";
 import { freezeTrace } from "./actions/traces";
@@ -229,6 +236,82 @@ describe("v5 in-version hook: THD level-axis additions (issue #27)", () => {
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
     expect(snapshotWorkspace(dest.get())).toEqual(doc);
+  });
+});
+
+describe("v5 in-version hook: user weighting curve (issue #29)", () => {
+  it("carries the loaded curve through the round trip", () => {
+    const store = freshStore();
+    store.update("test/curve", (s) => ({
+      ...s,
+      weighting: {
+        userCurve: { freqs: [100, 1000], gains: [0, 6] },
+        userCurveName: "my-curve.csv",
+      },
+    }));
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))));
+    expect(doc!.userWeightingCurve).toEqual({ freqs: [100, 1000], gains: [0, 6] });
+    expect(doc!.userWeightingCurveName).toBe("my-curve.csv");
+
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
+    expect(dest.get().weighting).toEqual({
+      userCurve: { freqs: [100, 1000], gains: [0, 6] },
+      userCurveName: "my-curve.csv",
+    });
+  });
+
+  it("a doc predating the curve (no key at all) loads with none", () => {
+    const raw = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    delete raw.userWeightingCurve;
+    delete raw.userWeightingCurveName;
+    const doc = migrate(raw);
+    expect(doc).not.toBeNull();
+    expect(doc!.userWeightingCurve).toBeNull();
+    expect(doc!.userWeightingCurveName).toBeNull();
+  });
+
+  // Review finding #5: migrate() must actually VALIDATE the curve's shape
+  // (typeof-checks, like every other in-version-hook sibling), not just an
+  // `=== undefined` check — a hand-edited or corrupted blob must degrade to
+  // "no curve" instead of poisoning `describeUserCurve`/the transform
+  // dialog with garbage later.
+  it("a malformed userWeightingCurve degrades to null instead of surviving the round trip", () => {
+    const bad = [
+      { freqs: "not-an-array", gains: [0, 12] },
+      { freqs: [100, 1000], gains: [0] }, // mismatched length
+      { freqs: [0, 1000], gains: [0, 12] }, // freq 0 -> ln() NaN
+      { freqs: [1000, 100], gains: [0, 12] }, // not ascending
+      "just a string",
+      42,
+      {},
+    ];
+    for (const value of bad) {
+      const raw = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+      raw.userWeightingCurve = value;
+      const doc = migrate(raw);
+      expect(doc, JSON.stringify(value)).not.toBeNull();
+      expect(doc!.userWeightingCurve, JSON.stringify(value)).toBeNull();
+    }
+  });
+
+  it("a non-string userWeightingCurveName degrades to null", () => {
+    const raw = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    raw.userWeightingCurveName = 42;
+    const doc = migrate(raw);
+    expect(doc!.userWeightingCurveName).toBeNull();
+  });
+
+  it("applyWorkspaceDoc re-sanitizes even a doc that skipped migrate() (e.g. a template)", () => {
+    const dest = freshStore();
+    const doc = {
+      ...migrate(JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get()))))!,
+      userWeightingCurve: { freqs: [0, 1000], gains: [0, 12] }, // invalid, bypassing migrate()
+      userWeightingCurveName: 42 as unknown as string,
+    };
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(dest.get().weighting.userCurve).toBeNull();
+    expect(dest.get().weighting.userCurveName).toBeNull();
   });
 });
 
@@ -453,5 +536,77 @@ describe("issue #27 review finding #1: a level sweep's x-axis survives freeze + 
     const vm = sweepVM(dest.get(), { ...t, kind: "sweep", traces: [memId!] });
     expect(vm.xUnit).toBe("dBFS");
     expect(Array.from(vm.series[0].x)).toEqual([-60, -30, 0]);
+  });
+});
+
+describe("saveCurrent / saveNamed — quota-exceeded is reported, not swallowed (issue #29 review finding #2)", () => {
+  // Stubs the WHOLE global rather than spying on the runtime's own
+  // `Storage.prototype` — this suite doesn't rely on (or fight with)
+  // whatever localStorage backing the current Node/Vitest environment
+  // happens to provide.
+  function fakeLocalStorage(setItem: (k: string, v: string) => void): Storage {
+    const map = new Map<string, string>();
+    return {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem,
+      removeItem: (k: string) => void map.delete(k),
+      clear: () => map.clear(),
+      key: (i: number) => Array.from(map.keys())[i] ?? null,
+      get length() {
+        return map.size;
+      },
+    } as Storage;
+  }
+
+  function quotaError(): DOMException {
+    return new DOMException("The quota has been exceeded.", "QuotaExceededError");
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("saveCurrent returns true and calls no error callback on a normal write", () => {
+    const written = new Map<string, string>();
+    vi.stubGlobal(
+      "localStorage",
+      fakeLocalStorage((k, v) => void written.set(k, v))
+    );
+    const onError = vi.fn();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
+    expect(saveCurrent(doc, onError)).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    expect(written.size).toBe(1);
+  });
+
+  it("saveCurrent returns false and reports the error when localStorage throws", () => {
+    vi.stubGlobal(
+      "localStorage",
+      fakeLocalStorage(() => {
+        throw quotaError();
+      })
+    );
+    const onError = vi.fn();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
+    expect(saveCurrent(doc, onError)).toBe(false);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(isQuotaExceeded(onError.mock.calls[0][0])).toBe(true);
+  });
+
+  it("saveNamed also reports (never throws uncaught) on a quota failure", () => {
+    vi.stubGlobal(
+      "localStorage",
+      fakeLocalStorage(() => {
+        throw quotaError();
+      })
+    );
+    const onError = vi.fn();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(new Store(initialState()).get()))))!;
+    expect(() => saveNamed("bench", doc, onError)).not.toThrow();
+    expect(saveNamed("bench", doc, onError)).toBe(false);
+    expect(isQuotaExceeded(onError.mock.calls[0][0])).toBe(true);
+  });
+
+  it("isQuotaExceeded is false for an unrelated error", () => {
+    expect(isQuotaExceeded(new Error("network down"))).toBe(false);
+    expect(isQuotaExceeded("not even an Error")).toBe(false);
   });
 });
