@@ -44,21 +44,33 @@ export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesStat
   return { ...next, primary: derivePrimary(next) };
 }
 
+/** Monotonic enumeration sequencing (reviewer finding #1): refreshes
+ * overlap routinely (the 2 s tick vs the connect/disconnect/device-lost
+ * refreshes), and a STALE answer landing last must not resurrect a unit
+ * that a fresher scan already saw unplugged — the picker would appear for
+ * a ghost, and a stale pick would ride `connect_device` into a sticky
+ * error toast. Newest-STARTED wins; older answers are dropped. */
+let refreshStarted = 0;
+let refreshApplied = 0;
+
 /**
- * Enumerate and fold. Tolerant: a failed call keeps the last list (the bar
- * must not flicker empty on a transient USB error) and only clears the
- * in-flight flag.
+ * Enumerate and fold. Tolerant: a failed or superseded call keeps the last
+ * list (the bar must not flicker empty on a transient USB error) and only
+ * clears the in-flight flag.
  */
 export async function refreshDevices(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
+  const seq = ++refreshStarted;
   store.update("devices/enumerating", (s) => ({
     ...s,
     devices: { ...s.devices, enumerating: true },
   }));
   try {
     const list = await ipc.call("list_devices", {});
+    if (seq <= refreshApplied) return; // superseded by a fresher answer
+    refreshApplied = seq;
     store.update("devices/refreshed", (s) => ({
       ...s,
       devices: deriveDevices(s.devices, list),

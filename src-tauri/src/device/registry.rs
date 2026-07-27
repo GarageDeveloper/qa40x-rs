@@ -133,9 +133,17 @@ impl DeviceRegistry {
     /// union with the OPEN unit's entry substituted by its ENRICHED
     /// descriptor (firmware version + calibration source, knowable only from
     /// an open — [`DeviceSource::open`] returns it and the runtime keeps it).
-    /// An open unit that stopped enumerating (unplugged mid-teardown) is
-    /// appended rather than dropped: the bar must keep showing what the app
-    /// is still connected to.
+    /// An open unit that stopped enumerating (unplugged mid-teardown, or its
+    /// whole source erroring) is appended rather than dropped, in open order:
+    /// the bar must keep showing what the app is still connected to.
+    ///
+    /// Substitution matches on the exact wire id. Known caveat (lot-D
+    /// review #2, deliberate): when a serial-twin appears, `usb::keys_for`
+    /// promotes both twins' keys to path-suffixed ids, so the open unit's
+    /// OLD id no longer enumerates and it is appended alongside its own
+    /// re-keyed entry — the bar briefly shows a ghost until reconnect.
+    /// Matching by serial instead would mis-substitute exactly in the twin
+    /// case that causes the re-key; revisit with lot E's per-unit runtimes.
     pub async fn list(&self) -> DeviceList {
         // Open units first (lot C: at most one), keyed for substitution.
         let mut open_descs: std::collections::HashMap<String, DeviceDescriptor> =
@@ -175,8 +183,14 @@ impl DeviceRegistry {
             }
         }
 
-        // Whatever is open but no longer enumerable stays listed.
-        for desc in open_descs.into_values() {
+        // Whatever is open but no longer enumerable stays listed — iterated
+        // in OPEN order (not HashMap order) so the appended tail is stable
+        // across refreshes and the frontend's option list never jitters.
+        for id in &open_ids {
+            let Some(desc) = open_descs.remove(id) else { continue };
+            if !seen.insert(desc.id.clone()) {
+                continue; // already listed (defensive — lot E's N runtimes)
+            }
             let (kind, label) = self
                 .inner
                 .sources

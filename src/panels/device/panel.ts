@@ -68,8 +68,11 @@ function setOptions(
   current: number | null
 ): void {
   // Before the first enumeration lands (capabilities not known yet) the
-  // list is empty: render ONE disabled placeholder so the closed select
-  // keeps a sane width — the control never collapses (no layout shift).
+  // list is empty: render ONE disabled placeholder so the control never
+  // collapses to zero width. (Honest limit, review #8: the placeholder is
+  // narrower than a real entry, so the pathological slow-boot path still
+  // widens the bar when the scan lands — accepted; the NORMAL boot awaits
+  // the enumeration before the panel mounts, so this branch never shows.)
   const sig = values.length ? values.join(",") : "empty";
   if (sel.dataset.sig !== sig) {
     sel.dataset.sig = sig;
@@ -79,7 +82,10 @@ function setOptions(
         : [el("option", { value: "", disabled: true }, "—")])
     );
   }
-  if (current !== null && values.length) sel.value = String(current);
+  // Only adopt `current` when it is actually offered — assigning a missing
+  // value would render the select BLANK (selectedIndex −1), worse than
+  // keeping the previous selection (review #3).
+  if (current !== null && values.includes(current)) sel.value = String(current);
 }
 
 export function mountDevicePanel(
@@ -255,9 +261,13 @@ export function mountDevicePanel(
   );
 
   store.select(
+    // Scalar-only selection (review #5): an allocated array per evaluation
+    // would defeat shallowEq and re-fire this on EVERY store batch — per
+    // frame during a capture. The id signature is the rebuild trigger; the
+    // entries are read back off the store inside the callback.
     (s) => ({
       show: showDevicePicker(s),
-      units: availableEntries(s),
+      sig: s.devices.available.join("|"),
       // While connected the picker mirrors the OPEN unit (= the primary,
       // rule P1); disconnected it shows the user's pick, else the primary.
       value:
@@ -266,10 +276,10 @@ export function mountDevicePanel(
           : s.devices.primary,
       connected: s.device.status !== "disconnected",
     }),
-    ({ show, units, value, connected }) => {
+    ({ show, sig, value, connected }) => {
       unitSel.classList.toggle("u-hidden", !show);
       unitSel.toggleAttribute("disabled", connected);
-      const sig = units.map((u) => u.id).join("|");
+      const units = availableEntries(store.get());
       if (unitSel.dataset.sig !== sig) {
         unitSel.dataset.sig = sig;
         unitSel.replaceChildren(

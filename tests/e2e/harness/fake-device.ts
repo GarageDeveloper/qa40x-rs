@@ -426,10 +426,10 @@ export class FakeDevice {
     switch (cmd) {
       /* -- presence / connection -- */
       case "is_device_present":
-        return this.present;
+        return this.present && this.unitCount > 0;
       case "is_hardware_present":
         // The bus device, never the virtual one — mirrors the backend.
-        return this.present;
+        return this.present && this.unitCount > 0;
       case "is_device_connected":
         return this.connected;
       case "connect_device": {
@@ -446,11 +446,13 @@ export class FakeDevice {
           this.openId = wanted;
           return "Connected to the virtual QA40x (e2e fake device)";
         }
-        if (!this.present) throw new Error("No QA40x on the bus (fake)");
+        const first = this.physicalIds()[0];
+        if (!this.present || first === undefined)
+          throw new Error("No QA40x on the bus (fake)");
         this.connected = true;
         this.config.input_gain = 42; // connect forces the safe input range
         this.virtualDevice = false;
-        this.openId = wanted ?? this.physicalIds()[0];
+        this.openId = wanted ?? first;
         return "Connected to QA402 (e2e fake device)";
       }
       case "connect_virtual_device":
@@ -472,23 +474,32 @@ export class FakeDevice {
         this.stopStream(true);
         this.generatorRunning = false;
         return "Disconnected (e2e fake device)";
-      case "get_device_info":
+      case "get_device_info": {
+        // Identity follows the OPEN unit (lot D review #6): a spec pinning
+        // "the bar names the unit you picked" must fail against a fake
+        // reporting the wrong unit. The virtual unit is the QA403 of the
+        // real demo backend.
+        const model = this.virtualDevice ? "QA403" : "QA402";
+        const rates = this.virtualDevice
+          ? [48000, 96000, 192000, 384000]
+          : [48000, 96000, 192000];
         return {
-          model: "QA402",
+          model,
           firmware_version: 991,
-          serial: "E2E-FAKE-0001",
+          serial: this.openId?.split("/")[1] ?? "E2E-FAKE-0001",
           is_virtual: this.virtualDevice,
-          product: "QA402 Audio Analyzer (e2e fake)",
-          sample_rates: [48000, 96000, 192000],
+          product: `${model} Audio Analyzer (e2e fake)`,
+          sample_rates: rates,
           supports_flash: false,
           capabilities: {
             min_output_vrms: 1e-6,
             max_output_vrms: 7.943,
             min_measurement_hz: 5,
-            max_measurement_hz: 96000,
-            sample_rate: 192000,
+            max_measurement_hz: rates[rates.length - 1] / 2,
+            sample_rate: rates[rates.length - 1],
           },
         };
+      }
 
       /* -- config registers -- */
       case "get_device_config":

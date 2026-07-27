@@ -176,11 +176,17 @@ export async function mountApp(
   void autoConnectTick(store, ipc);
   setInterval(() => {
     void autoConnectTick(store, ipc);
-    // Re-enumerate on the same cadence, but ONLY while idle: a bus scan
-    // must never be added to a running capture or program (#25 lot D).
+    // Re-enumerate on the same cadence, but only while GUI-idle. The scan
+    // is an OS enumeration with no device I/O, so this gate is about not
+    // ADDING work during a run, not about protecting the capture; it can't
+    // see REST/script sessions (backend-owned) — harmless for the same
+    // reason (#25 lot D review #7).
     const s = store.get();
     if (
       !s.run.streaming &&
+      !s.run.stopping &&
+      !s.run.generatorRunning &&
+      !s.run.outputOnly &&
       s.run.programLock === null &&
       s.device.status !== "connecting"
     ) {

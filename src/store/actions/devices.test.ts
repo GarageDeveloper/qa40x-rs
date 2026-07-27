@@ -125,12 +125,13 @@ describe("refreshDevices", () => {
     expect(store.get().devices.enumerating).toBe(false);
   });
 
-  it("two overlapping refreshes: the LAST answer to resolve wins the state, and `enumerating` ends false either way", async () => {
-    // Two ticks fire close together (boot tick + a manual refresh, say).
-    // Nothing serializes the two `ipc.call`s, so whichever PROMISE resolves
-    // last decides the final fold — that's the accepted last-write-wins
-    // behavior. The one invariant that must hold regardless of ordering is
-    // that `enumerating` never gets stuck true.
+  it("two overlapping refreshes: the NEWEST-STARTED request wins and a stale answer is dropped (review #1)", async () => {
+    // Two refreshes overlap routinely (the 2 s tick vs a lifecycle
+    // refresh). The FIRST request's answer landing last is the dangerous
+    // ordering: unguarded, its stale snapshot would resurrect a unit a
+    // fresher scan already saw unplugged (ghost picker entry, stale pick
+    // riding connect_device into a sticky error toast). The monotonic
+    // guard drops it; `enumerating` must still end false.
     const store = new Store(initialState(), { freeze: true });
     let resolveA!: (v: DeviceList) => void;
     let resolveB!: (v: DeviceList) => void;
@@ -141,18 +142,16 @@ describe("refreshDevices", () => {
       call: () => (n++ === 0 ? answerA : answerB) as never,
     };
 
-    const p1 = refreshDevices(store, ipc);
-    const p2 = refreshDevices(store, ipc);
+    const p1 = refreshDevices(store, ipc); // stale scan: still sees A+B
+    const p2 = refreshDevices(store, ipc); // fresh scan: B was unplugged
     expect(store.get().devices.enumerating).toBe(true);
 
-    // The SECOND call's answer lands first, the FIRST call's answer lands
-    // last — so the final state must reflect A, not B, even though A was
-    // requested first.
-    resolveB(list(fakeEntry("usb/B")));
+    resolveB(list(fakeEntry("usb/A")));
     await p2;
-    resolveA(list(fakeEntry("usb/A")));
+    resolveA(list(fakeEntry("usb/A"), fakeEntry("usb/B")));
     await p1;
 
+    // The fresh answer sticks; the stale one must NOT re-list usb/B.
     expect(store.get().devices.available).toEqual(["usb/A"]);
     expect(store.get().devices.primary).toBe("usb/A");
     expect(store.get().devices.enumerating).toBe(false);

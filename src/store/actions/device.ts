@@ -67,6 +67,17 @@ export async function connect(
       ...s,
       device: { ...s.device, status: "connected", present: true, info },
     }));
+    // An explicit pick can open the VIRTUAL unit through this path too
+    // (review #4): seed the demo hand-over baseline exactly like
+    // connectVirtual, or a stale `false` baseline would read the existing
+    // hardware as a plug-in edge and tear the chosen session down in 2 s.
+    if (info?.is_virtual) {
+      try {
+        demoHwPresent = await ipc.call("is_hardware_present", {});
+      } catch {
+        demoHwPresent = null; // unknown — the tick records a baseline first
+      }
+    }
     await refreshConfig(store, ipc);
     toast(store, "success", `Connected to ${info?.model ?? "device"}`);
   } catch (e) {

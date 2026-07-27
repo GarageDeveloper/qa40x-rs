@@ -17,22 +17,36 @@ export function primaryCaps(s: AppState): DeviceCapabilities | null {
   return primaryEntry(s)?.capabilities ?? null;
 }
 
+/** Stable empty fallback: the panel selectors run inside `store.select`
+ * with shallow equality — a fresh `[]` per evaluation would defeat the
+ * guard and re-fire the callback on every store batch (review #5). */
+const NO_VALUES: number[] = [];
+
 /** Input full-scale ranges (dBV) for the range menu. Empty only before the
  * first enumeration lands (the built-in virtual source always answers) —
  * the panel renders a disabled placeholder then, never a collapsed select. */
 export function inputRangesDbv(s: AppState): number[] {
-  return primaryCaps(s)?.input_ranges_dbv ?? [];
+  return primaryCaps(s)?.input_ranges_dbv ?? NO_VALUES;
 }
 
 /** Output full-scale ranges (dBV) for the range menu. */
 export function outputRangesDbv(s: AppState): number[] {
-  return primaryCaps(s)?.output_ranges_dbv ?? [];
+  return primaryCaps(s)?.output_ranges_dbv ?? NO_VALUES;
 }
 
-/** Sample rates (Hz) for the rate menu — 384 kHz appears iff the primary
- * unit is a QA403 (the capability record carries it, not the model name). */
+/** Sample rates (Hz) for the rate menu — 384 kHz appears iff the unit is a
+ * QA403 (the capability record carries it, not the model name). While
+ * CONNECTED the open device's own metadata is authoritative (review #3): a
+ * transiently stale `primary` (overlapping refreshes, the reconnect
+ * bookkeeping window) must not hand the menu another model's table — a
+ * QA403 running at 384 kHz would render a BLANK select if the offered list
+ * lacked its current rate. */
 export function sampleRatesHz(s: AppState): number[] {
-  return primaryCaps(s)?.sample_rates_hz ?? [];
+  const entry = primaryEntry(s);
+  if (s.device.status === "connected" && !entry?.open && s.device.info) {
+    return s.device.info.sample_rates;
+  }
+  return entry?.capabilities.sample_rates_hz ?? s.device.info?.sample_rates ?? NO_VALUES;
 }
 
 /** Every available unit, in backend order (USB first, then the virtual). */
