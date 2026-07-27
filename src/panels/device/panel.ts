@@ -9,11 +9,7 @@ import "./panel.css";
 import type { Store } from "../../store/store";
 import { shallowEq } from "../../store/store";
 import type { AppState } from "../../store/state";
-import {
-  FFT_SIZES,
-  INPUT_RANGES_DBV,
-  OUTPUT_RANGES_DBV,
-} from "../../store/state";
+import { FFT_SIZES } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
   connect,
@@ -26,6 +22,15 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
+import { pickDevice } from "../../store/actions/devices";
+import {
+  availableEntries,
+  inputRangesDbv,
+  outputRangesDbv,
+  pickedDeviceId,
+  sampleRatesHz,
+  showDevicePicker,
+} from "../../store/selectors/devices";
 import { openAppDrawer } from "../appmenu/drawer";
 import { el, keyedList } from "../../ui/dom";
 
@@ -62,14 +67,25 @@ function setOptions(
   fmt: (v: number) => string,
   current: number | null
 ): void {
-  const sig = values.join(",");
+  // Before the first enumeration lands (capabilities not known yet) the
+  // list is empty: render ONE disabled placeholder so the control never
+  // collapses to zero width. (Honest limit, review #8: the placeholder is
+  // narrower than a real entry, so the pathological slow-boot path still
+  // widens the bar when the scan lands — accepted; the NORMAL boot awaits
+  // the enumeration before the panel mounts, so this branch never shows.)
+  const sig = values.length ? values.join(",") : "empty";
   if (sel.dataset.sig !== sig) {
     sel.dataset.sig = sig;
     sel.replaceChildren(
-      ...values.map((v) => el("option", { value: String(v) }, fmt(v)))
+      ...(values.length
+        ? values.map((v) => el("option", { value: String(v) }, fmt(v)))
+        : [el("option", { value: "", disabled: true }, "—")])
     );
   }
-  if (current !== null) sel.value = String(current);
+  // Only adopt `current` when it is actually offered — assigning a missing
+  // value would render the select BLANK (selectedIndex −1), worse than
+  // keeping the previous selection (review #3).
+  if (current !== null && values.includes(current)) sel.value = String(current);
 }
 
 export function mountDevicePanel(
@@ -83,7 +99,10 @@ export function mountDevicePanel(
     onclick: () => {
       const { status } = store.get().device;
       if (status === "connected") void disconnect(store, ipc);
-      else if (status === "disconnected") void connect(store, ipc);
+      else if (status === "disconnected")
+        // Rule P3: a deviceId rides along only when the user explicitly
+        // picked a unit — an untouched picker keeps the legacy call.
+        void connect(store, ipc, { deviceId: pickedDeviceId(store.get()) });
     },
   }, "Connect");
   // Demo mode: one click attaches the embedded virtual QA403 — for trying
@@ -102,6 +121,18 @@ export function mountDevicePanel(
     { "data-testid": "demo-chip", title: "Connected to the built-in virtual device" },
     "DEMO"
   );
+  // Unit picker (issue #25 lot D): hidden unless ≥2 PHYSICAL units are on
+  // the bus — with 0 or 1 the bar is byte-for-byte the pre-lot-D bar
+  // (u-hidden is display:none, no flex gap: the Demo button's own
+  // mechanism). Disabled while connected: switching units goes through
+  // Disconnect — a <select> must not hide a live-measurement teardown
+  // (lot E replaces this with several open units).
+  const unitSel = el("select.field.device-panel__unit.u-hidden", {
+    "data-testid": "device-select",
+    title: "Measurement device — pick which unit Connect opens",
+    onchange: (e: Event) =>
+      pickDevice(store, (e.target as HTMLSelectElement).value),
+  });
 
   const inputSel = select("input-range", "In", (v) =>
     void setInputRange(store, ipc, v)
@@ -152,7 +183,7 @@ export function mountDevicePanel(
       "div.device-panel",
       {},
       brand,
-      el("div.device-panel__conn", {}, led, connectBtn, demoBtn, demoChip),
+      el("div.device-panel__conn", {}, led, unitSel, connectBtn, demoBtn, demoChip),
       el(
         "div.device-panel__ctls",
         {},
@@ -170,8 +201,18 @@ export function mountDevicePanel(
   setOptions(fftSel.input, FFT_SIZES, fmtFft, store.get().acquisition.fftSize);
 
   store.select(
-    (s) => s.device,
-    (device) => {
+    // Ranges/rates come from the PRIMARY unit's backend capabilities (issue
+    // #25 lot D) — the selection spans both slices so the menus fill in the
+    // moment an enumeration lands, not only on a device-slice change. The
+    // arrays are entry-stable; setOptions' signature guard absorbs the
+    // refresh churn.
+    (s) => ({
+      device: s.device,
+      inputRanges: inputRangesDbv(s),
+      outputRanges: outputRangesDbv(s),
+      rates: sampleRatesHz(s),
+    }),
+    ({ device, inputRanges, outputRanges, rates }) => {
       led.className = `led${
         device.status === "connected"
           ? " led--on"
@@ -189,24 +230,14 @@ export function mountDevicePanel(
       );
 
       const cfg = device.config;
-      setOptions(
-        inputSel.input,
-        INPUT_RANGES_DBV,
-        (v) => `${v} dBV`,
-        cfg?.input_gain ?? null
-      );
+      setOptions(inputSel.input, inputRanges, (v) => `${v} dBV`, cfg?.input_gain ?? null);
       setOptions(
         outputSel.input,
-        OUTPUT_RANGES_DBV,
+        outputRanges,
         (v) => `${v > 0 ? "+" : ""}${v} dBV`,
         cfg?.output_gain ?? null
       );
-      setOptions(
-        rateSel.input,
-        device.info?.sample_rates ?? [48000, 96000, 192000],
-        fmtRate,
-        cfg?.sample_rate ?? null
-      );
+      setOptions(rateSel.input, rates, fmtRate, cfg?.sample_rate ?? null);
       // All four controls are meaningless without a device — grey them out
       // (FFT size included: it only drives the capture loop).
       const disabled = device.status !== "connected";
@@ -227,6 +258,45 @@ export function mountDevicePanel(
     (fftSize) => {
       fftSel.input.value = String(fftSize);
     }
+  );
+
+  store.select(
+    // Scalar-only selection (review #5): an allocated array per evaluation
+    // would defeat shallowEq and re-fire this on EVERY store batch — per
+    // frame during a capture. The id signature is the rebuild trigger; the
+    // entries are read back off the store inside the callback.
+    (s) => ({
+      show: showDevicePicker(s),
+      sig: s.devices.available.join("|"),
+      // While connected the picker mirrors the OPEN unit (= the primary,
+      // rule P1); disconnected it shows the user's pick, else the primary.
+      value:
+        s.device.status === "disconnected"
+          ? s.devices.pick ?? s.devices.primary
+          : s.devices.primary,
+      connected: s.device.status !== "disconnected",
+    }),
+    ({ show, sig, value, connected }) => {
+      unitSel.classList.toggle("u-hidden", !show);
+      unitSel.toggleAttribute("disabled", connected);
+      const units = availableEntries(store.get());
+      if (unitSel.dataset.sig !== sig) {
+        unitSel.dataset.sig = sig;
+        unitSel.replaceChildren(
+          ...units.map((u) =>
+            el(
+              "option",
+              { value: u.id },
+              `${u.model} · ${u.serial}${u.is_virtual ? " (virtual)" : ""}`
+            )
+          )
+        );
+      }
+      if (value !== null && units.some((u) => u.id === value)) {
+        unitSel.value = value;
+      }
+    },
+    shallowEq
   );
 
   store.select(annunciators, (list) => {

@@ -94,6 +94,58 @@ export class AppV2 {
     );
   }
 
+  /* -- unit picker (issue #25 lot D) ----------------------------------- */
+
+  /** How many physical units the fake bus offers. */
+  async setUnits(n: number): Promise<void> {
+    await this.drv.eval((v: number) => window.__qa40xE2E.device.setUnits(v), n);
+  }
+
+  async devicePickerVisible(): Promise<boolean> {
+    return this.drv.eval(
+      () =>
+        document
+          .querySelector('[data-testid="device-select"]')
+          ?.classList.contains("u-hidden") === false,
+      undefined as void
+    );
+  }
+
+  async devicePickerDisabled(): Promise<boolean> {
+    return this.drv.eval(
+      () =>
+        (
+          document.querySelector(
+            '[data-testid="device-select"]'
+          ) as HTMLSelectElement | null
+        )?.disabled === true,
+      undefined as void
+    );
+  }
+
+  /** The picker's option values (unit ids), in listed order. */
+  async deviceOptions(): Promise<string[]> {
+    return this.drv.eval(
+      () =>
+        Array.from(
+          document.querySelectorAll('[data-testid="device-select"] option')
+        ).map((o) => (o as HTMLOptionElement).value),
+      undefined as void
+    );
+  }
+
+  async pickDevice(id: string): Promise<void> {
+    await this.setSelect("device-select", id);
+  }
+
+  /** Every deviceId `connect_device` was invoked with (null = arg-less). */
+  async connectDeviceIds(): Promise<(string | null)[]> {
+    return this.drv.eval(
+      () => window.__qa40xE2E.device.connectDeviceIds,
+      undefined as void
+    );
+  }
+
   async identity(): Promise<string | null> {
     return this.drv.text('[data-testid="device-identity"]');
   }

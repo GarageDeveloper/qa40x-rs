@@ -13,7 +13,8 @@ use crate::qa40x::{InputGain, Model, OutputGain};
 use serde::{Deserialize, Serialize};
 
 /// Where a unit's level calibration comes from.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub enum CalibrationSource {
     /// Not known yet — an enumerated but unopened unit (the factory page is
     /// read during bring-up, so only an open can settle this).
@@ -29,9 +30,11 @@ pub enum CalibrationSource {
 }
 
 /// What a device can do: channels, rates, range tables, limits, calibration
-/// source. Replaces implicit `Model` knowledge at the seam; lot D puts this
-/// on the wire (ts-rs) and deletes the frontend's hard-coded range consts.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// source. Replaces implicit `Model` knowledge at the seam; on the wire since
+/// lot D (ts-rs export, carried by [`super::wire::DeviceEntry`]) — the
+/// frontend reads its range/rate menus from here, not from local consts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct DeviceCapabilities {
     /// Model display name (`"QA402"` / `"QA403"`).
     pub model_name: String,
@@ -41,10 +44,10 @@ pub struct DeviceCapabilities {
     pub output_channels: u8,
     /// Supported sample rates in Hz, ascending (384 kHz on the QA403 only).
     pub sample_rates_hz: Vec<u32>,
-    /// Input full-scale ranges in dBV, ascending — the backend authority the
-    /// frontend's `INPUT_RANGES_DBV` const duplicates until lot D.
+    /// Input full-scale ranges in dBV, ascending — the backend authority for
+    /// the frontend's input-range menu (lot D deleted the TS const).
     pub input_ranges_dbv: Vec<i32>,
-    /// Output full-scale ranges in dBV, ascending — ditto `OUTPUT_RANGES_DBV`.
+    /// Output full-scale ranges in dBV, ascending — ditto for the output menu.
     pub output_ranges_dbv: Vec<i32>,
     /// Smallest producible output level, in Vrms.
     pub min_output_vrms: f64,

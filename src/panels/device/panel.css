@@ -34,6 +34,13 @@
   user-select: none;
 }
 
+/* Unit picker (issue #25 lot D): a long serial must not stretch the bar. */
+.device-panel__unit {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .device-panel__ctls {
   display: flex;
   align-items: center;

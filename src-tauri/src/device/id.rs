@@ -1,9 +1,12 @@
 //! Identity types for the device seam: which source a unit came from, which
 //! unit it is, and what it identified as.
 //!
-//! Serde only, deliberately **no ts-rs**: nothing here is on the wire in
-//! lot B (`src/gen` must stay byte-identical). Lot D adds the TS export when
-//! the frontend devices slice lands.
+//! Mostly serde-only, deliberately thin on ts-rs: the wire DTO for lot D's
+//! device bar is [`super::wire::DeviceEntry`], a flat record — identity stays
+//! internal ([`DeviceId`]/[`SourceId`] are `serde(transparent)` newtypes and
+//! [`DeviceIdentity::model`] serializes as the Rust enum variant, not the
+//! display name, so exporting them raw would be a display trap). Only
+//! [`SourceKind`] is exported, as a plain string union.
 
 use crate::qa40x::Model;
 use serde::{Deserialize, Serialize};
@@ -11,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::caps::DeviceCapabilities;
 
 /// What kind of place devices come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub enum SourceKind {
     /// The local USB bus.
     Usb,

@@ -232,6 +232,26 @@ the +42 dBV top input range: that range is a full-scale sensitivity setting, not
 a voltage rating. The app can't enforce what a user physically connects; the
 value is there so the UI can warn.
 
+### Enumeration and capabilities on the wire (issue #25 lot D)
+
+The GUI's device bar is fed by `list_devices`: the registry unions every
+source's enumeration (USB bus scan + the built-in virtual source) into flat
+`DeviceEntry` records, each carrying the full capability set — so the range
+and rate menus come from the same per-model tables the backend drives the
+registers with, not from frontend constants. The capability record is built
+**from the model tables at enumerate time**: the capability registers
+0x1B/0x1C the official app reads at connect are still NOT consulted (a real
+QA403's 0x1B word is unverified, and moving the 384 kHz gate onto a register
+read would be a measurement-semantics change — see `src-tauri/src/device/`).
+What only an open can know (firmware build from 0x10, whether the factory
+calibration page was readable) is filled into the open unit's entry only.
+Enumeration is a bus *scan* (an OS device listing), not a claim — it opens
+nothing and does no device I/O, so it cannot perturb an acquisition. The GUI
+still gates its 2 s re-enumeration on being idle (no stream, no generator,
+no GUI program) as a matter of not adding work during a run; backend-owned
+sessions (REST, scripts) are invisible to that gate and are safe for the
+same no-I/O reason.
+
 ### Fit the output range to the mix peak, and latch clips
 
 When several sources are summed into one DAC buffer, clipping is a property of

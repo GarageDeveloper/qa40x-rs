@@ -19,8 +19,8 @@ pub struct FakeSource {
     id: SourceId,
     kind: SourceKind,
     physical: bool,
-    descriptors: Vec<DeviceDescriptor>,
-    fail_enumerate: bool,
+    descriptors: StdMutex<Vec<DeviceDescriptor>>,
+    fail_enumerate: std::sync::atomic::AtomicBool,
     /// Artificial latency inside `open()` — lets lifecycle tests hold an
     /// open in flight while racing a close/second open against it.
     open_delay: Option<std::time::Duration>,
@@ -36,17 +36,26 @@ impl FakeSource {
             id: source,
             kind: if physical { SourceKind::Usb } else { SourceKind::Virtual },
             physical,
-            descriptors,
-            fail_enumerate: false,
+            descriptors: StdMutex::new(descriptors),
+            fail_enumerate: std::sync::atomic::AtomicBool::new(false),
             open_delay: None,
             opened: StdMutex::new(Vec::new()),
         }
     }
 
     pub fn failing(id: &str, physical: bool) -> Self {
-        let mut s = Self::new(id, physical, &[]);
-        s.fail_enumerate = true;
+        let s = Self::new(id, physical, &[]);
+        s.fail_enumerate.store(true, std::sync::atomic::Ordering::SeqCst);
         s
+    }
+
+    /// Flip a previously-healthy source into a failing one — for pinning
+    /// `list()`'s "open unit whose SOURCE now errors on enumerate" path,
+    /// distinct from `vanish()` (source still answers Ok, just without that
+    /// unit). A real source can start erroring after an open (bus reset,
+    /// backend permission flip) without the unit itself disappearing first.
+    pub fn fail_from_now_on(&self) {
+        self.fail_enumerate.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A source whose `open()` takes `delay` — for racing lifecycle tests.
@@ -54,6 +63,16 @@ impl FakeSource {
         let mut s = Self::new(id, physical, units);
         s.open_delay = Some(delay);
         s
+    }
+
+    /// Drop `unit_key` from subsequent enumerations — an unplug the source
+    /// notices but the registry's bookkeeping hasn't (registry `list()`
+    /// tests: an open-but-vanished unit must stay listed).
+    pub fn vanish(&self, unit_key: &str) {
+        self.descriptors
+            .lock()
+            .expect("descriptors lock")
+            .retain(|d| d.id.unit_key() != unit_key);
     }
 }
 
@@ -97,22 +116,30 @@ impl DeviceSource for FakeSource {
     }
 
     async fn enumerate(&self) -> Result<Vec<DeviceDescriptor>, DeviceError> {
-        if self.fail_enumerate {
+        if self.fail_enumerate.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(DeviceError::Source("fake enumeration failure".into()));
         }
-        Ok(self.descriptors.clone())
+        Ok(self.descriptors.lock().expect("descriptors lock").clone())
     }
 
     async fn open(&self, id: &DeviceId, _handle: &DeviceHandle) -> Result<DeviceDescriptor, DeviceError> {
         if let Some(delay) = self.open_delay {
             tokio::time::sleep(delay).await;
         }
-        let desc = self
+        let mut desc = self
             .descriptors
+            .lock()
+            .expect("descriptors lock")
             .iter()
             .find(|d| &d.id == id)
             .cloned()
             .ok_or(DeviceError::NotFound)?;
+        // Enrich like a real source (the `open()` contract): the firmware
+        // version and calibration source are only knowable from an open.
+        desc.identity.firmware_version = Some(42);
+        desc.capabilities = desc
+            .capabilities
+            .with_calibration(CalibrationSource::FactoryEeprom { page_bytes: 512 });
         self.opened.lock().expect("opened lock").push(id.clone());
         Ok(desc)
     }

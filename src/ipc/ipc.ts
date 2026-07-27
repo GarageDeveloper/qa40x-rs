@@ -14,6 +14,7 @@ import { invoke, Channel as TauriChannel } from "@tauri-apps/api/core";
 import type {
   Channel,
   DeviceConfig,
+  DeviceList,
   DeviceMeta,
   DryRun,
   ExtractionResult,
@@ -39,13 +40,13 @@ export { TauriChannel };
 
 /**
  * Device-keyed commands accept an optional `deviceId` (issue #25 lot C):
- * omitted ⇒ the backend's default device — every existing caller is
- * unchanged. Nothing passes it yet; lot D's devices slice does. Backend
- * contract, two rules: `connect_device` accepts any ENUMERATED unit's id
- * (it exists to open one); every other keyed command resolves only an OPEN
- * device's id and rejects anything else (`Unknown device: <id>`), never
- * falls back — so querying a unit's info before connecting it goes through
- * `connect_device` first, by design.
+ * omitted ⇒ the backend's default device — every caller predating lot D is
+ * unchanged; the devices slice passes it on an explicit pick (rule P3).
+ * Backend contract, two rules: `connect_device` accepts any ENUMERATED
+ * unit's id (it exists to open one); every other keyed command resolves
+ * only an OPEN device's id and rejects anything else
+ * (`Unknown device: <id>`), never falls back — so querying a unit's info
+ * before connecting it goes through `connect_device` first, by design.
  */
 type DeviceScoped = { deviceId?: string };
 
@@ -66,6 +67,11 @@ export interface Commands {
   // during a demo session so a newly plugged QA40x takes over.
   is_hardware_present: { args: Record<string, never>; result: boolean };
   get_device_info: { args: DeviceScoped; result: DeviceMeta | null };
+  // Enumeration is registry-level, not device-keyed (no deviceId): it
+  // lists EVERY unit the registry can offer, open or not — the open unit's
+  // entry enriched (firmware + calibration), the rest carrying what the
+  // bus/model tables know.
+  list_devices: { args: Record<string, never>; result: DeviceList };
 
   // Configuration
   get_device_config: { args: DeviceScoped; result: DeviceConfig };

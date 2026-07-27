@@ -269,6 +269,18 @@ async fn get_device_info(
     Ok(meta)
 }
 
+/// Every unit the registry can currently offer (USB + built-in virtual), with
+/// the open unit's entry enriched (issue #25 lot D — the device bar's feed).
+#[tauri::command]
+async fn list_devices(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<device::DeviceList, String> {
+    // Scoped guard, then scan — same rule as is_hardware_present: never hold
+    // the AppState lock across a bus scan.
+    let devices = state.lock().await.devices.clone();
+    Ok(devices.list().await)
+}
+
 /// Whether a QA40x (QA402 or QA403) is present on the USB bus (for auto-connect),
 /// regardless of whether we are connected to it.
 #[tauri::command]
@@ -1238,6 +1250,7 @@ pub fn run() {
             is_hardware_present,
             is_device_connected,
             is_device_present,
+            list_devices,
             set_input_gain,
             set_output_gain,
             set_sample_rate,
