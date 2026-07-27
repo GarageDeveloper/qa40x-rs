@@ -11,6 +11,12 @@ pub enum DeviceError {
     #[error("Device not found")]
     NotFound,
 
+    /// A command named a `device_id` that is not an open device (issue #25
+    /// lot C). Distinct from [`DeviceError::NotFound`]: the caller asked for
+    /// a SPECIFIC unit and must never be silently served another one.
+    #[error("Unknown device: {0}")]
+    UnknownDevice(String),
+
     /// A source failed to enumerate or open (bus scan error, simulator
     /// already attached, ...).
     #[error("{0}")]
@@ -39,6 +45,9 @@ impl From<DeviceError> for QA40xError {
     fn from(e: DeviceError) -> Self {
         match e {
             DeviceError::NotFound => QA40xError::DeviceNotFound,
+            DeviceError::UnknownDevice(id) => {
+                QA40xError::DeviceError(format!("Unknown device: {id}"))
+            }
             DeviceError::Source(s) => QA40xError::DeviceError(s),
             DeviceError::Device(e) => e,
         }

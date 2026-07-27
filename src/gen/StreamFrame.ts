@@ -18,7 +18,14 @@ export type StreamFrame = {
 /**
  * (Serialized as a JSON number — no frame count reaches 2^53.)
  */
-seq: number, captured: AudioData, 
+seq: number, 
+/**
+ * The unit this frame was captured on (issue #25 lot C) — the frame
+ * carries its device identity the same way it carries its own
+ * [`LevelOffsetsDb`]. `None` when the device was opened outside the
+ * registry (the examples' legacy path); lot D/E route on it.
+ */
+device_id: string | null, captured: AudioData, 
 /**
  * The summed stimulus actually sent this frame (`None` in monitor mode).
  */

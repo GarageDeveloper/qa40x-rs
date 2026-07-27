@@ -207,8 +207,12 @@ function runStoppedByDisconnect(s: AppState): AppState["run"] {
  * Backend pushed a disconnect (USB monitoring event). Idempotent: the
  * monitor also fires after a MANUAL disconnect (it only sees "no longer
  * connected"), and any duplicate event must not re-toast or churn state.
+ *
+ * `_deviceId` names the lost unit (issue #25 lot C). Deliberately unused
+ * while the UI holds a single device; lot E filters on it so unit A's loss
+ * never tears down unit B's session.
  */
-export function deviceLost(store: Store<AppState>): void {
+export function deviceLost(store: Store<AppState>, _deviceId: string | null = null): void {
   if (store.get().device.status === "disconnected") return;
   store.update("device/lost", (s) => ({
     ...s,

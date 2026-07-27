@@ -360,6 +360,7 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
   }): DecodedFrame {
     return {
       seq: 1,
+      deviceId: null,
       sampleRate: 48000,
       input: {
         l: { sampleRate: 48000, samples: Float64Array.from([0.1, 0.2, 0.3]) },
@@ -499,6 +500,7 @@ describe("ingestFrame — scope measurement suite reaches the frames cache (issu
   function frameWithMeasures(inputL: ScopeMeasures | null): DecodedFrame {
     return {
       seq: 1,
+      deviceId: null,
       sampleRate: 48000,
       input: {
         l: { sampleRate: 48000, samples: Float64Array.from([0.1, 0.2, 0.3]) },
@@ -558,6 +560,7 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
   function frame(over: Partial<Pick<DecodedFrame, "sampleRate" | "offsets">> = {}): DecodedFrame {
     return {
       seq: 1,
+      deviceId: null,
       sampleRate: over.sampleRate ?? 48000,
       input: {
         l: { sampleRate: over.sampleRate ?? 48000, samples: Float64Array.from([0.1, 0.2]) },

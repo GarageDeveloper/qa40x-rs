@@ -12,6 +12,7 @@ export type { CalibrationData } from "./CalibrationData";
 export type { Capabilities } from "./Capabilities";
 export type { Channel } from "./Channel";
 export type { DeviceConfig } from "./DeviceConfig";
+export type { DeviceLost } from "./DeviceLost";
 export type { DeviceMeta } from "./DeviceMeta";
 export type { InputDbvOffset } from "./InputDbvOffset";
 export type { InputGain } from "./InputGain";

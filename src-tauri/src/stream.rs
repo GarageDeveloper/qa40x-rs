@@ -419,6 +419,11 @@ pub struct StreamFrame {
     /// (Serialized as a JSON number — no frame count reaches 2^53.)
     #[ts(type = "number")]
     pub seq: u64,
+    /// The unit this frame was captured on (issue #25 lot C) — the frame
+    /// carries its device identity the same way it carries its own
+    /// [`LevelOffsetsDb`]. `None` when the device was opened outside the
+    /// registry (the examples' legacy path); lot D/E route on it.
+    pub device_id: Option<String>,
     pub captured: AudioData,
     /// The summed stimulus actually sent this frame (`None` in monitor mode).
     pub stimulus: Option<StereoFrame>,
@@ -509,9 +514,12 @@ fn validate_config(config: &StreamConfig) -> Result<(), String> {
 #[derive(Clone)]
 pub struct StreamControl {
     device: Arc<Mutex<QA40xDevice>>,
-    generator_running: Arc<AtomicBool>,
-    generator_stop: Arc<AtomicBool>,
+    generator: crate::device::GeneratorFlags,
     mixer: Arc<std::sync::Mutex<Mixer>>,
+    /// The runtime's "what is open on me" cell — the loop stamps it into
+    /// every frame (a cheap std-lock read, never across an await). Shared
+    /// WITH the runtime, not a back-reference to it (no Arc cycle).
+    open_unit: crate::device::OpenUnitCell,
     running: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     /// Serializes start/stop transitions. Tauri commands run CONCURRENTLY:
@@ -538,15 +546,15 @@ pub struct StreamControl {
 impl StreamControl {
     pub fn new(
         device: Arc<Mutex<QA40xDevice>>,
-        generator_running: Arc<AtomicBool>,
-        generator_stop: Arc<AtomicBool>,
+        generator: crate::device::GeneratorFlags,
         mixer: Arc<std::sync::Mutex<Mixer>>,
+        open_unit: crate::device::OpenUnitCell,
     ) -> Self {
         Self {
             device,
-            generator_running,
-            generator_stop,
+            generator,
             mixer,
+            open_unit,
             running: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
             control: Arc::new(Mutex::new(())),
@@ -642,7 +650,7 @@ impl StreamControl {
         self.stop.store(false, Ordering::SeqCst);
         *self.config.lock().map_err(|_| "stream config lock poisoned")? = config;
 
-        crate::ensure_generator_stopped(&self.generator_running, &self.generator_stop).await;
+        self.generator.ensure_stopped().await;
         if !self.device.lock().await.is_connected().await {
             self.running.store(false, Ordering::SeqCst);
             return Err("Device not connected".into());
@@ -1229,13 +1237,18 @@ async fn run_stream_loop(
         // and without this a stop (or an app quit — safe_shutdown) could only
         // take effect at the NEXT frame boundary. Same mechanism as the
         // batched sweeps (the sweep got it first; this is its stream twin).
-        let captured_raw = {
+        let (captured_raw, frame_device_id) = {
             let device = ctl.device.lock().await;
             match device
                 .generate_and_capture_cancellable(&left, &right, Some(&ctl.stop))
                 .await
             {
-                Ok(c) => c,
+                // The frame's device identity, read WHILE the capture's
+                // device guard is still held: a connect landing during the
+                // (seconds-long at 1M FFT) analysis window below must not
+                // stamp this frame with the NEXT unit's id (review F2 —
+                // "the unit this frame was CAPTURED on", literally).
+                Ok(c) => (c, ctl.open_unit.get().map(|id| id.as_str().to_string())),
                 Err(crate::qa40x::QA40xError::Cancelled) => {
                     log::info!("stream: stop observed mid-capture — cancelled cooperatively");
                     return Ok(());
@@ -1362,6 +1375,7 @@ async fn run_stream_loop(
 
         let msg = StreamMsg::Frame(Box::new(StreamFrame {
             seq,
+            device_id: frame_device_id,
             captured,
             stimulus,
             spectra: analysis.spectra,

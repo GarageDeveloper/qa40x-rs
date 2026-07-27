@@ -44,6 +44,7 @@ fn frame(n: usize) -> StreamMsg {
     let mag = |seed| samples(bins, seed).iter().map(|v| v * 90.0 - 100.0).collect::<Vec<f32>>();
     StreamMsg::Frame(Box::new(StreamFrame {
         seq: 123_456,
+        device_id: Some("usb/AB12_CD34".into()),
         captured: AudioData {
             left_channel: samples(n, 2),
             right_channel: samples(n, 3),

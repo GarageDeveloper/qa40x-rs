@@ -30,27 +30,37 @@
 //!   capability registers 0x1B/0x1C are deliberately NOT consulted — a real
 //!   QA403's 0x1B word is unverified, and gating 384 kHz on a register read
 //!   would be a measurement-semantics change (deferred).
-//! - [`DeviceRegistry`]: an [`crate::AppState`] field owning the ONE device
-//!   object of the session (lot B invariant: created once, never replaced —
-//!   REST/scripting/stream all hold the same `Arc`). Still exactly one open
-//!   device; lot E turns the single open slot into a map.
+//! - [`DeviceRegistry`]: an [`crate::AppState`] field owning the default
+//!   device's [`DeviceRuntime`] (lot B invariant, extended by lot C: the
+//!   runtime and everything in it are created once and never replaced —
+//!   REST/scripting/stream all hold `Arc`s out of it). Still exactly one
+//!   open device; lot E turns the single runtime slot into a map.
+//! - [`DeviceRuntime`] (lot C): everything that is runtime state of ONE
+//!   device — handle, telemetry cell, mixer, generator flags, sweep cancel,
+//!   stream control, open-unit cell, generation-keyed open/close bookkeeping
+//!   behind a lifecycle gate, quiesce/shutdown, liveness monitor. Commands
+//!   accept an optional `device_id` (`None` ⇒ default device); every stream
+//!   frame carries its device identity.
 //!
 //! ## What later lots change (for orientation, see the plan on issue #25)
 //!
-//! - Lot C: per-device runtime state (`DeviceHandle` becomes a struct holding
-//!   stream control, mixer, generator flags, sweep cancel, telemetry,
-//!   liveness monitor), `device_id` on commands, one stream loop per device,
-//!   serial-scoped unplug detection.
 //! - Lot D: capabilities on the wire (ts-rs export + a devices command), the
 //!   frontend devices slice, deletion of the TS range consts.
-//! - Lot E: N open devices, a second virtual unit, slot-keyed endpoint ids.
+//! - Lot E: N open devices (runtime map + N stream loops, ingest routed by
+//!   `device_id`), a second virtual unit, slot-keyed endpoint ids.
 //! - Lot F: programs/REST/scripts per device.
+//!
+//! Lot-C residues, deliberate: `RestControl`/`ScriptControl`/`Session` keep
+//! their loose-Arc constructors (frozen for the examples + A/B bench) and
+//! are built FROM the default runtime — lot F re-keys them. The
+//! QA40x-compatible REST scheme stays default-device-bound by specification.
 
 pub mod analyzer;
 pub mod caps;
 pub mod error;
 pub mod id;
 pub mod registry;
+pub mod runtime;
 pub mod source;
 pub mod usb;
 pub mod virt;
@@ -63,4 +73,8 @@ pub use caps::{CalibrationSource, DeviceCapabilities};
 pub use error::DeviceError;
 pub use id::{DeviceDescriptor, DeviceId, DeviceIdentity, SourceId, SourceKind, Transport};
 pub use registry::{DeviceRegistry, OpenDevice};
+pub use runtime::{
+    spawn_liveness_monitor, DeviceLost, DeviceRuntime, GeneratorFlags, OpenGeneration,
+    OpenUnitCell,
+};
 pub use source::{DeviceHandle, DeviceSource};

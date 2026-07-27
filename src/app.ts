@@ -5,6 +5,7 @@
  */
 import "./app.css";
 import { listen } from "@tauri-apps/api/event";
+import type { DeviceLost } from "./gen";
 import type { Store } from "./store/store";
 import type { AppState } from "./store/state";
 import type { Ipc } from "./ipc/ipc";
@@ -145,8 +146,12 @@ export async function mountApp(
     }
   });
 
-  // Backend-pushed disconnect (USB monitor).
-  void listen("device-disconnected", () => deviceLost(store));
+  // Backend-pushed disconnect (USB monitor). The payload names the lost
+  // unit (issue #25 lot C); optional-safe — older backends and the e2e
+  // harness emit the event with no payload at all.
+  void listen<DeviceLost | undefined>("device-disconnected", (e) =>
+    deviceLost(store, e.payload?.device_id ?? null)
+  );
 
   // Telemetry poll while connected (cached read — no register I/O).
   setInterval(() => void refreshTelemetry(store, ipc), TELEMETRY_POLL_MS);
