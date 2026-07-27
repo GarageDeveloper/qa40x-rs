@@ -64,6 +64,7 @@ pub mod runtime;
 pub mod source;
 pub mod usb;
 pub mod virt;
+pub mod wire;
 
 #[cfg(test)]
 pub mod testing;
@@ -78,3 +79,4 @@ pub use runtime::{
     OpenUnitCell,
 };
 pub use source::{DeviceHandle, DeviceSource};
+pub use wire::{DeviceEntry, DeviceList};

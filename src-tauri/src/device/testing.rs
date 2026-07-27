@@ -19,7 +19,7 @@ pub struct FakeSource {
     id: SourceId,
     kind: SourceKind,
     physical: bool,
-    descriptors: Vec<DeviceDescriptor>,
+    descriptors: StdMutex<Vec<DeviceDescriptor>>,
     fail_enumerate: bool,
     /// Artificial latency inside `open()` — lets lifecycle tests hold an
     /// open in flight while racing a close/second open against it.
@@ -36,7 +36,7 @@ impl FakeSource {
             id: source,
             kind: if physical { SourceKind::Usb } else { SourceKind::Virtual },
             physical,
-            descriptors,
+            descriptors: StdMutex::new(descriptors),
             fail_enumerate: false,
             open_delay: None,
             opened: StdMutex::new(Vec::new()),
@@ -54,6 +54,16 @@ impl FakeSource {
         let mut s = Self::new(id, physical, units);
         s.open_delay = Some(delay);
         s
+    }
+
+    /// Drop `unit_key` from subsequent enumerations — an unplug the source
+    /// notices but the registry's bookkeeping hasn't (registry `list()`
+    /// tests: an open-but-vanished unit must stay listed).
+    pub fn vanish(&self, unit_key: &str) {
+        self.descriptors
+            .lock()
+            .expect("descriptors lock")
+            .retain(|d| d.id.unit_key() != unit_key);
     }
 }
 
@@ -100,19 +110,27 @@ impl DeviceSource for FakeSource {
         if self.fail_enumerate {
             return Err(DeviceError::Source("fake enumeration failure".into()));
         }
-        Ok(self.descriptors.clone())
+        Ok(self.descriptors.lock().expect("descriptors lock").clone())
     }
 
     async fn open(&self, id: &DeviceId, _handle: &DeviceHandle) -> Result<DeviceDescriptor, DeviceError> {
         if let Some(delay) = self.open_delay {
             tokio::time::sleep(delay).await;
         }
-        let desc = self
+        let mut desc = self
             .descriptors
+            .lock()
+            .expect("descriptors lock")
             .iter()
             .find(|d| &d.id == id)
             .cloned()
             .ok_or(DeviceError::NotFound)?;
+        // Enrich like a real source (the `open()` contract): the firmware
+        // version and calibration source are only knowable from an open.
+        desc.identity.firmware_version = Some(42);
+        desc.capabilities = desc
+            .capabilities
+            .with_calibration(CalibrationSource::FactoryEeprom { page_bytes: 512 });
         self.opened.lock().expect("opened lock").push(id.clone());
         Ok(desc)
     }

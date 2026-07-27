@@ -19,11 +19,12 @@ use tokio::sync::Mutex;
 use crate::qa40x::Telemetry;
 
 use super::error::DeviceError;
-use super::id::{DeviceDescriptor, DeviceId, SourceKind};
+use super::id::{DeviceDescriptor, DeviceId, SourceKind, Transport};
 use super::runtime::DeviceRuntime;
 use super::source::{DeviceHandle, DeviceSource};
 use super::usb::UsbDeviceSource;
 use super::virt::VirtualDeviceSource;
+use super::wire::{DeviceEntry, DeviceList};
 
 /// The unit currently open on the handle.
 #[derive(Clone, Debug)]
@@ -126,6 +127,76 @@ impl DeviceRegistry {
             }
         }
         all
+    }
+
+    /// The frontend device bar's answer (issue #25 lot D): the enumeration
+    /// union with the OPEN unit's entry substituted by its ENRICHED
+    /// descriptor (firmware version + calibration source, knowable only from
+    /// an open — [`DeviceSource::open`] returns it and the runtime keeps it).
+    /// An open unit that stopped enumerating (unplugged mid-teardown) is
+    /// appended rather than dropped: the bar must keep showing what the app
+    /// is still connected to.
+    pub async fn list(&self) -> DeviceList {
+        // Open units first (lot C: at most one), keyed for substitution.
+        let mut open_descs: std::collections::HashMap<String, DeviceDescriptor> =
+            std::collections::HashMap::new();
+        let mut open_ids = Vec::new();
+        for rt in self.runtimes() {
+            if let Some(cur) = rt.current() {
+                open_ids.push(cur.id.as_str().to_string());
+                open_descs.insert(cur.id.as_str().to_string(), cur.descriptor);
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut devices = Vec::new();
+        for source in &self.inner.sources {
+            match source.enumerate().await {
+                Ok(descs) => {
+                    for d in descs {
+                        if !seen.insert(d.id.clone()) {
+                            // Same never-silent rule as `enumerate()`.
+                            warn!("device id {} enumerated more than once — keeping the first", d.id);
+                            continue;
+                        }
+                        let (desc, open) = match open_descs.remove(d.id.as_str()) {
+                            Some(enriched) => (enriched, true),
+                            None => (d, false),
+                        };
+                        devices.push(DeviceEntry::from_descriptor(
+                            &desc,
+                            source.kind(),
+                            source.label(),
+                            open,
+                        ));
+                    }
+                }
+                Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
+            }
+        }
+
+        // Whatever is open but no longer enumerable stays listed.
+        for desc in open_descs.into_values() {
+            let (kind, label) = self
+                .inner
+                .sources
+                .iter()
+                .find(|s| s.id().as_str() == desc.source.as_str())
+                .map(|s| (s.kind(), s.label()))
+                // Sources are fixed at construction and opens route through
+                // them, so this arm is unreachable today — degrade via the
+                // transport rather than panic if that ever changes.
+                .unwrap_or_else(|| {
+                    let kind = match desc.transport {
+                        Transport::Virtual => SourceKind::Virtual,
+                        Transport::Usb { .. } => SourceKind::Usb,
+                    };
+                    (kind, desc.source.as_str().to_string())
+                });
+            devices.push(DeviceEntry::from_descriptor(&desc, kind, label, true));
+        }
+
+        DeviceList { devices, open: open_ids }
     }
 
     /// Open the unit `id` onto the session handle. A second open supersedes
@@ -481,6 +552,72 @@ mod tests {
         assert!(reg.current().is_some());
         reg.note_closed();
         assert!(reg.current().is_none());
+    }
+
+    /* ---- lot D: the frontend device list ------------------------------- */
+
+    #[tokio::test]
+    async fn list_offers_the_virtual_unit_with_nothing_on_the_bus_and_nothing_open() {
+        let reg = registry(vec![
+            Arc::new(FakeSource::new("usb", true, &[])),
+            Arc::new(FakeSource::new("virtual", false, &["V"])),
+        ]);
+        let list = reg.list().await;
+        assert_eq!(list.devices.len(), 1);
+        assert_eq!(list.devices[0].id, "virtual/V");
+        assert_eq!(list.devices[0].source_kind, crate::device::SourceKind::Virtual);
+        assert!(!list.devices[0].open);
+        assert!(list.open.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_substitutes_the_open_units_enriched_descriptor() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open A");
+
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["usb/A".to_string()]);
+        let entry_a = list.devices.iter().find(|d| d.id == "usb/A").expect("A listed");
+        let entry_b = list.devices.iter().find(|d| d.id == "usb/B").expect("B listed");
+        // The open unit carries what only an open can know…
+        assert!(entry_a.open);
+        assert_eq!(entry_a.firmware_version, Some(42));
+        assert_eq!(
+            entry_a.capabilities.calibration,
+            crate::device::CalibrationSource::FactoryEeprom { page_bytes: 512 }
+        );
+        // …while the unopened one honestly does not.
+        assert!(!entry_b.open);
+        assert_eq!(entry_b.firmware_version, None);
+        assert_eq!(entry_b.capabilities.calibration, crate::device::CalibrationSource::Unknown);
+    }
+
+    #[tokio::test]
+    async fn list_keeps_an_open_unit_that_stopped_enumerating() {
+        let src = Arc::new(FakeSource::new("usb", true, &["A"]));
+        let reg = registry(vec![src.clone()]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open A");
+
+        // The unit unplugs but the registry's bookkeeping hasn't caught up
+        // (monitor tick pending) — the bar must keep showing it as open.
+        src.vanish("A");
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["usb/A".to_string()]);
+        let entry = list.devices.iter().find(|d| d.id == "usb/A").expect("still listed");
+        assert!(entry.open);
+        assert_eq!(entry.firmware_version, Some(42), "the enriched descriptor survives");
+    }
+
+    #[tokio::test]
+    async fn list_dedupes_by_id_keeping_the_first() {
+        let reg = registry(vec![
+            Arc::new(FakeSource::new("usb", true, &["A"])),
+            Arc::new(FakeSource::new("usb", true, &["A"])),
+        ]);
+        let list = reg.list().await;
+        assert_eq!(list.devices.len(), 1);
     }
 
     /* ---- lot C: lifecycle gate + generations --------------------------- */
