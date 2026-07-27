@@ -509,8 +509,7 @@ fn validate_config(config: &StreamConfig) -> Result<(), String> {
 #[derive(Clone)]
 pub struct StreamControl {
     device: Arc<Mutex<QA40xDevice>>,
-    generator_running: Arc<AtomicBool>,
-    generator_stop: Arc<AtomicBool>,
+    generator: crate::device::GeneratorFlags,
     mixer: Arc<std::sync::Mutex<Mixer>>,
     running: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -538,14 +537,12 @@ pub struct StreamControl {
 impl StreamControl {
     pub fn new(
         device: Arc<Mutex<QA40xDevice>>,
-        generator_running: Arc<AtomicBool>,
-        generator_stop: Arc<AtomicBool>,
+        generator: crate::device::GeneratorFlags,
         mixer: Arc<std::sync::Mutex<Mixer>>,
     ) -> Self {
         Self {
             device,
-            generator_running,
-            generator_stop,
+            generator,
             mixer,
             running: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -642,7 +639,7 @@ impl StreamControl {
         self.stop.store(false, Ordering::SeqCst);
         *self.config.lock().map_err(|_| "stream config lock poisoned")? = config;
 
-        crate::ensure_generator_stopped(&self.generator_running, &self.generator_stop).await;
+        self.generator.ensure_stopped().await;
         if !self.device.lock().await.is_connected().await {
             self.running.store(false, Ordering::SeqCst);
             return Err("Device not connected".into());

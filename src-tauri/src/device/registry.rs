@@ -17,10 +17,11 @@ use std::sync::Mutex as StdMutex;
 use log::warn;
 use tokio::sync::Mutex;
 
-use crate::qa40x::{QA40xDevice, Telemetry};
+use crate::qa40x::Telemetry;
 
 use super::error::DeviceError;
 use super::id::{DeviceDescriptor, DeviceId, SourceKind};
+use super::runtime::DeviceRuntime;
 use super::source::{DeviceHandle, DeviceSource};
 use super::usb::UsbDeviceSource;
 use super::virt::VirtualDeviceSource;
@@ -34,8 +35,9 @@ pub struct OpenDevice {
 
 struct RegistryInner {
     sources: Vec<Arc<dyn DeviceSource>>,
-    handle: DeviceHandle,
-    telemetry: Arc<Mutex<Option<Telemetry>>>,
+    /// Lot C: exactly one runtime — the default device slot. Lot E: a map
+    /// keyed by `DeviceId` plus this one as the default slot.
+    runtime: DeviceRuntime,
     /// std Mutex held only for a clone/replace, never across an await (the
     /// `StreamControl::config` rule).
     current: StdMutex<Option<OpenDevice>>,
@@ -57,29 +59,29 @@ impl DeviceRegistry {
 
     /// Registry over arbitrary sources (tests).
     pub fn with_sources(sources: Vec<Arc<dyn DeviceSource>>) -> Self {
-        let device = QA40xDevice::new();
-        // Grab the telemetry cell BEFORE the device goes behind the mutex, so
-        // pure cache readers never queue on the exclusive device lock (the
-        // quit-hang rule — see `AppState`).
-        let telemetry = device.telemetry_cell();
         Self {
             inner: Arc::new(RegistryInner {
                 sources,
-                handle: Arc::new(Mutex::new(device)),
-                telemetry,
+                runtime: DeviceRuntime::new(),
                 current: StdMutex::new(None),
             }),
         }
     }
 
+    /// The default device's runtime — the same runtime instance on every
+    /// call (the never-replaced invariant, now covering the whole runtime).
+    pub fn default_runtime(&self) -> DeviceRuntime {
+        self.inner.runtime.clone()
+    }
+
     /// The one device object of the session — the same `Arc` on every call.
     pub fn handle(&self) -> DeviceHandle {
-        self.inner.handle.clone()
+        self.inner.runtime.handle()
     }
 
     /// The device's telemetry cache cell (readable without the device mutex).
     pub fn telemetry_cell(&self) -> Arc<Mutex<Option<Telemetry>>> {
-        self.inner.telemetry.clone()
+        self.inner.runtime.telemetry_cell()
     }
 
     /// Union of all sources' enumerations, in source registration order,
@@ -125,9 +127,12 @@ impl DeviceRegistry {
         // An unknown SOURCE errored out above without touching the device,
         // so whatever was open before is honestly still open.
         self.note_closed();
-        let desc = source.open(id, &self.inner.handle).await?;
+        let desc = source.open(id, &self.inner.runtime.handle()).await?;
         *self.inner.current.lock().expect("current lock") =
             Some(OpenDevice { id: id.clone(), descriptor: desc.clone() });
+        // The runtime's own copy of "what is open on me" — readable without
+        // the device mutex; the stream loop stamps it into every frame.
+        self.inner.runtime.open_unit().set(Some(id.clone()));
         Ok(desc)
     }
 
@@ -156,7 +161,7 @@ impl DeviceRegistry {
                 }
             }
         }
-        self.inner.handle.lock().await.release_claim().await;
+        self.inner.runtime.handle().lock().await.release_claim().await;
         self.note_closed();
         Err(scan_err.unwrap_or(DeviceError::NotFound))
     }
@@ -183,7 +188,8 @@ impl DeviceRegistry {
     /// Close the open device (safe-state teardown included). The caller has
     /// already stopped the stream/generator loops, same as before.
     pub async fn close(&self) -> Result<(), DeviceError> {
-        let dev = self.inner.handle.lock().await;
+        let handle = self.inner.runtime.handle();
+        let dev = handle.lock().await;
         let res = dev.disconnect().await.map(|_| ()).map_err(DeviceError::from);
         // Bookkeeping is cleared even on a failed teardown: the intent was to
         // close, and the device's own state has been torn down best-effort.
@@ -200,6 +206,7 @@ impl DeviceRegistry {
     /// the USB monitor, bootloader detach during a flash.
     pub fn note_closed(&self) {
         *self.inner.current.lock().expect("current lock") = None;
+        self.inner.runtime.open_unit().set(None);
     }
 
     /// Whether REAL hardware is present on any physical source — never
@@ -220,7 +227,7 @@ impl DeviceRegistry {
     /// virtual device counts (it lives in-process, not on the bus), else the
     /// bus is scanned — the pre-registry `is_present` semantics, unchanged.
     pub async fn any_present(&self) -> bool {
-        self.inner.handle.lock().await.is_present().await
+        self.inner.runtime.handle().lock().await.is_present().await
     }
 }
 

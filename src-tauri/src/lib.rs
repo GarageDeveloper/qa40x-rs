@@ -78,32 +78,29 @@ pub struct AppState {
 
 impl AppState {
     fn new() -> Self {
-        // The registry creates the device object and hands out the one
-        // shared handle + telemetry cell (grabbed before the device went
-        // behind its mutex, so cache readers never queue on it).
+        // The registry creates the default device's RUNTIME (issue #25
+        // lot C): device object, telemetry cell, mixer, generator flags,
+        // sweep cancel and stream control all live there. The fields below
+        // are aliases into it, kept so the command bodies stay untouched in
+        // this step (removed in the next).
         let devices = device::DeviceRegistry::new();
-        let device = devices.handle();
-        let telemetry = devices.telemetry_cell();
-        let generator_running = Arc::new(AtomicBool::new(false));
-        let generator_stop = Arc::new(AtomicBool::new(false));
-        let mixer = Arc::new(std::sync::Mutex::new(mixer::Mixer::default()));
+        let rt = devices.default_runtime();
+        let device = rt.handle();
+        let generator_running = rt.generator().running_flag().clone();
+        let generator_stop = rt.generator().stop_flag().clone();
         Self {
-            devices,
             device: device.clone(),
             generator_running: generator_running.clone(),
             generator_stop: generator_stop.clone(),
             firmware_images: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             rest: Arc::new(Mutex::new(rest::RestControl::new(device.clone()))),
-            script: script::ScriptControl::new(
-                device.clone(),
-                generator_running.clone(),
-                generator_stop.clone(),
-            ),
-            mixer: mixer.clone(),
+            script: script::ScriptControl::new(device, generator_running, generator_stop),
+            mixer: rt.mixer(),
             usb_monitor_active: Arc::new(AtomicBool::new(false)),
-            stream: stream::StreamControl::new(device, generator_running, generator_stop, mixer),
-            sweep_cancel: Arc::new(AtomicBool::new(false)),
-            telemetry,
+            stream: rt.stream(),
+            sweep_cancel: rt.sweep_cancel().clone(),
+            telemetry: rt.telemetry_cell(),
+            devices,
         }
     }
 }
@@ -195,16 +192,12 @@ pub(crate) async fn ensure_generator_stopped(
     generator_running: &Arc<AtomicBool>,
     generator_stop: &Arc<AtomicBool>,
 ) {
-    if !generator_running.load(Ordering::SeqCst) {
-        return;
-    }
-    generator_stop.store(true, Ordering::SeqCst);
-    for _ in 0..200 {
-        if !generator_running.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
-    }
+    // Shim over the moved body (issue #25 lot C): `script.rs` and
+    // `measurement.rs` keep their loose-flag signatures for the examples'
+    // sake; the semantics live in [`device::GeneratorFlags::ensure_stopped`].
+    device::GeneratorFlags::from_parts(generator_running.clone(), generator_stop.clone())
+        .ensure_stopped()
+        .await;
 }
 
 // Background USB monitoring task. At most ONE instance runs at a time: a
@@ -1489,6 +1482,24 @@ mod app_state_tests {
         let state = AppState::new();
         assert!(Arc::ptr_eq(&state.device, &state.devices.handle()));
         assert!(Arc::ptr_eq(&state.telemetry, &state.devices.telemetry_cell()));
+    }
+
+    #[tokio::test]
+    async fn every_appstate_alias_points_into_the_default_runtime() {
+        // Lot-C invariant, step 1a: the runtime OWNS the per-device state;
+        // AppState's remaining fields are aliases into it. Any field that
+        // drifted to its own allocation would split the commands from the
+        // loops.
+        let state = AppState::new();
+        let rt = state.devices.default_runtime();
+        assert!(Arc::ptr_eq(&state.device, &rt.handle()));
+        assert!(Arc::ptr_eq(&state.telemetry, &rt.telemetry_cell()));
+        assert!(Arc::ptr_eq(&state.mixer, &rt.mixer()));
+        assert!(Arc::ptr_eq(&state.generator_running, rt.generator().running_flag()));
+        assert!(Arc::ptr_eq(&state.generator_stop, rt.generator().stop_flag()));
+        assert!(Arc::ptr_eq(&state.sweep_cancel, rt.sweep_cancel()));
+        // And the registry returns the same runtime instance on every call.
+        assert!(Arc::ptr_eq(&rt.handle(), &state.devices.default_runtime().handle()));
     }
 }
 
