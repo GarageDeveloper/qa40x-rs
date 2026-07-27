@@ -7,7 +7,7 @@ use crate::qa40x::{
     types::*,
 };
 use async_trait::async_trait;
-use log::{debug, info};
+use log::{debug, info, warn};
 use nusb::transfer::{Buffer, Bulk, Completion, In, Out};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -85,9 +85,15 @@ pub struct QA40xDevice {
     /// Detected model (QA402/QA403), set at connect from the USB product ID.
     /// Used to gate model-specific behaviour (sample rates, firmware flash).
     model: Arc<Mutex<Option<Model>>>,
-    /// When the last LINK keepalive ran (idle poll or in-run), for the ~1 Hz
-    /// rate limit of the in-run keepalive.
+    /// When the last LINK keepalive ran (idle poll, between-frame or
+    /// in-capture), for the shared ~1 Hz rate limit
+    /// ([`Self::take_keepalive_slot`]).
     last_keepalive: Arc<Mutex<Option<std::time::Instant>>>,
+    /// COMPLETED keepalive cycles (link write + telemetry reads that all
+    /// succeeded), across every path. Distinct from the `last_keepalive`
+    /// stamp, which is taken BEFORE the attempt: validation must count
+    /// successes, not slots taken (issue #54 review, F1).
+    keepalive_ok: Arc<std::sync::atomic::AtomicU64>,
     /// Telemetry captured by the most recent keepalive. Lets the UI refresh its
     /// telemetry readout during a run without any USB I/O of its own.
     cached_telemetry: Arc<Mutex<Option<Telemetry>>>,
@@ -117,6 +123,7 @@ impl QA40xDevice {
             meta: Arc::new(Mutex::new(None)),
             model: Arc::new(Mutex::new(None)),
             last_keepalive: Arc::new(Mutex::new(None)),
+            keepalive_ok: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cached_telemetry: Arc::new(Mutex::new(None)),
             relay_settle: Arc::new(Mutex::new(SettleDeadline::default())),
             virtual_sim: Arc::new(Mutex::new(None)),
@@ -670,17 +677,39 @@ impl QA40xDevice {
     /// One keepalive cycle, mirroring the official app: write the link register
     /// (0x00) with a pattern, then read telemetry. Runs ~1 s while connected and
     /// idle (frontend poll) to hold the LINK LED lit, and between stream frames
-    /// during a run (see [`Self::run_keepalive_if_due`]). Must never OVERLAP a
-    /// stream, but serialized between streams is safe — proven on hardware by
-    /// `examples/hw_run_keepalive.rs` (the earlier "keepalive wedges the stream"
-    /// finding was actually undrained cancelled completions; see `stream_pump`).
+    /// during a run (see [`Self::run_keepalive_if_due`]). During a capture the
+    /// pump fires the same cycle inline on the endpoints it already holds
+    /// ([`Self::pump_keepalive_if_due`]) — interleaving register I/O with an
+    /// active stream is hardware-supported: the official app keepalives at
+    /// ~1 Hz even while measuring (issue #54; the earlier "keepalive wedges
+    /// the stream" finding was actually undrained cancelled completions, see
+    /// `stream_pump`).
     pub async fn keepalive(&self) -> Result<Telemetry> {
-        self.write_register(registers::LINK_KEEPALIVE, &0x1234_5678u32.to_be_bytes())
-            .await?;
-        let t = self.read_telemetry().await?;
+        let t = {
+            let mut guard = self.eps.lock().await;
+            let eps = guard.as_mut().ok_or(QA40xError::DeviceNotOpened)?;
+            keepalive_on(eps).await?
+        };
         *self.last_keepalive.lock().await = Some(std::time::Instant::now());
         *self.cached_telemetry.lock().await = Some(t.clone());
+        self.keepalive_ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(t)
+    }
+
+    /// When the most recent LINK keepalive was ATTEMPTED (idle poll,
+    /// between-frame or in-capture), if any — the rate-limit stamp, taken
+    /// before the cycle runs. For validation use
+    /// [`Self::keepalive_ok_count`], which only counts completed cycles.
+    pub async fn last_keepalive_at(&self) -> Option<std::time::Instant> {
+        *self.last_keepalive.lock().await
+    }
+
+    /// COMPLETED keepalive cycles since construction, across every path
+    /// (idle poll, between-frame, in-capture). Diagnostics —
+    /// `examples/hw_run_keepalive.rs` asserts on the delta across one long
+    /// capture, which the attempt stamp alone cannot prove (issue #54).
+    pub fn keepalive_ok_count(&self) -> u64 {
+        self.keepalive_ok.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Telemetry from the most recent keepalive (idle poll or in-run), with no
@@ -697,59 +726,79 @@ impl QA40xDevice {
         self.cached_telemetry.clone()
     }
 
+    /// Rate limiter shared by the between-stream and in-capture keepalives:
+    /// true — and the timestamp is taken — if no keepalive ran within the
+    /// last ~1 s. Stamps BEFORE the attempt so a failing device is pinged at
+    /// most once a second, not once per frame/block.
+    async fn take_keepalive_slot(&self) -> bool {
+        let mut last = self.last_keepalive.lock().await;
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
+    }
+
     /// Fire a LINK-LED keepalive if none ran within the last ~1 s. Called from
     /// [`Self::stream_io`] before each stream, so multi-frame runs (live
     /// analyzer, sweeps, the looping output generator) keep the LINK LED lit
-    /// like the official app, which keepalives at ~1 Hz even while measuring
-    /// (our USB captures show its 0x00 writes inside armed
-    /// STREAM_CTRL=5 windows; ours run between streams instead).
+    /// between captures; DURING a capture the pump takes over with
+    /// [`Self::pump_keepalive_if_due`] (issue #54).
     /// Non-fatal by design: an LED ping must never fail a measurement.
     async fn run_keepalive_if_due(&self) {
-        {
-            let mut last = self.last_keepalive.lock().await;
-            let due = last.map_or(true, |t| t.elapsed() >= Duration::from_secs(1));
-            if !due {
-                return;
-            }
-            // Stamp before attempting so a failing device is pinged at most
-            // once a second, not once per frame.
-            *last = Some(std::time::Instant::now());
+        if !self.take_keepalive_slot().await {
+            return;
         }
         if let Err(e) = self.keepalive().await {
             debug!("in-run keepalive skipped: {}", e);
         }
     }
 
+    /// In-capture LINK keepalive (issue #54): the same cycle as
+    /// [`Self::keepalive`], fired at most once per second from the pump's
+    /// collection loop on the endpoints the pump already holds. With a long
+    /// FFT a single capture runs for tens of seconds, and without this the
+    /// LINK LED times out mid-capture. Register I/O rides its own bulk
+    /// endpoints, distinct from the data pair, and the official app does
+    /// exactly this (its USB traces show 0x00 writes inside armed
+    /// STREAM_CTRL=5 windows). Serialization with all other register I/O is
+    /// structural: the pump owns the endpoint mutex for the whole capture.
+    ///
+    /// Non-fatal by design: an LED ping must never fail a measurement.
+    /// Returns false after a failed cycle so the caller stops pinging for the
+    /// REST of this capture — a register path that stalls under an armed
+    /// stream should not be hammered once a second (each failure costs its
+    /// timeouts and risks reply desync); the between-frame keepalive probes
+    /// it again after STREAM_STOP.
+    async fn pump_keepalive_if_due(&self, eps: &mut ClaimedEndpoints) -> bool {
+        if !self.take_keepalive_slot().await {
+            return true;
+        }
+        match keepalive_on(eps).await {
+            Ok(t) => {
+                // Re-stamp on completion so the cadence matches keepalive()
+                // (~1 s between cycle ends, not between attempt starts).
+                *self.last_keepalive.lock().await = Some(std::time::Instant::now());
+                *self.cached_telemetry.lock().await = Some(t);
+                self.keepalive_ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                warn!("in-capture keepalive failed ({}); disabled until the capture ends", e);
+                false
+            }
+        }
+    }
+
     /// Read live hardware telemetry (USB voltage/current, ISO current,
     /// temperature) from the sensor registers. Reads are non-destructive; the
-    /// caller should avoid polling this mid-stream (it shares the interface).
+    /// caller should avoid polling this mid-stream (it queues on the endpoint
+    /// mutex until the capture ends — poll [`Self::last_telemetry`] instead,
+    /// which the in-capture keepalive refreshes at ~1 Hz).
     pub async fn read_telemetry(&self) -> Result<Telemetry> {
-        let rd = |v: Vec<u8>| -> u32 {
-            if v.len() == 4 {
-                u32::from_be_bytes([v[0], v[1], v[2], v[3]])
-            } else {
-                0
-            }
-        };
-        let usb_v = rd(self.read_register(registers::TELEM_USB_VOLTAGE).await?);
-        let usb_i = rd(self.read_register(registers::TELEM_USB_CURRENT).await?);
-        let iso_i = rd(self.read_register(registers::TELEM_ISO_CURRENT).await?);
-        // Historically polled as a fifth telemetry word; actually the firmware
-        // trace-buffer length (constant 0x418 on a healthy unit). Kept in the
-        // poll so the raw readout stays available.
-        let extra = rd(self.read_register(registers::TRACE_LEN).await?);
-        let temp = rd(self.read_register(registers::TELEM_TEMPERATURE).await?);
-        Ok(Telemetry {
-            usb_voltage_v: usb_v as f32 / 1000.0,
-            usb_current_ma: usb_i as f32,
-            iso_current_ma: iso_i as f32,
-            temperature_c: temp as f32 / 10.0,
-            raw_usb_voltage: usb_v,
-            raw_usb_current: usb_i,
-            raw_iso_current: iso_i,
-            raw_extra: extra,
-            raw_temperature: temp,
-        })
+        let mut guard = self.eps.lock().await;
+        let eps = guard.as_mut().ok_or(QA40xError::DeviceNotOpened)?;
+        telemetry_on(eps).await
     }
 
     /// Whether a QA40x (QA402 or QA403) is present on the USB bus, regardless of whether we are
@@ -1185,8 +1234,9 @@ impl QA40xDevice {
         debug!("stream_io: {} bytes in {} blocks", total_bytes, blocks);
 
         // Keep the LINK LED lit across multi-frame runs: at most one keepalive
-        // per second, always BETWEEN streams (never overlapping one — this
-        // sits before STREAM_CTRL=5). Hardware-validated by hw_run_keepalive.
+        // per second. This pre-stream ping covers the gaps between captures;
+        // during the capture itself the pump keeps pinging inline at the same
+        // ~1 Hz (issue #54). Hardware-validated by hw_run_keepalive.
         self.run_keepalive_if_due().await;
 
         // Range relays: if reg 5/6 was written since the last capture, wait
@@ -1288,7 +1338,7 @@ impl QA40xDevice {
             eps.data_write.submit(chunk(i).into());
         }
 
-        let result = Self::pump_collect(eps, blocks, total_bytes, cancel).await;
+        let result = self.pump_collect(eps, blocks, total_bytes, cancel).await;
 
         // On any failure, cancel and FULLY drain both data endpoints. Draining
         // matters as much as cancelling: nusb keeps completed-but-uncollected
@@ -1308,12 +1358,15 @@ impl QA40xDevice {
     /// order, then confirm every DAC write. Kept separate so the caller has a
     /// single error path on which it can cancel + drain both data endpoints.
     async fn pump_collect(
+        &self,
         eps: &mut ClaimedEndpoints,
         blocks: usize,
         capacity: usize,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Vec<u8>> {
         let mut rx = Vec::with_capacity(capacity);
+        let cancelled = || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
+        let mut keepalive_enabled = true;
 
         // Collect ADC data in order. A generous timeout covers the whole queue
         // draining at the sample rate.
@@ -1321,9 +1374,22 @@ impl QA40xDevice {
             // Cooperative cancel between blocks (a long batched sweep is ONE
             // stream — this is the only mid-transaction exit): returning Err
             // rides the caller's cancel_and_drain + STREAM_STOP path.
-            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
+            if cancelled() {
                 debug!("stream_pump: cancelled at block {}/{}", i, blocks);
                 return Err(QA40xError::Cancelled);
+            }
+            // In-capture LINK keepalive (~1 Hz, issue #54). Every data
+            // transfer is already queued on both endpoints, so a
+            // millisecond-scale register round-trip between collections
+            // never starves the stream. Re-check cancel afterwards: a
+            // FAILING keepalive can take ~1.5 s of register timeouts, and
+            // the flag must not wait out the next 5 s data read on top.
+            if keepalive_enabled {
+                keepalive_enabled = self.pump_keepalive_if_due(eps).await;
+                if cancelled() {
+                    debug!("stream_pump: cancelled at block {}/{} (post-keepalive)", i, blocks);
+                    return Err(QA40xError::Cancelled);
+                }
             }
             match complete_or_cancel(&mut eps.data_read, Duration::from_secs(5)).await {
                 Ok(c) => {
@@ -1923,55 +1989,120 @@ async fn cancel_and_drain<T: EndpointQueue>(ep: &mut T) {
     }
 }
 
+/// Raw register read against already-claimed endpoints — the core of
+/// [`RegisterOps::read_register`], also callable from the stream pump while it
+/// holds the endpoint mutex (in-capture keepalive, issue #54).
+async fn reg_read_on(eps: &mut ClaimedEndpoints, address: u8) -> Result<Vec<u8>> {
+    debug!("READ_REGISTER: Starting read from register 0x{:02X}", address);
+
+    // To read a register, write (0x80 | address) + 4 zero bytes on the
+    // register-write endpoint, then read the 4-byte reply on register-read.
+    let read_address = 0x80 | address;
+    let mut cmd = Vec::with_capacity(5);
+    cmd.push(read_address);
+    cmd.extend_from_slice(&[0u8; 4]);
+
+    eps.register_write.submit(cmd.into());
+    complete_or_cancel(&mut eps.register_write, Duration::from_secs(1))
+        .await?
+        .status
+        .map_err(QA40xError::from)?;
+
+    eps.register_read.submit(Buffer::new(512)); // bulk IN needs a multiple of max_packet (512); device short-packets 4 bytes
+    let data = match complete_or_cancel(&mut eps.register_read, Duration::from_secs(1)).await {
+        Ok(c) => c.into_result().map_err(QA40xError::from)?,
+        Err(e) => {
+            // The device may still form the reply after our timeout; left
+            // unconsumed, it would be delivered to the NEXT register read and
+            // shift every subsequent reply one register late for the rest of
+            // the session. One short discard attempt closes that window
+            // (issue #54 review, F4).
+            eps.register_read.submit(Buffer::new(512));
+            if complete_or_cancel(&mut eps.register_read, Duration::from_millis(250))
+                .await
+                .is_ok()
+            {
+                warn!("register 0x{:02X}: reply timed out, then arrived late — discarded it to keep the reply stream in sync", address);
+            }
+            return Err(e);
+        }
+    };
+
+    debug!("READ_REGISTER: read {} bytes from 0x{:02X}: {:02X?}", data.len(), address, &data[..]);
+    Ok(data.to_vec())
+}
+
+/// Raw register write against already-claimed endpoints — the core of
+/// [`RegisterOps::write_register`], also callable from the stream pump while
+/// it holds the endpoint mutex (in-capture keepalive, issue #54).
+async fn reg_write_on(eps: &mut ClaimedEndpoints, address: u8, data: &[u8]) -> Result<()> {
+    debug!("Writing {} bytes to register 0x{:02X}: {:02X?}", data.len(), address, data);
+
+    let mut buffer = Vec::with_capacity(data.len() + 1);
+    buffer.push(address);
+    buffer.extend_from_slice(data);
+
+    eps.register_write.submit(buffer.into());
+    complete_or_cancel(&mut eps.register_write, Duration::from_secs(1))
+        .await?
+        .status
+        .map_err(QA40xError::from)?;
+
+    debug!("Successfully wrote to register 0x{:02X}", address);
+    Ok(())
+}
+
+/// One telemetry poll on already-claimed endpoints — the core of
+/// [`QA40xDevice::read_telemetry`].
+async fn telemetry_on(eps: &mut ClaimedEndpoints) -> Result<Telemetry> {
+    let rd = |v: Vec<u8>| -> u32 {
+        if v.len() == 4 {
+            u32::from_be_bytes([v[0], v[1], v[2], v[3]])
+        } else {
+            0
+        }
+    };
+    let usb_v = rd(reg_read_on(eps, registers::TELEM_USB_VOLTAGE).await?);
+    let usb_i = rd(reg_read_on(eps, registers::TELEM_USB_CURRENT).await?);
+    let iso_i = rd(reg_read_on(eps, registers::TELEM_ISO_CURRENT).await?);
+    // Historically polled as a fifth telemetry word; actually the firmware
+    // trace-buffer length (constant 0x418 on a healthy unit). Kept in the
+    // poll so the raw readout stays available.
+    let extra = rd(reg_read_on(eps, registers::TRACE_LEN).await?);
+    let temp = rd(reg_read_on(eps, registers::TELEM_TEMPERATURE).await?);
+    Ok(Telemetry {
+        usb_voltage_v: usb_v as f32 / 1000.0,
+        usb_current_ma: usb_i as f32,
+        iso_current_ma: iso_i as f32,
+        temperature_c: temp as f32 / 10.0,
+        raw_usb_voltage: usb_v,
+        raw_usb_current: usb_i,
+        raw_iso_current: iso_i,
+        raw_extra: extra,
+        raw_temperature: temp,
+    })
+}
+
+/// One keepalive cycle on already-claimed endpoints: link-register (0x00)
+/// write, then a telemetry poll — the core of [`QA40xDevice::keepalive`] and
+/// of the pump's in-capture keepalive (issue #54).
+async fn keepalive_on(eps: &mut ClaimedEndpoints) -> Result<Telemetry> {
+    reg_write_on(eps, registers::LINK_KEEPALIVE, &0x1234_5678u32.to_be_bytes()).await?;
+    telemetry_on(eps).await
+}
+
 #[async_trait]
 impl RegisterOps for QA40xDevice {
     async fn read_register(&self, address: u8) -> Result<Vec<u8>> {
-        debug!("READ_REGISTER: Starting read from register 0x{:02X}", address);
-
         let mut guard = self.eps.lock().await;
         let eps = guard.as_mut().ok_or(QA40xError::DeviceNotOpened)?;
-
-        // To read a register, write (0x80 | address) + 4 zero bytes on the
-        // register-write endpoint, then read the 4-byte reply on register-read.
-        let read_address = 0x80 | address;
-        let mut cmd = Vec::with_capacity(5);
-        cmd.push(read_address);
-        cmd.extend_from_slice(&[0u8; 4]);
-
-        eps.register_write.submit(cmd.into());
-        complete_or_cancel(&mut eps.register_write, Duration::from_secs(1))
-            .await?
-            .status
-            .map_err(QA40xError::from)?;
-
-        eps.register_read.submit(Buffer::new(512)); // bulk IN needs a multiple of max_packet (512); device short-packets 4 bytes
-        let data = complete_or_cancel(&mut eps.register_read, Duration::from_secs(1))
-            .await?
-            .into_result()
-            .map_err(QA40xError::from)?;
-
-        debug!("READ_REGISTER: read {} bytes from 0x{:02X}: {:02X?}", data.len(), address, &data[..]);
-        Ok(data.to_vec())
+        reg_read_on(eps, address).await
     }
 
     async fn write_register(&self, address: u8, data: &[u8]) -> Result<()> {
-        debug!("Writing {} bytes to register 0x{:02X}: {:02X?}", data.len(), address, data);
-
         let mut guard = self.eps.lock().await;
         let eps = guard.as_mut().ok_or(QA40xError::DeviceNotOpened)?;
-
-        let mut buffer = Vec::with_capacity(data.len() + 1);
-        buffer.push(address);
-        buffer.extend_from_slice(data);
-
-        eps.register_write.submit(buffer.into());
-        complete_or_cancel(&mut eps.register_write, Duration::from_secs(1))
-            .await?
-            .status
-            .map_err(QA40xError::from)?;
-
-        debug!("Successfully wrote to register 0x{:02X}", address);
-        Ok(())
+        reg_write_on(eps, address, data).await
     }
 }
 

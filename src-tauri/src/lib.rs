@@ -704,9 +704,10 @@ async fn keepalive(
     device.keepalive().await.map_err(|e| e.to_string())
 }
 
-/// Telemetry from the most recent keepalive (idle poll or the in-run keepalive
-/// that `stream_io` fires between frames), with NO USB I/O of its own — the UI
-/// polls this while a run owns the stream. `None` until a keepalive has run.
+/// Telemetry from the most recent keepalive (idle poll, the between-frame
+/// ping, or the in-capture keepalive the stream pump fires at ~1 Hz — issue
+/// #54), with NO USB I/O of its own — the UI polls this while a run owns the
+/// stream. `None` until a keepalive has run.
 #[tauri::command]
 async fn last_telemetry(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
