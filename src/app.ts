@@ -14,6 +14,7 @@ import {
   deviceLost,
   refreshTelemetry,
 } from "./store/actions/device";
+import { refreshDevices } from "./store/actions/devices";
 import { mountDevicePanel } from "./panels/device/panel";
 import { mountStatusBar } from "./panels/status/panel";
 import { mountSourcesPanel } from "./panels/sources/panel";
@@ -40,6 +41,11 @@ const AUTOCONNECT_POLL_MS = 2000;
  * anyway — a hung IndexedDB open must degrade to "empty bench now, restore
  * applies when it lands", never a blank window (issue #44 review #4). */
 const BOOT_RESTORE_TIMEOUT_MS = 3000;
+/** How long the mount waits for the boot enumeration (issue #25 lot D): the
+ * built-in virtual source answers in-process, so this only trips on a wedged
+ * USB stack — the panel then renders placeholder menus and the 2 s tick
+ * fills them in whenever the scan lands. */
+const BOOT_ENUMERATE_TIMEOUT_MS = 2000;
 
 export async function mountApp(
   root: HTMLElement,
@@ -68,9 +74,17 @@ export async function mountApp(
   // but only up to a timeout: on a stalled storage engine the app mounts
   // the first-run bench and the restore applies whenever it settles.
   const restored = restoreWorkspaceAtBoot(store, ipc, ws);
+  // Enumerate in parallel with the restore, so the device panel's first
+  // paint already has real range/rate tables (issue #25 lot D — the consts
+  // are gone; capabilities come from the backend).
+  const enumerated = refreshDevices(store, ipc);
   await Promise.race([
     restored,
     new Promise<void>((resolve) => setTimeout(resolve, BOOT_RESTORE_TIMEOUT_MS)),
+  ]);
+  await Promise.race([
+    enumerated,
+    new Promise<void>((resolve) => setTimeout(resolve, BOOT_ENUMERATE_TIMEOUT_MS)),
   ]);
 
   mountDevicePanel(topbar, store, ipc);
@@ -149,9 +163,10 @@ export async function mountApp(
   // Backend-pushed disconnect (USB monitor). The payload names the lost
   // unit (issue #25 lot C); optional-safe — older backends and the e2e
   // harness emit the event with no payload at all.
-  void listen<DeviceLost | undefined>("device-disconnected", (e) =>
-    deviceLost(store, e.payload?.device_id ?? null)
-  );
+  void listen<DeviceLost | undefined>("device-disconnected", (e) => {
+    deviceLost(store, e.payload?.device_id ?? null);
+    void refreshDevices(store, ipc);
+  });
 
   // Telemetry poll while connected (cached read — no register I/O).
   setInterval(() => void refreshTelemetry(store, ipc), TELEMETRY_POLL_MS);
@@ -159,5 +174,17 @@ export async function mountApp(
   // Auto-connect (v1 parity): at startup and after a replug, connect as
   // soon as a device is present — unless the user disconnected by hand.
   void autoConnectTick(store, ipc);
-  setInterval(() => void autoConnectTick(store, ipc), AUTOCONNECT_POLL_MS);
+  setInterval(() => {
+    void autoConnectTick(store, ipc);
+    // Re-enumerate on the same cadence, but ONLY while idle: a bus scan
+    // must never be added to a running capture or program (#25 lot D).
+    const s = store.get();
+    if (
+      !s.run.streaming &&
+      s.run.programLock === null &&
+      s.device.status !== "connecting"
+    ) {
+      void refreshDevices(store, ipc);
+    }
+  }, AUTOCONNECT_POLL_MS);
 }

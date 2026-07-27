@@ -9,11 +9,7 @@ import "./panel.css";
 import type { Store } from "../../store/store";
 import { shallowEq } from "../../store/store";
 import type { AppState } from "../../store/state";
-import {
-  FFT_SIZES,
-  INPUT_RANGES_DBV,
-  OUTPUT_RANGES_DBV,
-} from "../../store/state";
+import { FFT_SIZES } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
   connect,
@@ -26,6 +22,12 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
+import {
+  inputRangesDbv,
+  outputRangesDbv,
+  pickedDeviceId,
+  sampleRatesHz,
+} from "../../store/selectors/devices";
 import { openAppDrawer } from "../appmenu/drawer";
 import { el, keyedList } from "../../ui/dom";
 
@@ -62,14 +64,19 @@ function setOptions(
   fmt: (v: number) => string,
   current: number | null
 ): void {
-  const sig = values.join(",");
+  // Before the first enumeration lands (capabilities not known yet) the
+  // list is empty: render ONE disabled placeholder so the closed select
+  // keeps a sane width — the control never collapses (no layout shift).
+  const sig = values.length ? values.join(",") : "empty";
   if (sel.dataset.sig !== sig) {
     sel.dataset.sig = sig;
     sel.replaceChildren(
-      ...values.map((v) => el("option", { value: String(v) }, fmt(v)))
+      ...(values.length
+        ? values.map((v) => el("option", { value: String(v) }, fmt(v)))
+        : [el("option", { value: "", disabled: true }, "—")])
     );
   }
-  if (current !== null) sel.value = String(current);
+  if (current !== null && values.length) sel.value = String(current);
 }
 
 export function mountDevicePanel(
@@ -83,7 +90,10 @@ export function mountDevicePanel(
     onclick: () => {
       const { status } = store.get().device;
       if (status === "connected") void disconnect(store, ipc);
-      else if (status === "disconnected") void connect(store, ipc);
+      else if (status === "disconnected")
+        // Rule P3: a deviceId rides along only when the user explicitly
+        // picked a unit — an untouched picker keeps the legacy call.
+        void connect(store, ipc, { deviceId: pickedDeviceId(store.get()) });
     },
   }, "Connect");
   // Demo mode: one click attaches the embedded virtual QA403 — for trying
@@ -170,8 +180,18 @@ export function mountDevicePanel(
   setOptions(fftSel.input, FFT_SIZES, fmtFft, store.get().acquisition.fftSize);
 
   store.select(
-    (s) => s.device,
-    (device) => {
+    // Ranges/rates come from the PRIMARY unit's backend capabilities (issue
+    // #25 lot D) — the selection spans both slices so the menus fill in the
+    // moment an enumeration lands, not only on a device-slice change. The
+    // arrays are entry-stable; setOptions' signature guard absorbs the
+    // refresh churn.
+    (s) => ({
+      device: s.device,
+      inputRanges: inputRangesDbv(s),
+      outputRanges: outputRangesDbv(s),
+      rates: sampleRatesHz(s),
+    }),
+    ({ device, inputRanges, outputRanges, rates }) => {
       led.className = `led${
         device.status === "connected"
           ? " led--on"
@@ -189,24 +209,14 @@ export function mountDevicePanel(
       );
 
       const cfg = device.config;
-      setOptions(
-        inputSel.input,
-        INPUT_RANGES_DBV,
-        (v) => `${v} dBV`,
-        cfg?.input_gain ?? null
-      );
+      setOptions(inputSel.input, inputRanges, (v) => `${v} dBV`, cfg?.input_gain ?? null);
       setOptions(
         outputSel.input,
-        OUTPUT_RANGES_DBV,
+        outputRanges,
         (v) => `${v > 0 ? "+" : ""}${v} dBV`,
         cfg?.output_gain ?? null
       );
-      setOptions(
-        rateSel.input,
-        device.info?.sample_rates ?? [48000, 96000, 192000],
-        fmtRate,
-        cfg?.sample_rate ?? null
-      );
+      setOptions(rateSel.input, rates, fmtRate, cfg?.sample_rate ?? null);
       // All four controls are meaningless without a device — grey them out
       // (FFT size included: it only drives the capture loop).
       const disabled = device.status !== "connected";

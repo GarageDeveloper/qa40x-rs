@@ -42,6 +42,24 @@ export function physicalAvailable(s: AppState): DeviceEntry[] {
     .filter((d): d is DeviceEntry => d !== undefined && !d.is_virtual);
 }
 
+/** Rule P3 — what the Connect BUTTON passes to `connect_device`: the user's
+ * explicit pick while it is still available, else undefined (the arg-less
+ * legacy call). Never the primary: with no hardware the primary is the
+ * built-in virtual, and an untouched picker must not turn Connect into
+ * Demo. */
+export function pickedDeviceId(s: AppState): string | undefined {
+  const pick = s.devices.pick;
+  return pick !== null && s.devices.available.includes(pick) ? pick : undefined;
+}
+
+/** Rule P4 — what the auto-connect TICK passes: the pick, but only while it
+ * names an available PHYSICAL unit (a virtual pick must not make the tick
+ * auto-demo; a vanished pick falls back to the legacy first-physical). */
+export function autoConnectDeviceId(s: AppState): string | undefined {
+  const pick = pickedDeviceId(s);
+  return pick !== undefined && !s.devices.byId[pick]?.is_virtual ? pick : undefined;
+}
+
 /** Picker policy (lot D): shown only when ≥2 physical units are enumerated.
  * With 0 or 1 QA40x on the bus the bar is byte-for-byte the pre-lot-D bar —
  * the pixel-identity guarantee; the Demo button stays the one-click

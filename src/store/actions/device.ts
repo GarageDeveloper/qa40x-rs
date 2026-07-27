@@ -6,6 +6,8 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, LevelOffsetsDb } from "../state";
+import { autoConnectDeviceId } from "../selectors/devices";
+import { refreshDevices } from "./devices";
 import { syncStream } from "./stream";
 import { toast } from "./ui";
 
@@ -45,15 +47,22 @@ async function refreshConfig(store: Store<AppState>, ipc: Ipc): Promise<void> {
 export async function connect(
   store: Store<AppState>,
   ipc: Ipc,
-  opts: { silent?: boolean } = {}
+  opts: { silent?: boolean; deviceId?: string } = {}
 ): Promise<void> {
   store.update("device/connecting", (s) => ({
     ...s,
     device: { ...s.device, status: "connecting", userDisconnected: false },
   }));
   try {
-    await ipc.call("connect_device", {});
-    const info = await ipc.call("get_device_info", {});
+    // Rule P3 (issue #25 lot D) lives at the CALL SITES: `deviceId` is
+    // passed only when the user explicitly picked a unit (see
+    // selectors/devices.ts) — the arg-less call is the legacy
+    // first-physical auto-connect, byte-identical to pre-lot-D. Passing the
+    // primary here instead would turn an empty bench into auto-demo (the
+    // virtual unit is always enumerable).
+    const args = opts.deviceId !== undefined ? { deviceId: opts.deviceId } : {};
+    await ipc.call("connect_device", args);
+    const info = await ipc.call("get_device_info", args);
     store.update("device/connected", (s) => ({
       ...s,
       device: { ...s.device, status: "connected", present: true, info },
@@ -69,6 +78,9 @@ export async function connect(
     // toast, or a flaky cable turns into an error firehose.
     if (!opts.silent) toast(store, "error", `Connect failed: ${e}`);
   }
+  // Either way the open/enumeration picture changed (or a stale pick just
+  // failed) — refresh the devices slice; fire-and-forget, UI already moved.
+  void refreshDevices(store, ipc);
 }
 
 /**
@@ -119,6 +131,7 @@ export async function connectVirtual(
     }));
     toast(store, "error", `Demo mode failed: ${e}`);
   }
+  void refreshDevices(store, ipc);
 }
 
 /**
@@ -160,7 +173,15 @@ export async function autoConnectTick(
         ? s
         : { ...s, device: { ...s.device, present } }
     );
-    if (present) await connect(store, ipc, { silent: true });
+    // Rule P4: honor an explicit PHYSICAL pick (else the picker and the
+    // tick would fight — the user picks unit B, the tick opens unit A). A
+    // virtual pick never flows in here: auto-connect must not auto-demo.
+    if (present) {
+      await connect(store, ipc, {
+        silent: true,
+        deviceId: autoConnectDeviceId(store.get()),
+      });
+    }
   } catch {
     // No device / transient USB error — next tick retries.
   }
@@ -190,6 +211,7 @@ export async function disconnect(
       run: runStoppedByDisconnect(s),
     }));
   }
+  void refreshDevices(store, ipc);
 }
 
 /** Run-state mirror of a disconnect: nothing drives the DAC anymore, and

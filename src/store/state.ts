@@ -675,9 +675,6 @@ export const FFT_SIZES = [
   4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
 ] as const;
 
-export const INPUT_RANGES_DBV = [0, 6, 12, 18, 24, 30, 36, 42] as const;
-export const OUTPUT_RANGES_DBV = [-12, -2, 8, 18] as const;
-
 /* The 4 hardware endpoints — always present, never deletable (Traces V2).
  * Ids are stable (they key the frames cache and the e2e specs); colors are
  * the validated series palette so In L/R match the classic L/R hues. */

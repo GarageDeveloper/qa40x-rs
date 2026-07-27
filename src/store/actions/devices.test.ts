@@ -10,6 +10,7 @@ import { initialState } from "../state";
 import type { DeviceEntry, DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { deriveDevices, pickDevice, refreshDevices } from "./devices";
+import { autoConnectTick, connect } from "./device";
 
 export function fakeEntry(
   id: string,
@@ -138,6 +139,79 @@ describe("refreshDevices", () => {
     expect(store.get().devices.available).toEqual(["usb/A"]);
     expect(store.get().devices.primary).toBe("usb/A");
     expect(store.get().devices.enumerating).toBe(false);
+  });
+});
+
+/** An ipc whose device-lifecycle arms answer plausibly and which records
+ * every call — for pinning WHAT rides the wire (P3/P4). */
+function recordingIpc(devices: DeviceList): { ipc: Ipc; calls: [string, unknown][] } {
+  const calls: [string, unknown][] = [];
+  const ipc: Ipc = {
+    call: (method: string, args?: unknown) => {
+      calls.push([method, args]);
+      switch (method) {
+        case "list_devices":
+          return Promise.resolve(devices as never);
+        case "is_device_present":
+          return Promise.resolve(true as never);
+        case "get_device_info":
+          return Promise.resolve(null as never);
+        case "get_device_config":
+          return Promise.resolve({ input_gain: 42, output_gain: 8, sample_rate: 48000 } as never);
+        case "get_input_dbv_offset":
+        case "get_output_dbv_offset":
+          return Promise.resolve({ offset_db: 0, calibrated: true } as never);
+        default:
+          return Promise.resolve(null as never);
+      }
+    },
+  };
+  return { ipc, calls };
+}
+
+function connectArgs(calls: [string, unknown][]): unknown[] {
+  return calls.filter(([m]) => m === "connect_device").map(([, a]) => a);
+}
+
+describe("P3/P4 — what rides the connect wire", () => {
+  it("P3: an untouched picker keeps the legacy arg-less call (never auto-demo)", async () => {
+    // No hardware: only the virtual enumerates, so the PRIMARY is virtual —
+    // and the call must still be {} (the backend then looks for physical).
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc, calls } = recordingIpc(list(fakeEntry("virtual/V", { virtual: true })));
+    await refreshDevices(store, ipc);
+    expect(store.get().devices.primary).toBe("virtual/V");
+    await connect(store, ipc);
+    expect(connectArgs(calls)).toEqual([{}]);
+  });
+
+  it("P3: an explicit pick rides as deviceId (the panel passes pickedDeviceId)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc, calls } = recordingIpc(list(fakeEntry("usb/A"), fakeEntry("usb/B")));
+    await refreshDevices(store, ipc);
+    pickDevice(store, "usb/B");
+    await connect(store, ipc, { deviceId: "usb/B" });
+    expect(connectArgs(calls)).toEqual([{ deviceId: "usb/B" }]);
+  });
+
+  it("P4: the auto-connect tick honors a physical pick", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc, calls } = recordingIpc(list(fakeEntry("usb/A"), fakeEntry("usb/B")));
+    await refreshDevices(store, ipc);
+    pickDevice(store, "usb/B");
+    await autoConnectTick(store, ipc);
+    expect(connectArgs(calls)).toEqual([{ deviceId: "usb/B" }]);
+  });
+
+  it("P4: a VIRTUAL pick never flows into the tick (no auto-demo)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc, calls } = recordingIpc(
+      list(fakeEntry("usb/A"), fakeEntry("virtual/V", { virtual: true }))
+    );
+    await refreshDevices(store, ipc);
+    pickDevice(store, "virtual/V");
+    await autoConnectTick(store, ipc);
+    expect(connectArgs(calls)).toEqual([{}]);
   });
 });
 
