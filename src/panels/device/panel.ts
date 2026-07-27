@@ -22,11 +22,14 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
+import { pickDevice } from "../../store/actions/devices";
 import {
+  availableEntries,
   inputRangesDbv,
   outputRangesDbv,
   pickedDeviceId,
   sampleRatesHz,
+  showDevicePicker,
 } from "../../store/selectors/devices";
 import { openAppDrawer } from "../appmenu/drawer";
 import { el, keyedList } from "../../ui/dom";
@@ -112,6 +115,18 @@ export function mountDevicePanel(
     { "data-testid": "demo-chip", title: "Connected to the built-in virtual device" },
     "DEMO"
   );
+  // Unit picker (issue #25 lot D): hidden unless ≥2 PHYSICAL units are on
+  // the bus — with 0 or 1 the bar is byte-for-byte the pre-lot-D bar
+  // (u-hidden is display:none, no flex gap: the Demo button's own
+  // mechanism). Disabled while connected: switching units goes through
+  // Disconnect — a <select> must not hide a live-measurement teardown
+  // (lot E replaces this with several open units).
+  const unitSel = el("select.field.device-panel__unit.u-hidden", {
+    "data-testid": "device-select",
+    title: "Measurement device — pick which unit Connect opens",
+    onchange: (e: Event) =>
+      pickDevice(store, (e.target as HTMLSelectElement).value),
+  });
 
   const inputSel = select("input-range", "In", (v) =>
     void setInputRange(store, ipc, v)
@@ -162,7 +177,7 @@ export function mountDevicePanel(
       "div.device-panel",
       {},
       brand,
-      el("div.device-panel__conn", {}, led, connectBtn, demoBtn, demoChip),
+      el("div.device-panel__conn", {}, led, unitSel, connectBtn, demoBtn, demoChip),
       el(
         "div.device-panel__ctls",
         {},
@@ -237,6 +252,41 @@ export function mountDevicePanel(
     (fftSize) => {
       fftSel.input.value = String(fftSize);
     }
+  );
+
+  store.select(
+    (s) => ({
+      show: showDevicePicker(s),
+      units: availableEntries(s),
+      // While connected the picker mirrors the OPEN unit (= the primary,
+      // rule P1); disconnected it shows the user's pick, else the primary.
+      value:
+        s.device.status === "disconnected"
+          ? s.devices.pick ?? s.devices.primary
+          : s.devices.primary,
+      connected: s.device.status !== "disconnected",
+    }),
+    ({ show, units, value, connected }) => {
+      unitSel.classList.toggle("u-hidden", !show);
+      unitSel.toggleAttribute("disabled", connected);
+      const sig = units.map((u) => u.id).join("|");
+      if (unitSel.dataset.sig !== sig) {
+        unitSel.dataset.sig = sig;
+        unitSel.replaceChildren(
+          ...units.map((u) =>
+            el(
+              "option",
+              { value: u.id },
+              `${u.model} · ${u.serial}${u.is_virtual ? " (virtual)" : ""}`
+            )
+          )
+        );
+      }
+      if (value !== null && units.some((u) => u.id === value)) {
+        unitSel.value = value;
+      }
+    },
+    shallowEq
   );
 
   store.select(annunciators, (list) => {

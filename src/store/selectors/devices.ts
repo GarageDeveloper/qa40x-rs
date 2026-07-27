@@ -35,6 +35,13 @@ export function sampleRatesHz(s: AppState): number[] {
   return primaryCaps(s)?.sample_rates_hz ?? [];
 }
 
+/** Every available unit, in backend order (USB first, then the virtual). */
+export function availableEntries(s: AppState): DeviceEntry[] {
+  return s.devices.available
+    .map((id) => s.devices.byId[id])
+    .filter((d): d is DeviceEntry => d !== undefined);
+}
+
 /** Available PHYSICAL units, in backend order. */
 export function physicalAvailable(s: AppState): DeviceEntry[] {
   return s.devices.available
