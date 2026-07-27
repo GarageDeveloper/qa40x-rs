@@ -23,7 +23,8 @@
  * keeping the values locale-proof. Non-finite values (digital silence at
  * -∞ dB) become empty cells.
  */
-import type { AppState, TraceMeta } from "../store/state";
+import type { AppState, CaptureProvenance, TraceMeta } from "../store/state";
+import { captureBenchSignature, liveCaptureProvenance } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
 import type { DecodedSweep } from "../data/frames";
 import type { DecodedFd, DecodedTd } from "../ipc/stream";
@@ -101,6 +102,19 @@ export function benchProvenance(
   appVersion: string,
   exportedAt: string
 ): ProvenanceLine[] {
+  return [
+    ...benchLines(s, appVersion, exportedAt),
+    {
+      key: "note",
+      value:
+        "header reflects the bench at export time; a frozen or reloaded " +
+        "trace may have been captured under different settings",
+    },
+  ];
+}
+
+/** The export-time bench block (no note — the caller picks one). */
+function benchLines(s: AppState, appVersion: string, exportedAt: string): ProvenanceLine[] {
   const lines: ProvenanceLine[] = [
     { key: "format_version", value: "1" },
     { key: "app", value: "qa40x-rs" },
@@ -146,13 +160,91 @@ export function benchProvenance(
       { key: "offset_output_r_db", value: numCell(off.output_r) }
     );
   }
-  lines.push({
-    key: "note",
-    value:
-      "header reflects the bench at export time; a frozen or reloaded " +
-      "trace may have been captured under different settings",
-  });
   return lines;
+}
+
+/** The `capture_*` block for one capture snapshot (issue #40) — additive
+ * keys next to the export-time bench block, `format_version` unchanged. */
+export function captureProvenanceLines(c: CaptureProvenance): ProvenanceLine[] {
+  const lines: ProvenanceLine[] = [];
+  if (c.device) {
+    lines.push(
+      { key: "capture_device_model", value: c.device.model },
+      { key: "capture_device_serial", value: c.device.serial },
+      { key: "capture_device_virtual", value: String(c.device.isVirtual) }
+    );
+    if (c.device.firmware !== null) {
+      lines.push({ key: "capture_device_firmware", value: String(c.device.firmware) });
+    }
+  } else {
+    lines.push({ key: "capture_device_model", value: "none" });
+  }
+  if (c.sampleRateHz !== null) {
+    lines.push({ key: "capture_sample_rate_hz", value: String(c.sampleRateHz) });
+  }
+  if (c.inputRangeDbv !== null) {
+    lines.push({ key: "capture_input_range_dbv", value: String(c.inputRangeDbv) });
+  }
+  if (c.outputRangeDbv !== null) {
+    lines.push({ key: "capture_output_range_dbv", value: String(c.outputRangeDbv) });
+  }
+  if (c.fftSize !== null) lines.push({ key: "capture_fft_size", value: String(c.fftSize) });
+  if (c.window !== null) lines.push({ key: "capture_window", value: c.window });
+  if (c.averaging !== null) {
+    lines.push({ key: "capture_averaging", value: c.averaging.mode });
+    if (c.averaging.mode !== "off") {
+      lines.push({ key: "capture_averaging_count", value: String(c.averaging.count) });
+    }
+  }
+  lines.push({ key: "capture_calibrated", value: String(c.offsets?.calibrated === true) });
+  if (c.offsets) {
+    lines.push(
+      { key: "capture_offset_input_l_db", value: numCell(c.offsets.input_l) },
+      { key: "capture_offset_input_r_db", value: numCell(c.offsets.input_r) },
+      { key: "capture_offset_output_l_db", value: numCell(c.offsets.output_l) },
+      { key: "capture_offset_output_r_db", value: numCell(c.offsets.output_r) }
+    );
+  }
+  if (c.capturedAt !== null) lines.push({ key: "capture_time", value: c.capturedAt });
+  if (c.derived === true) lines.push({ key: "capture_derived", value: "true" });
+  if (c.mixed === true) lines.push({ key: "capture_mixed", value: "true" });
+  if (c.programParams) {
+    lines.push({ key: "capture_program_params", value: JSON.stringify(c.programParams) });
+  }
+  return lines;
+}
+
+/**
+ * The provenance block for exporting one trace's data (issue #40): the
+ * export-time bench block, PLUS the trace's own `capture_*` snapshot when it
+ * carries one that says something the bench block doesn't — a pinned
+ * instant (frozen ❄ / program result), a derivation, or a bench that has
+ * MOVED since capture (the QA403-froze-then-QA402-connected case). A live
+ * hardware trace whose snapshot still matches the bench adds nothing — the
+ * header stays as lean as before #40.
+ */
+export function traceProvenance(
+  s: AppState,
+  capture: CaptureProvenance | null,
+  appVersion: string,
+  exportedAt: string
+): ProvenanceLine[] {
+  const emit = (c: CaptureProvenance): boolean =>
+    c.capturedAt !== null ||
+    c.derived === true ||
+    c.mixed === true ||
+    captureBenchSignature(c) !== captureBenchSignature(liveCaptureProvenance(s));
+  if (capture === null || !emit(capture)) return benchProvenance(s, appVersion, exportedAt);
+  return [
+    ...benchLines(s, appVersion, exportedAt),
+    ...captureProvenanceLines(capture),
+    {
+      key: "note",
+      value:
+        "capture_* keys describe the bench when this data was captured; " +
+        "unprefixed keys reflect the bench at export time",
+    },
+  ];
 }
 
 /** One human line describing where a trace's frames come from — resolves

@@ -34,6 +34,7 @@ function trace(
     domains,
     seq: domains.length ? 1 : 0,
     offsetDb: null,
+    capture: null,
   };
 }
 

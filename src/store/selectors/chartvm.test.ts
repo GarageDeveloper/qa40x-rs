@@ -407,6 +407,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     s.traces.byId[HW_TRACE_IDS.inputL] = {
       ...s.traces.byId[HW_TRACE_IDS.inputL],
       offsetDb: 20.81 + 12,
+      capture: null,
     };
     const after = scopeVM(s, tile(s)).series[0].samples[0];
     expect(after).toBeCloseTo(before, 9);
@@ -425,6 +426,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
       domains: ["td"],
       seq: 1,
       offsetDb: 0,
+      capture: null,
     };
     tile(s).traces = [HW_TRACE_IDS.inputL, "mem-1"];
     // Explicit — the "mem-1" member has its own td frame too, which would
@@ -589,6 +591,7 @@ describe("ratio traces (deconvolve — M4 maintainer report)", () => {
       domains: ["fd", "td"],
       seq: 1,
       offsetDb: 20.81, // inherited from its ADC input — must NOT apply to fd
+      capture: null,
     };
     return s;
   }
@@ -637,6 +640,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     const t = s.layout.tiles["tile-1"];
     t.kind = "sweep";
@@ -671,6 +675,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-2");
     s.programs.byId["prog-2"] = {
@@ -710,6 +715,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     // Deliberately NO s.programs.byId["mem-1"] and NO s.programs.byId["prog-2"]
     // — a memory trace is never itself a program, and the original program
@@ -739,6 +745,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-3");
     s.programs.byId["prog-3"] = {
@@ -779,6 +786,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     s.programs.order.push("prog-4");
     // ...then the user opens the gear, flips axis to "level", and Applies —
@@ -827,6 +835,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
         domains: ["sweep"],
         seq: 1,
         offsetDb: null,
+        capture: null,
       };
     }
     const t = s.layout.tiles["tile-1"];
@@ -862,6 +871,7 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       domains: ["sweep"],
       seq: 1,
       offsetDb: null,
+      capture: null,
     };
     const t = s.layout.tiles["tile-1"];
     t.kind = "sweep";

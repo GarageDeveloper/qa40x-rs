@@ -175,7 +175,10 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
       const f = getFrames(id);
       if (f) refFrames[id] = framesToDoc(f);
     } else {
-      tracesById[id] = { ...t, seq: 0, domains: [], offsetDb: null };
+      // Live/derived traces re-acquire or recompute on load — their capture
+      // snapshot (issue #40) is zeroed with their data, like offsetDb; only
+      // the ❄ memory traces above keep theirs (it rides the meta spread).
+      tracesById[id] = { ...t, seq: 0, domains: [], offsetDb: null, capture: null };
     }
   }
 
@@ -461,6 +464,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
             domains: [],
             seq: 0,
             offsetDb: null,
+            capture: null,
           });
         } else {
           sources.order.push(id);
@@ -500,6 +504,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
           domains: [],
           seq: 0,
           offsetDb: null,
+          capture: null,
         });
         break;
       }
@@ -517,6 +522,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
           domains: [],
           seq: 0,
           offsetDb: null,
+          capture: null,
         });
         break;
       }
@@ -555,6 +561,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
       domains,
       seq: 1,
       offsetDb: 0,
+      capture: null,
     });
     refFrames[id] = frames;
   }
@@ -721,6 +728,11 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
       if (params.wowGenerate === undefined) params.wowGenerate = DEFAULT_SWEEP_PARAMS.wowGenerate;
       if (prog.wowResult === undefined) prog.wowResult = null;
     }
+  }
+  // Issue #40: a doc predating the capture snapshot has none — the exports
+  // then fall back to the live bench, exactly the pre-#40 behavior.
+  for (const t of Object.values(doc.traces.byId)) {
+    if (t.capture === undefined) t.capture = null;
   }
   if (!doc.triggers || typeof doc.triggers !== "object") doc.triggers = {};
   // A SINGLE arm is a live-session gesture, never a saved-bench fact — any

@@ -10,8 +10,8 @@ import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
 import { putTriggerSnapshot } from "../../data/triggered";
 import type { Store } from "../store";
-import type { AppState, SourceMeta, TraceMeta } from "../state";
-import { HW_TRACE_IDS } from "../state";
+import type { AppState, CaptureProvenance, SourceMeta, TraceMeta } from "../state";
+import { captureBenchSignature, HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import { triggerRequest } from "../selectors/trigger";
@@ -143,6 +143,50 @@ export function buildStreamConfig(s: AppState): StreamConfig {
   };
 }
 
+/**
+ * The capture snapshot a frame ingested under state `s` stamps on its
+ * endpoint traces (issue #40) — frame-side truth preferred (its OWN sample
+ * rate and per-converter offsets; the fitted output range the loop actually
+ * used), config-side for the rest. Memoized on the bench signature: at
+ * 25 fps this must not allocate 4 objects per frame — the SAME frozen
+ * object rides every frame until the bench actually moves (a vitest test
+ * pins the identity). One shared snapshot for all four endpoints is correct
+ * by construction: they come from the ONE capture of one device.
+ *
+ * Config-projection caveat: fft/window/averaging come from the acquisition
+ * state, so the one in-flight frame captured under a JUST-changed setting
+ * carries the new stamp — same one-frame window the offsets model closed
+ * frame-side; acceptable for provenance, not worth a wire field yet.
+ */
+let lastCaptureSig: string | null = null;
+let lastCapture: CaptureProvenance | null = null;
+export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): CaptureProvenance {
+  const info = s.device.info;
+  const next: CaptureProvenance = {
+    device: info
+      ? {
+          model: info.model,
+          serial: info.serial,
+          firmware: info.firmware_version,
+          isVirtual: info.is_virtual,
+        }
+      : null,
+    sampleRateHz: frame.sampleRate,
+    inputRangeDbv: s.device.config?.input_gain ?? null,
+    outputRangeDbv: frame.mix.fitted_output_range_dbv ?? s.device.config?.output_gain ?? null,
+    offsets: frame.offsets,
+    fftSize: s.acquisition.fftSize,
+    window: s.acquisition.window,
+    averaging: { ...s.acquisition.averaging },
+    capturedAt: null,
+  };
+  const sig = captureBenchSignature(next);
+  if (lastCapture && sig === lastCaptureSig) return lastCapture;
+  lastCaptureSig = sig;
+  lastCapture = Object.freeze(next);
+  return lastCapture;
+}
+
 /** Monotonic ingest stamp. NOT the wire seq: a restarted backend loop
  * counts from 1 again, and the frames cache stale-drop would then silently
  * discard EVERY frame of the new run while the stats kept ticking — charts
@@ -270,13 +314,14 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
 
   store.update("stream/frame", (s) => {
     const byId = { ...s.traces.byId };
+    const capture = frameCaptureProvenance(s, frame);
     for (const w of written) {
       const t = byId[w.id];
       if (!t) continue;
       const domains: TraceMeta["domains"] = [];
       if (w.hasTd) domains.push("td");
       if (w.hasFd) domains.push("fd");
-      byId[w.id] = { ...t, seq, offsetDb: w.offsetDb, domains };
+      byId[w.id] = { ...t, seq, offsetDb: w.offsetDb, domains, capture };
     }
     return {
       ...s,

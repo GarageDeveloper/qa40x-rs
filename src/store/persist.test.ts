@@ -610,3 +610,71 @@ describe("saveCurrent / saveNamed — quota-exceeded is reported, not swallowed 
     expect(isQuotaExceeded("not even an Error")).toBe(false);
   });
 });
+
+describe("v5 in-version hook: capture provenance (issue #40)", () => {
+  const capture = {
+    device: { model: "QA403", serial: "AB12_CD34", firmware: 61, isVirtual: false },
+    sampleRateHz: 48000,
+    inputRangeDbv: 42,
+    outputRangeDbv: 18,
+    offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
+    fftSize: 32768,
+    window: "flattop" as const,
+    averaging: { mode: "power" as const, count: 8 },
+    capturedAt: "2026-07-26T08:00:00.000Z",
+  };
+
+  it("a doc predating the field loads with capture=null on every trace", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    for (const t of Object.values(doc.traces.byId) as Record<string, unknown>[]) {
+      delete t.capture;
+    }
+    const migrated = migrate(doc);
+    expect(migrated).not.toBeNull();
+    for (const t of Object.values(migrated!.traces.byId)) {
+      expect(t.capture).toBeNull();
+    }
+    // Round-trip stability: loading the old doc then re-snapshotting digests
+    // identically (the same rule as every other in-version hook).
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, migrated!)).toBe(true);
+    expect(snapshotWorkspace(dest.get())).toEqual(migrated);
+  });
+
+  it("a frozen ❄ trace's capture snapshot survives the save/reload round trip", () => {
+    clearAllFrames();
+    const store = freshStore();
+    putFrames(HW_TRACE_IDS.inputL, 1, {
+      fd: { freqs: Float64Array.from([100]), magDb: Float64Array.from([-6]) },
+    });
+    store.update("test/stamp", (s) => ({
+      ...s,
+      traces: {
+        ...s.traces,
+        byId: {
+          ...s.traces.byId,
+          [HW_TRACE_IDS.inputL]: {
+            ...s.traces.byId[HW_TRACE_IDS.inputL],
+            seq: 1,
+            domains: ["fd" as const],
+            offsetDb: 32.1,
+            capture,
+          },
+        },
+      },
+    }));
+    const memId = freezeTrace(store, HW_TRACE_IDS.inputL);
+    expect(memId).not.toBeNull();
+
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))));
+    expect(doc).not.toBeNull();
+    // The ❄ copy keeps the snapshot; the LIVE endpoint sheds it with its
+    // data (it re-acquires on load, like offsetDb).
+    expect(doc!.traces.byId[memId!].capture).toEqual(capture);
+    expect(doc!.traces.byId[HW_TRACE_IDS.inputL].capture).toBeNull();
+
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
+    expect(dest.get().traces.byId[memId!].capture).toEqual(capture);
+  });
+});

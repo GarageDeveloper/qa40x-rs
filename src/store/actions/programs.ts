@@ -31,12 +31,13 @@ import { scriptRunLog } from "../../panels/programs/runlog";
 import type { Store } from "../store";
 import type {
   AppState,
+  CaptureProvenance,
   ProgramMeta,
   SweepProgramParams,
   TraceMeta,
   WowFlutterProgramResult,
 } from "../state";
-import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
+import { DEFAULT_SWEEP_PARAMS, liveCaptureProvenance, nextTraceColor } from "../state";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -117,6 +118,7 @@ export function addProgram(
     domains: [],
     seq: 0,
     offsetDb: null,
+    capture: null,
   };
   store.update("programs/add", (st) => ({
     ...st,
@@ -245,6 +247,22 @@ const sweepCancel = new Set<string>();
 let scriptDone: ((error: string | null) => void) | null = null;
 let activeScriptId: string | null = null;
 
+/** The capture snapshot a program result lands with (issue #40): device
+ * identity + converter state at land time (the run JUST used this bench),
+ * stamped with the instant and — for a sweep — the params that produced the
+ * curve. The acquisition trio stays null: a program captures with its OWN
+ * fft/window, not the live stream's settings. */
+function programCapture(s: AppState, params?: SweepProgramParams): CaptureProvenance {
+  return {
+    ...liveCaptureProvenance(s),
+    fftSize: null,
+    window: null,
+    averaging: null,
+    capturedAt: new Date().toISOString(),
+    ...(params ? { programParams: { ...params } } : {}),
+  };
+}
+
 /** Land program frames: cache first, then seq/domains in one update. */
 function landProgramFrames(
   store: Store<AppState>,
@@ -253,7 +271,8 @@ function landProgramFrames(
     td?: ReturnType<typeof wireToTd>;
     fd?: ReturnType<typeof wireToFd>;
     sweep?: DecodedSweep;
-  }
+  },
+  params?: SweepProgramParams
 ): void {
   const seq = ++progSeq;
   if (!putFrames(id, seq, frames)) return;
@@ -265,9 +284,10 @@ function landProgramFrames(
   store.update("programs/land", (s) => {
     const t = s.traces.byId[id];
     if (!t) return s;
+    const capture = programCapture(s, params);
     return {
       ...s,
-      traces: { ...s.traces, byId: { ...s.traces.byId, [id]: { ...t, seq, domains } } },
+      traces: { ...s.traces, byId: { ...s.traces.byId, [id]: { ...t, seq, domains, capture } } },
     };
   });
 }
@@ -403,7 +423,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
     return;
   }
   const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit, yUnit);
-  if (sweep) landProgramFrames(store, id, { sweep });
+  if (sweep) landProgramFrames(store, id, { sweep }, p);
   if (wowResult) {
     const result = wowResult;
     patchProgram(store, "programs/wow-result", id, (prog2) =>

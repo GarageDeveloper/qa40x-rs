@@ -43,6 +43,12 @@ function freezeOne(s: AppState, id: TraceId, serial: number): { meta: TraceMeta;
     domains: [...src.domains],
     seq: 1,
     offsetDb: src.offsetDb,
+    // The capture snapshot travels with the copy (issue #40); a live trace's
+    // snapshot has no instant yet — the freeze IS that instant (the data
+    // being kept is the frame on screen right now).
+    capture: src.capture
+      ? { ...src.capture, capturedAt: src.capture.capturedAt ?? new Date().toISOString() }
+      : null,
   };
   return { meta, from: id };
 }
@@ -204,6 +210,7 @@ export function addTransformTrace(
     domains: [],
     seq: 0,
     offsetDb: null,
+    capture: null,
   };
   store.update("traces/add-transform", (st) => ({
     ...st,

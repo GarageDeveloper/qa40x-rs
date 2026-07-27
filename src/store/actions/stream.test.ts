@@ -15,6 +15,7 @@ import { HW_TRACE_IDS } from "../state";
 import { Store } from "../store";
 import {
   buildStreamConfig,
+  frameCaptureProvenance,
   ingestFrame,
   levelToAmplitude,
   playedFrequencyHz,
@@ -545,5 +546,118 @@ describe("ingestFrame — scope measurement suite reaches the frames cache (issu
     // gone entirely, not a stale leftover from frame 1.
     ingestFrame(store, frameWithMeasures(null));
     expect(getFrames(HW_TRACE_IDS.inputL)?.scope).toBeUndefined();
+  });
+});
+
+describe("ingestFrame — capture provenance stamped on endpoint traces (issue #40)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+  });
+
+  function frame(over: Partial<Pick<DecodedFrame, "sampleRate" | "offsets">> = {}): DecodedFrame {
+    return {
+      seq: 1,
+      sampleRate: over.sampleRate ?? 48000,
+      input: {
+        l: { sampleRate: over.sampleRate ?? 48000, samples: Float64Array.from([0.1, 0.2]) },
+        r: { sampleRate: over.sampleRate ?? 48000, samples: Float64Array.from([0.3, 0.4]) },
+      },
+      output: null,
+      fd: { inputL: null, inputR: null, outputL: null, outputR: null },
+      metrics: { inputL: null, inputR: null, harmonicsL: null, harmonicsR: null },
+      mix: {
+        sigma_peak_dbv: null,
+        clip_input: "none",
+        clip_output: false,
+        fitted_output_range_dbv: 8,
+      },
+      offsets:
+        over.offsets ??
+        { input_l: 20, input_r: 20.5, output_l: 0, output_r: 0, calibrated: true },
+      stats: { frames: 1, fps: 30, frame_ms: 33 },
+      errors: [],
+      trigger: { inputL: null, inputR: null, outputL: null, outputR: null },
+      measures: { inputL: null, inputR: null, outputL: null, outputR: null },
+    };
+  }
+
+  function connectedStore() {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/connect", (s) => ({
+      ...s,
+      device: {
+        ...s.device,
+        info: {
+          model: "QA403",
+          firmware_version: 61,
+          serial: "AB12_CD34",
+          product: "QA403 Audio Analyzer",
+          sample_rates: [48000],
+          supports_flash: false,
+          capabilities: {} as never,
+          is_virtual: false,
+        },
+        config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+      },
+    }));
+    return store;
+  }
+
+  it("stamps the frame's bench on every written endpoint (frame-side truth first)", () => {
+    const store = connectedStore();
+    ingestFrame(store, frame());
+    const cap = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
+    expect(cap).not.toBeNull();
+    expect(cap!.device).toEqual({
+      model: "QA403",
+      serial: "AB12_CD34",
+      firmware: 61,
+      isVirtual: false,
+    });
+    expect(cap!.sampleRateHz).toBe(48000); // the frame's, not the config's
+    expect(cap!.inputRangeDbv).toBe(42);
+    expect(cap!.outputRangeDbv).toBe(8); // fitted range the loop actually used
+    expect(cap!.offsets).toEqual({
+      input_l: 20,
+      input_r: 20.5,
+      output_l: 0,
+      output_r: 0,
+      calibrated: true,
+    });
+    expect(cap!.fftSize).toBe(32768);
+    expect(cap!.window).toBe("hann");
+    expect(cap!.averaging).toEqual({ mode: "off", count: 1 });
+    // Live data: no pinned instant — the freeze/program land stamps one.
+    expect(cap!.capturedAt).toBeNull();
+  });
+
+  it("one frozen snapshot object rides every frame until the bench moves (no per-frame churn)", () => {
+    const store = connectedStore();
+    ingestFrame(store, frame());
+    const first = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
+    // All four endpoints of one capture share the ONE object…
+    expect(store.get().traces.byId[HW_TRACE_IDS.inputR].capture).toBe(first);
+    // …and the next same-bench frame reuses it (identity, not equality).
+    ingestFrame(store, frame());
+    expect(store.get().traces.byId[HW_TRACE_IDS.inputL].capture).toBe(first);
+    expect(Object.isFrozen(first)).toBe(true);
+
+    // The bench moves (a range change shifts the ADC offsets): new snapshot.
+    ingestFrame(
+      store,
+      frame({ offsets: { input_l: 32, input_r: 32.5, output_l: 0, output_r: 0, calibrated: true } })
+    );
+    const second = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
+    expect(second).not.toBe(first);
+    expect(second!.offsets!.input_l).toBe(32);
+  });
+
+  it("frameCaptureProvenance with no device info still records the frame's bench", () => {
+    const store = new Store(initialState(), { freeze: true });
+    const cap = frameCaptureProvenance(store.get(), frame({ sampleRate: 96000 }));
+    expect(cap.device).toBeNull();
+    expect(cap.sampleRateHz).toBe(96000);
+    expect(cap.inputRangeDbv).toBeNull(); // no config read yet — unknown, never guessed
   });
 });
