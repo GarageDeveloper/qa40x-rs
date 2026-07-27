@@ -124,40 +124,54 @@ impl QA40xDevice {
         }
     }
 
-    /// Find and connect to a QA40x device (QA402 or QA403).
+    /// Find and connect to a QA40x device (QA402 or QA403) — the first unit
+    /// on the bus, as always. Selecting a specific unit among several goes
+    /// through `crate::device` (issue #25 lot B), whose USB source opens by
+    /// serial via the same [`Self::connect_to_usb`]. Signature frozen: the
+    /// examples and the A/B bench drive it directly.
     pub async fn connect(&self) -> Result<()> {
         info!(
             "Searching for a QA40x device (VID: 0x{:04X}, PID 0x{:04X}/0x{:04X})",
             QA40X_VID, QA402_PID, QA403_PID
         );
 
-        // Release any prior claim first so a reconnect (e.g. after the frontend
-        // reloaded while the backend stayed connected) does not fail with
-        // "could not claim interface 0: exclusive access". Dropping the stored
-        // Interface releases the USB claim.
-        {
-            // Drop the claimed endpoints first (they hold refs to the interface),
-            // then the interface and device, so the OS releases the USB claim.
-            *self.eps.lock().await = None;
-            self.release_virtual_import().await;
-            let mut iface = self.interface.lock().await;
-            if iface.is_some() {
-                info!("Releasing existing interface claim before reconnecting");
-                *iface = None;
-            }
-            *self.device.lock().await = None;
-            // Give the OS a moment to release the claim.
-            drop(iface);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        self.release_claim().await;
 
         // Match any known QA40x model (VID is shared; the PID picks the model).
-        let device_info = nusb::list_devices()
+        let device_info = crate::device::usb::first_device_info()
             .await
-            .map_err(|e| QA40xError::DeviceError(e.to_string()))?
-            .find(|dev| dev.vendor_id() == QA40X_VID && Model::from_pid(dev.product_id()).is_some())
-            .ok_or(QA40xError::DeviceNotFound)?;
+            .map_err(QA40xError::from)?;
 
+        self.connect_to_usb(device_info).await
+    }
+
+    /// Release any prior claim so a reconnect (e.g. after the frontend
+    /// reloaded while the backend stayed connected) does not fail with
+    /// "could not claim interface 0: exclusive access". Dropping the stored
+    /// Interface releases the USB claim. Extracted verbatim from `connect()`
+    /// (issue #25 lot B) so the registry's open-by-serial path shares it.
+    pub(crate) async fn release_claim(&self) {
+        // Drop the claimed endpoints first (they hold refs to the interface),
+        // then the interface and device, so the OS releases the USB claim.
+        *self.eps.lock().await = None;
+        self.release_virtual_import().await;
+        let mut iface = self.interface.lock().await;
+        if iface.is_some() {
+            info!("Releasing existing interface claim before reconnecting");
+            *iface = None;
+        }
+        *self.device.lock().await = None;
+        // Give the OS a moment to release the claim.
+        drop(iface);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// The open + claim + bring-up half of `connect()`, from an enumerated
+    /// `DeviceInfo` to a fully initialized session. Extracted verbatim
+    /// (issue #25 lot B): the caller picks the unit (first-match here,
+    /// by-serial in `crate::device::usb`), this takes it from there.
+    /// The caller must have released any prior claim first.
+    pub(crate) async fn connect_to_usb(&self, device_info: nusb::DeviceInfo) -> Result<()> {
         let model = Model::from_pid(device_info.product_id()).unwrap_or(Model::Qa402);
         *self.model.lock().await = Some(model);
 
@@ -299,14 +313,6 @@ impl QA40xDevice {
     /// streaming, calibration, telemetry, REST, scripts — runs unchanged.
     /// No download, no USB/IP, no kernel module.
     pub async fn connect_virtual(&self) -> Result<()> {
-        // Release any prior claim (real or virtual), same as connect().
-        {
-            *self.eps.lock().await = None;
-            self.release_virtual_import().await;
-            *self.interface.lock().await = None;
-            *self.device.lock().await = None;
-        }
-
         // First demo connect of the session creates the simulator; later ones
         // reattach to it (its state persists like a unit left plugged in).
         let sim = {
@@ -322,13 +328,39 @@ impl QA40xDevice {
             }
             slot.as_ref().expect("just created").clone()
         };
+        self.connect_virtual_sim(sim, Model::Qa403).await
+    }
+
+    /// Attach a specific simulator instance (issue #25 lot B): the virtual
+    /// device source owns its simulators (pinned serials, N units later) and
+    /// connects them through here; `connect_virtual()` keeps its historical
+    /// make-my-own-sim behavior on top of the same path. The sim is stored in
+    /// `virtual_sim` so disconnect/reconnect release-and-reattach semantics
+    /// are identical whichever door it came in through.
+    ///
+    /// OWNERSHIP: the slot always holds the LAST attached simulator — the
+    /// device is a borrower, not the owner. A process mixing both doors
+    /// (source-owned sim, then bare `connect_virtual()`) continues on
+    /// whichever sim was attached last; "state persists like a unit left
+    /// plugged in" is per simulator instance, not per device object. No app
+    /// runtime path mixes the two today (registry only); tests/examples that
+    /// call `connect_virtual()` directly never touch the registry's source.
+    pub(crate) async fn connect_virtual_sim(&self, sim: Simulator, model: Model) -> Result<()> {
+        // Release any prior claim (real or virtual), same as connect().
+        {
+            *self.eps.lock().await = None;
+            self.release_virtual_import().await;
+            *self.interface.lock().await = None;
+            *self.device.lock().await = None;
+        }
+
+        *self.virtual_sim.lock().await = Some(sim.clone());
         if !sim.try_import() {
             return Err(QA40xError::DeviceError(
                 "Virtual device is already attached".to_string(),
             ));
         }
 
-        let model = Model::Qa403;
         let serial = sim.busid().to_string(); // placeholder; real serial read below
         *self.model.lock().await = Some(model);
         *self.eps.lock().await = Some(ClaimedEndpoints {
@@ -601,6 +633,14 @@ impl QA40xDevice {
         *self.model.lock().await
     }
 
+    /// Size of the factory calibration page read at connect, or `None` when
+    /// the page could not be loaded (the nominal range model is then in
+    /// use). Additive getter for the capability record's calibration source
+    /// (issue #25 lot B) — the page itself stays private.
+    pub async fn factory_calibration_page_len(&self) -> Option<usize> {
+        self.cal_page.lock().await.as_ref().map(Vec::len)
+    }
+
     /// Enter the NXP DFU bootloader: write register 0x0F = 0xDEADBEEF then
     /// 0xCAFEBABE (the two-magic unlock seen in the official app's USB capture).
     /// The device then resets and re-enumerates as the NXP bootloader
@@ -726,12 +766,7 @@ impl QA40xDevice {
     /// virtual device. The frontend polls this during a demo session to hand
     /// over to a QA40x the moment one is plugged in.
     pub async fn is_hardware_present(&self) -> bool {
-        match nusb::list_devices().await {
-            Ok(mut devices) => {
-                devices.any(|dev| dev.vendor_id() == QA40X_VID && Model::from_pid(dev.product_id()).is_some())
-            }
-            Err(_) => false,
-        }
+        crate::device::usb::any_unit_present().await
     }
 
     /// Check if device is still physically connected by looking for it in USB device list
@@ -746,13 +781,10 @@ impl QA40xDevice {
             return true;
         }
 
-        // Check if device is still present in USB device list
-        let device_found = match nusb::list_devices().await {
-            Ok(mut devices) => {
-                devices.any(|dev| dev.vendor_id() == QA40X_VID && Model::from_pid(dev.product_id()).is_some())
-            }
-            Err(_) => false,
-        };
+        // Check if device is still present in USB device list. Deliberately
+        // the same "any QA40x on the bus" predicate as before lot B —
+        // serial-scoped presence is a lot-C change.
+        let device_found = crate::device::usb::any_unit_present().await;
 
         if !device_found {
             debug!("Device no longer present in USB device list");

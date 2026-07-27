@@ -270,6 +270,13 @@ impl VirtEp {
     }
 }
 
+/// The pinned serial of the built-in demo device (issue #25 lot B — it used
+/// to be random per process). Pinning makes the demo unit ENUMERABLE with a
+/// stable identity, and a demo workspace's capture provenance stops changing
+/// across sessions. Must be 8 hex digits so the register-0x1D read-back
+/// (`{:04X}_{:04X}` of the packed u32) reformats to the identical string.
+pub const DEMO_SERIAL: &str = "0DE0_0001";
+
 /// The demo device the app embeds: a QA403 with a clean loopback path, a
 /// realistic noise floor and just enough harmonic distortion (H2 −90 dBc,
 /// H3 −100 dBc) that THD measurements have something real to show. Streams
@@ -280,6 +287,7 @@ pub fn demo_sim_options() -> SimOptions {
     SimOptions {
         model,
         pid: model.default_pid(),
+        serial: DEMO_SERIAL.to_string(),
         h2_dbc: Some(-90.0),
         h3_dbc: Some(-100.0),
         ..SimOptions::default()

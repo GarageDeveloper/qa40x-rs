@@ -176,6 +176,21 @@ pub enum InputGain {
 }
 
 impl InputGain {
+    /// Every input full-scale range the hardware exposes, ascending. The
+    /// register map has exactly these eight; like [`OutputGain::ALL`] this
+    /// list is the single source of truth for the input range table
+    /// (`crate::device::DeviceCapabilities` reads it — issue #25 lot B).
+    pub const ALL: [InputGain; 8] = [
+        InputGain::Gain0dBV,
+        InputGain::Gain6dBV,
+        InputGain::Gain12dBV,
+        InputGain::Gain18dBV,
+        InputGain::Gain24dBV,
+        InputGain::Gain30dBV,
+        InputGain::Gain36dBV,
+        InputGain::Gain42dBV,
+    ];
+
     pub fn from_dbv(dbv: i32) -> Option<Self> {
         match dbv {
             0 => Some(Self::Gain0dBV),
