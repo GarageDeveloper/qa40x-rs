@@ -64,5 +64,5 @@ pub use caps::{CalibrationSource, DeviceCapabilities};
 pub use error::DeviceError;
 pub use id::{DeviceDescriptor, DeviceId, DeviceIdentity, SourceId, SourceKind, Transport};
 pub use registry::{DeviceRegistry, OpenDevice};
-pub use runtime::{DeviceRuntime, GeneratorFlags, OpenUnitCell};
+pub use runtime::{DeviceRuntime, GeneratorFlags, OpenGeneration, OpenUnitCell};
 pub use source::{DeviceHandle, DeviceSource};

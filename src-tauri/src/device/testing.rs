@@ -21,6 +21,9 @@ pub struct FakeSource {
     physical: bool,
     descriptors: Vec<DeviceDescriptor>,
     fail_enumerate: bool,
+    /// Artificial latency inside `open()` — lets lifecycle tests hold an
+    /// open in flight while racing a close/second open against it.
+    open_delay: Option<std::time::Duration>,
     /// Ids this source was asked to open, in order.
     pub opened: StdMutex<Vec<DeviceId>>,
 }
@@ -35,6 +38,7 @@ impl FakeSource {
             physical,
             descriptors,
             fail_enumerate: false,
+            open_delay: None,
             opened: StdMutex::new(Vec::new()),
         }
     }
@@ -42,6 +46,13 @@ impl FakeSource {
     pub fn failing(id: &str, physical: bool) -> Self {
         let mut s = Self::new(id, physical, &[]);
         s.fail_enumerate = true;
+        s
+    }
+
+    /// A source whose `open()` takes `delay` — for racing lifecycle tests.
+    pub fn slow(id: &str, physical: bool, units: &[&str], delay: std::time::Duration) -> Self {
+        let mut s = Self::new(id, physical, units);
+        s.open_delay = Some(delay);
         s
     }
 }
@@ -93,6 +104,9 @@ impl DeviceSource for FakeSource {
     }
 
     async fn open(&self, id: &DeviceId, _handle: &DeviceHandle) -> Result<DeviceDescriptor, DeviceError> {
+        if let Some(delay) = self.open_delay {
+            tokio::time::sleep(delay).await;
+        }
         let desc = self
             .descriptors
             .iter()

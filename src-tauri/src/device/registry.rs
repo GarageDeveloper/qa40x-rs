@@ -12,7 +12,6 @@
 //!   [`DeviceRegistry::note_closed`] so the two never disagree for long.
 
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 
 use log::warn;
 use tokio::sync::Mutex;
@@ -36,11 +35,10 @@ pub struct OpenDevice {
 struct RegistryInner {
     sources: Vec<Arc<dyn DeviceSource>>,
     /// Lot C: exactly one runtime — the default device slot. Lot E: a map
-    /// keyed by `DeviceId` plus this one as the default slot.
+    /// keyed by `DeviceId` plus this one as the default slot. The open/close
+    /// bookkeeping (current unit, generation, serialization gate) lives on
+    /// the runtime itself.
     runtime: DeviceRuntime,
-    /// std Mutex held only for a clone/replace, never across an await (the
-    /// `StreamControl::config` rule).
-    current: StdMutex<Option<OpenDevice>>,
 }
 
 #[derive(Clone)]
@@ -63,7 +61,6 @@ impl DeviceRegistry {
             inner: Arc::new(RegistryInner {
                 sources,
                 runtime: DeviceRuntime::new(),
-                current: StdMutex::new(None),
             }),
         }
     }
@@ -112,8 +109,19 @@ impl DeviceRegistry {
 
     /// Open the unit `id` onto the session handle. A second open supersedes
     /// the first (the source releases the handle's prior claim first —
-    /// exactly what the pre-registry `connect()` did on reconnect).
+    /// exactly what the pre-registry `connect()` did on reconnect). Held
+    /// under the runtime's lifecycle gate for its WHOLE duration, so
+    /// concurrent opens serialize and a concurrent `close()` waits this one
+    /// out (lot-B review finding #1).
     pub async fn open(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
+        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
+        self.open_locked(id).await
+    }
+
+    /// The open body, ASSUMING the lifecycle gate is already held by the
+    /// caller. `open_first_physical`/`open_virtual` call this — calling the
+    /// public `open()` from them would re-enter the gate and deadlock.
+    async fn open_locked(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
         let source = self
             .inner
             .sources
@@ -126,13 +134,9 @@ impl DeviceRegistry {
         // leaves `current` reporting a device that was already torn down.
         // An unknown SOURCE errored out above without touching the device,
         // so whatever was open before is honestly still open.
-        self.note_closed();
+        self.inner.runtime.note_closed();
         let desc = source.open(id, &self.inner.runtime.handle()).await?;
-        *self.inner.current.lock().expect("current lock") =
-            Some(OpenDevice { id: id.clone(), descriptor: desc.clone() });
-        // The runtime's own copy of "what is open on me" — readable without
-        // the device mutex; the stream loop stamps it into every frame.
-        self.inner.runtime.open_unit().set(Some(id.clone()));
+        self.inner.runtime.note_open(id.clone(), desc.clone());
         Ok(desc)
     }
 
@@ -144,6 +148,9 @@ impl DeviceRegistry {
     /// the actual diagnostic (permission-denied backend, broken hub), as the
     /// legacy `connect()` surfaced it.
     pub async fn open_first_physical(&self) -> Result<DeviceDescriptor, DeviceError> {
+        // One gate acquisition for the whole scan+open (open_locked, NOT the
+        // public open(), which would re-enter the gate and deadlock).
+        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
         let mut scan_err: Option<DeviceError> = None;
         for source in &self.inner.sources {
             if !source.is_physical() {
@@ -152,7 +159,7 @@ impl DeviceRegistry {
             match source.enumerate().await {
                 Ok(descs) => {
                     if let Some(d) = descs.first() {
-                        return self.open(&d.id).await;
+                        return self.open_locked(&d.id).await;
                     }
                 }
                 Err(e) => {
@@ -162,13 +169,15 @@ impl DeviceRegistry {
             }
         }
         self.inner.runtime.handle().lock().await.release_claim().await;
-        self.note_closed();
+        self.inner.runtime.note_closed();
         Err(scan_err.unwrap_or(DeviceError::NotFound))
     }
 
     /// Open the first built-in virtual unit — the `connect_virtual_device`
     /// (demo mode) behavior.
     pub async fn open_virtual(&self) -> Result<DeviceDescriptor, DeviceError> {
+        // Same single gate acquisition as open_first_physical.
+        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
         for source in &self.inner.sources {
             if source.kind() != SourceKind::Virtual {
                 continue;
@@ -176,7 +185,7 @@ impl DeviceRegistry {
             match source.enumerate().await {
                 Ok(descs) => {
                     if let Some(d) = descs.first() {
-                        return self.open(&d.id).await;
+                        return self.open_locked(&d.id).await;
                     }
                 }
                 Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
@@ -186,27 +195,29 @@ impl DeviceRegistry {
     }
 
     /// Close the open device (safe-state teardown included). The caller has
-    /// already stopped the stream/generator loops, same as before.
+    /// already stopped the stream/generator loops, same as before. Waits out
+    /// an in-flight open on the lifecycle gate first, so a close racing a
+    /// connect can never interleave with it.
     pub async fn close(&self) -> Result<(), DeviceError> {
-        let handle = self.inner.runtime.handle();
-        let dev = handle.lock().await;
-        let res = dev.disconnect().await.map(|_| ()).map_err(DeviceError::from);
+        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
+        let res = self.inner.runtime.teardown().await;
         // Bookkeeping is cleared even on a failed teardown: the intent was to
         // close, and the device's own state has been torn down best-effort.
-        self.note_closed();
+        self.inner.runtime.note_closed();
         res
     }
 
-    /// The unit currently open, per the registry's bookkeeping.
+    /// The unit currently open, per the default runtime's bookkeeping.
     pub fn current(&self) -> Option<OpenDevice> {
-        self.inner.current.lock().expect("current lock").clone()
+        self.inner.runtime.current()
     }
 
     /// Record that the device closed OUTSIDE `close()` — unplug detected by
-    /// the USB monitor, bootloader detach during a flash.
+    /// the USB monitor, bootloader detach during a flash. Generation-blind
+    /// (kept for the lot-B call sites); the generation-keyed form is
+    /// [`DeviceRuntime::note_closed_at`].
     pub fn note_closed(&self) {
-        *self.inner.current.lock().expect("current lock") = None;
-        self.inner.runtime.open_unit().set(None);
+        self.inner.runtime.note_closed();
     }
 
     /// Whether REAL hardware is present on any physical source — never
@@ -439,6 +450,108 @@ mod tests {
         assert!(reg.current().is_some());
         reg.note_closed();
         assert!(reg.current().is_none());
+    }
+
+    /* ---- lot C: lifecycle gate + generations --------------------------- */
+
+    #[tokio::test]
+    async fn a_failed_teardown_still_clears_the_bookkeeping() {
+        // The lot-B review's untestable branch, now pinned through the
+        // runtime's teardown seam: `close()` must clear `current` even when
+        // the device-side teardown errors — the intent was to close.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open");
+        assert!(reg.current().is_some());
+
+        reg.default_runtime()
+            .inject_teardown_fault(DeviceError::Source("teardown blew up".into()));
+        let err = reg.close().await.expect_err("the injected fault must surface");
+        assert_eq!(err.to_string(), "teardown blew up");
+        assert!(reg.current().is_none(), "bookkeeping cleared even on failed teardown");
+        assert!(reg.default_runtime().open_unit().get().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_waits_for_an_in_flight_open() {
+        // Lot-B review finding #1: a close racing an in-flight open must
+        // wait the open out on the lifecycle gate — never interleave with
+        // it (end state: closed, not "closed then re-opened by the loser").
+        let reg = registry(vec![Arc::new(FakeSource::slow(
+            "usb",
+            true,
+            &["A"],
+            std::time::Duration::from_millis(150),
+        ))]);
+        let a = reg.enumerate().await[0].id.clone();
+
+        let opener = {
+            let reg = reg.clone();
+            let a = a.clone();
+            tokio::spawn(async move { reg.open(&a).await })
+        };
+        // Let the open reach the source's in-flight delay, then close.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        reg.close().await.expect("close");
+
+        opener.await.expect("join").expect("the open itself succeeded first");
+        assert!(
+            reg.current().is_none(),
+            "close ran AFTER the in-flight open completed — final state must be closed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_opens_serialize_and_leave_exactly_one_open() {
+        let src = Arc::new(FakeSource::slow(
+            "usb",
+            true,
+            &["A", "B"],
+            std::time::Duration::from_millis(50),
+        ));
+        let reg = registry(vec![src.clone()]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+
+        let g0 = reg.default_runtime().generation();
+        let (ra, rb) = tokio::join!(
+            { let r = reg.clone(); let a = a.clone(); async move { r.open(&a).await } },
+            { let r = reg.clone(); let b = b.clone(); async move { r.open(&b).await } },
+        );
+        ra.expect("open A");
+        rb.expect("open B");
+
+        // Serialized: both opens ran to completion (no interleave), the
+        // generation advanced once per open, exactly one unit is current.
+        assert_eq!(src.opened.lock().expect("opened").len(), 2);
+        let cur = reg.current().expect("one unit open");
+        assert!(cur.id == a || cur.id == b);
+        assert_eq!(reg.default_runtime().generation().0, g0.0 + 2);
+    }
+
+    #[tokio::test]
+    async fn note_closed_at_ignores_a_stale_generation() {
+        // The anti-regression for lot-B review finding #2: a monitor that
+        // observed generation N must not wipe the bookkeeping once a newer
+        // open (generation N+1) superseded it.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let rt = reg.default_runtime();
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+
+        reg.open(&a).await.expect("open A");
+        let gen_a = rt.generation();
+
+        reg.open(&b).await.expect("open B supersedes A");
+        assert!(!rt.note_closed_at(gen_a), "a stale generation must not apply");
+        assert_eq!(rt.current().expect("B survives the stale note").id, b);
+
+        // The CURRENT generation applies — once. The second call reports
+        // "already closed" so a racing observer can't double-report.
+        let gen_b = rt.generation();
+        assert!(rt.note_closed_at(gen_b));
+        assert!(rt.current().is_none());
+        assert!(!rt.note_closed_at(gen_b), "nothing left to close");
     }
 
     #[tokio::test]

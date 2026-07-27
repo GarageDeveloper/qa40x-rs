@@ -17,11 +17,15 @@ use std::sync::Mutex as StdMutex;
 
 use tokio::sync::Mutex as TokioMutex;
 
+use tokio::sync::Mutex as LifecycleGate;
+
 use crate::mixer::Mixer;
 use crate::qa40x::{QA40xDevice, Telemetry};
 use crate::stream::StreamControl;
 
-use super::id::DeviceId;
+use super::error::DeviceError;
+use super::id::{DeviceDescriptor, DeviceId};
+use super::registry::OpenDevice;
 use super::source::DeviceHandle;
 
 /// The continuous-generator loop's flags, as ONE unit — they are only ever
@@ -93,6 +97,24 @@ impl OpenUnitCell {
     }
 }
 
+/// Monotonic counter of opens on one runtime. Bookkeeping writers that
+/// observed the device at generation N (the liveness monitor, the bootloader
+/// detach) present it back to [`DeviceRuntime::note_closed_at`], which
+/// ignores them once a newer open has superseded N — a stale monitor tick
+/// can never wipe a completing open's bookkeeping (lot-B review finding).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OpenGeneration(pub(crate) u64);
+
+/// Open/close bookkeeping of one runtime, generation-keyed.
+#[derive(Default)]
+struct LifecycleState {
+    /// Bumped by every successful open.
+    generation: u64,
+    /// The unit currently open, per the bookkeeping (the device's own state
+    /// remains the truth — see the registry module doc).
+    current: Option<OpenDevice>,
+}
+
 struct RuntimeInner {
     handle: DeviceHandle,
     /// The device's telemetry cache cell, grabbed BEFORE the device went
@@ -110,6 +132,23 @@ struct RuntimeInner {
     sweep_cancel: Arc<AtomicBool>,
     stream: StreamControl,
     open_unit: OpenUnitCell,
+    /// Serializes open/close on this runtime: an open holds it for its WHOLE
+    /// duration, so `close()` waits an in-flight open out instead of
+    /// interleaving with it (lot-B review finding: two concurrent connects
+    /// could interleave enumerate/open). tokio Mutex — it IS held across
+    /// awaits, that is its purpose. Lock order: gate → device mutex, never
+    /// the reverse.
+    lifecycle_gate: LifecycleGate<()>,
+    /// std Mutex held only for a read/replace, never across an await (the
+    /// `StreamControl::config` rule) — `current()`/`generation()` must never
+    /// queue behind a long capture.
+    lifecycle: StdMutex<LifecycleState>,
+    /// Test seam: a fault the next [`DeviceRuntime::teardown`] returns
+    /// instead of touching the device — pins the "bookkeeping cleared even
+    /// on failed teardown" branch, which is otherwise unreachable
+    /// (`QA40xDevice::disconnect` is best-effort and never errors).
+    #[cfg(test)]
+    teardown_fault: StdMutex<Option<DeviceError>>,
 }
 
 /// The per-device runtime handle. Cheap to clone (all state behind one
@@ -141,6 +180,10 @@ impl DeviceRuntime {
                 sweep_cancel: Arc::new(AtomicBool::new(false)),
                 stream,
                 open_unit: OpenUnitCell::default(),
+                lifecycle_gate: LifecycleGate::new(()),
+                lifecycle: StdMutex::new(LifecycleState::default()),
+                #[cfg(test)]
+                teardown_fault: StdMutex::new(None),
             }),
         }
     }
@@ -185,6 +228,95 @@ impl DeviceRuntime {
     /// The unit-open cell (stamped by the registry's open/close bookkeeping).
     pub fn open_unit(&self) -> OpenUnitCell {
         self.inner.open_unit.clone()
+    }
+
+    /* ---- lifecycle bookkeeping (generation-keyed) ---------------------- */
+
+    /// The open/close serialization gate. An open holds it for its WHOLE
+    /// duration; `close()` acquires it too, so a close landing during an
+    /// in-flight open waits the open out instead of interleaving.
+    pub(crate) fn lifecycle_gate(&self) -> &LifecycleGate<()> {
+        &self.inner.lifecycle_gate
+    }
+
+    /// The unit currently open on this runtime, per the bookkeeping.
+    pub fn current(&self) -> Option<OpenDevice> {
+        self.inner.lifecycle.lock().expect("lifecycle lock").current.clone()
+    }
+
+    /// The open unit's id (cheap std-lock read, never behind the device
+    /// mutex).
+    pub fn device_id(&self) -> Option<DeviceId> {
+        self.inner.lifecycle.lock().expect("lifecycle lock").current.as_ref().map(|c| c.id.clone())
+    }
+
+    /// The current open generation (advances on every successful open).
+    pub fn generation(&self) -> OpenGeneration {
+        OpenGeneration(self.inner.lifecycle.lock().expect("lifecycle lock").generation)
+    }
+
+    /// Record a successful open: bumps the generation, replaces `current`,
+    /// stamps the open-unit cell. Returns the new generation — the token a
+    /// bookkeeping writer (liveness monitor, bootloader detach) must present
+    /// back to [`Self::note_closed_at`].
+    pub fn note_open(&self, id: DeviceId, descriptor: DeviceDescriptor) -> OpenGeneration {
+        let gen = {
+            let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
+            st.generation += 1;
+            st.current = Some(OpenDevice { id: id.clone(), descriptor });
+            st.generation
+        };
+        self.inner.open_unit.set(Some(id));
+        OpenGeneration(gen)
+    }
+
+    /// Record that the device closed, unconditionally — the `close()` path
+    /// (the intent was to close, whatever the generation) and the failed
+    /// open path (whatever was open is gone).
+    pub fn note_closed(&self) {
+        self.inner.lifecycle.lock().expect("lifecycle lock").current = None;
+        self.inner.open_unit.set(None);
+    }
+
+    /// Record that the device closed OUTSIDE `close()` — unplug detected by
+    /// the liveness monitor, bootloader detach during a flash — but ONLY if
+    /// `gen` is still the current generation and something is actually open:
+    /// a stale tick from before a reconnect must not wipe the newer open's
+    /// bookkeeping. Returns whether it applied — the caller's "I am the one
+    /// who observed the loss" token (one disconnect event, never two).
+    pub fn note_closed_at(&self, gen: OpenGeneration) -> bool {
+        let applied = {
+            let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
+            if st.generation == gen.0 && st.current.is_some() {
+                st.current = None;
+                true
+            } else {
+                false
+            }
+        };
+        if applied {
+            self.inner.open_unit.set(None);
+        }
+        applied
+    }
+
+    /// Tear the device down (safe-state + release). The registry's `close()`
+    /// calls this under the lifecycle gate.
+    pub(crate) async fn teardown(&self) -> Result<(), DeviceError> {
+        #[cfg(test)]
+        if let Some(e) = self.inner.teardown_fault.lock().expect("fault lock").take() {
+            return Err(e);
+        }
+        let handle = self.handle();
+        let dev = handle.lock().await;
+        dev.disconnect().await.map(|_| ()).map_err(DeviceError::from)
+    }
+
+    /// Arm the teardown seam: the next [`Self::teardown`] returns `err`
+    /// without touching the device.
+    #[cfg(test)]
+    pub fn inject_teardown_fault(&self, err: DeviceError) {
+        *self.inner.teardown_fault.lock().expect("fault lock") = Some(err);
     }
 
     /// Spawn the gap-free DAC loop: the buffer repeats until the stop flag
