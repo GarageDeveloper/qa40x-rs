@@ -9,6 +9,13 @@
  * `npm run dev:fake` to click around the UI by hand without hardware.
  */
 import { defineConfig, type Plugin } from "vite";
+import { readFileSync } from "node:fs";
+
+// Same __APP_VERSION__ define as vite.config.ts — the export provenance
+// header (issue #30) must carry the real version under e2e too.
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8")
+) as { version: string };
 
 const MAIN_TAGS = [
   '<script type="module" src="/src/main.ts" defer></script>',
@@ -51,6 +58,9 @@ const E2E_CSP =
 
 export default defineConfig({
   plugins: [injectHarness()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   clearScreen: false,
   server: {
     port: 14200,

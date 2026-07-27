@@ -878,6 +878,36 @@ export class AppV2 {
     }, undefined as void);
   }
 
+  /* ---- Data export seam (issue #30) ----------------------------------- */
+
+  /** Every file the app asked the fake backend to write, decoded to text
+   * (CSV assertions; a PNG decodes to gibberish but its path still tells). */
+  async exportedFiles(): Promise<{ path: string; text: string }[]> {
+    return this.drv.eval(
+      () =>
+        window.__qa40xE2E.device.exports.map((e) => ({
+          path: e.path,
+          text: atob(e.contentsBase64),
+        })),
+      undefined as void
+    );
+  }
+
+  /** Every clipboard image the fake received (dimensions + payload size). */
+  async copiedImages(): Promise<{ width: number; height: number; byteLength: number }[]> {
+    return this.drv.eval(() => window.__qa40xE2E.device.copiedImages, undefined as void);
+  }
+
+  /** Arm the fake save dialog to answer "cancelled" (null path). */
+  async cancelNextSaveDialog(on = true): Promise<void> {
+    await this.drv.eval(
+      (v: boolean) => {
+        window.__qa40xE2E.device.cancelSaveDialog = v;
+      },
+      on
+    );
+  }
+
   /* ---- M4: programs / transform locks -------------------------------- */
 
   /** Arm the fake's program gate: the next measurement program stays in

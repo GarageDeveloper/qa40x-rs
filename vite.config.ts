@@ -1,10 +1,21 @@
 import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+// App version for export provenance headers (issue #30) — single source of
+// truth is package.json (kept in lockstep with tauri.conf.json/Cargo.toml by
+// the release procedure).
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8")
+) as { version: string };
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

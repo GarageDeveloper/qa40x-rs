@@ -57,6 +57,7 @@ import { WrappedSweepChart } from "../../chart/sweep";
 import { MEASURES, measureByKey } from "../../core/measure";
 import { getFrames } from "../../data/frames";
 import { measuresFor } from "../../data/measures";
+import { copyTilePng, exportTileCsv, exportTilePng, exportTileSvg } from "../../export/export";
 import { openTileGearDialog } from "./gear";
 import { addTraceCandidates } from "./addtrace";
 import { el, keyedList } from "../../ui/dom";
@@ -109,7 +110,7 @@ export function createTile(
     { "data-testid": `tile-handle-${tileId}`, title: "Drag to reorder" },
     "⠿"
   );
-  const kindSel = el("select.field.field--small", {
+  const kindSel = el("select.field.field--small.tile__col1", {
     "data-testid": `tile-kind-${tileId}`,
     onchange: (e: Event) =>
       setTileKind(store, ipc, tileId, (e.target as HTMLSelectElement).value as GraphKind),
@@ -119,7 +120,7 @@ export function createTile(
     el("option", { value: "scope" }, "Scope"),
     el("option", { value: "sweep" }, "Sweep")
   );
-  const unitSel = el("select.field.field--small", {
+  const unitSel = el("select.field.field--small.tile__col2", {
     "data-testid": `tile-unit-${tileId}`,
     onchange: (e: Event) => {
       const v = (e.target as HTMLSelectElement).value;
@@ -129,7 +130,7 @@ export function createTile(
       else setTileTdUnit(store, tileId, v as TdUnit);
     },
   });
-  const addSel = el("select.field.field--small.tile__add", {
+  const addSel = el("select.field.field--small.tile__add.tile__col1", {
     "data-testid": `tile-add-trace-${tileId}`,
     title: "Add a trace to this graph",
     onchange: (e: Event) => {
@@ -140,7 +141,7 @@ export function createTile(
   });
   // Scope time window, directly on the tile (the ⚙ keeps its field too).
   const TIME_WINDOWS_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500];
-  const timeSel = el("select.field.field--small", {
+  const timeSel = el("select.field.field--small.tile__col3", {
     "data-testid": `tile-time-${tileId}`,
     title: "Displayed time window",
     onchange: (e: Event) => {
@@ -294,6 +295,30 @@ export function createTile(
     },
     "Hₙ"
   );
+  // Export (issue #30): select-as-menu, the tile header's idiom (＋/Σ) —
+  // data as CSV (provenance header), image as PNG file or clipboard copy.
+  const exportSel = el("select.field.field--small.tile__add.tile__col3", {
+    "data-testid": `tile-export-${tileId}`,
+    title:
+      "Export this graph — data as CSV (provenance header), image as " +
+      "PNG (file / clipboard) or vector SVG",
+    onchange: (e: Event) => {
+      const sel = e.target as HTMLSelectElement;
+      const v = sel.value;
+      sel.value = "";
+      if (v === "csv") void exportTileCsv(store, ipc, tileId);
+      else if (v === "png") void exportTilePng(store, ipc, tileId);
+      else if (v === "svg") void exportTileSvg(store, ipc, tileId);
+      else if (v === "copy") void copyTilePng(store, ipc, tileId);
+    },
+  });
+  exportSel.append(
+    el("option", { value: "" }, "⤓"),
+    el("option", { value: "csv" }, "Data (CSV)…"),
+    el("option", { value: "png" }, "Image (PNG)…"),
+    el("option", { value: "svg" }, "Vector (SVG)…"),
+    el("option", { value: "copy" }, "Copy image")
+  );
   const freezeBtn = el(
     "button.btn.btn--small",
     {
@@ -336,7 +361,7 @@ export function createTile(
         (e.target as HTMLSelectElement).value as "auto" | TraceId
       ),
   });
-  const chipAddSel = el("select.field.field--small.tile__add", {
+  const chipAddSel = el("select.field.field--small.tile__add.tile__col2", {
     "data-testid": `tile-chip-add-${tileId}`,
     title: "Add a measurement readout (Σ)",
     onchange: (e: Event) => {
@@ -394,6 +419,12 @@ export function createTile(
   // measurement — side by side in the header; the strip keeps the chips
   // and their source picker.
   const strip = el("div.tile__strip", {}, chipsHost, chipSrcSel);
+  // Two DELIBERATE header rows (maintainer feedback on PR #41 — the
+  // flex-wrap fallback broke ⚙/❄/⛶ onto a second line at random points,
+  // differently per tile): row 1 drives the VIEW (kind/unit/scope
+  // controls, display toggles, freeze/focus/gear stay top-right where
+  // they always were), row 2 COMPOSES it (add trace ＋, add measurement
+  // Σ, export ⤓). Wrap stays on both rows as a narrow-window backstop.
   const root = el(
     "section.tile",
     { "data-testid": `tile-${tileId}` },
@@ -406,14 +437,25 @@ export function createTile(
       timeSel,
       trigWrap,
       armBtn,
-      el("span.tile__spacer"),
-      addSel,
-      chipAddSel,
+      // Display toggles (∠ phase, Hₙ harmonics) belong to the LEFT view
+      // group (maintainer pass 3) — only ❄ ⛶ ⚙ anchor right.
       phaseBtn,
       harmBtn,
+      el("span.tile__spacer"),
       freezeBtn,
       focusBtn,
       gearBtn
+    ),
+    // Tools row: compose on the LEFT (＋ trace, Σ measurement, aligned
+    // under kind/unit), export ⤓ anchored RIGHT under ❄ ⛶ ⚙ (maintainer
+    // pass 4 — output actions live on the right on both rows).
+    el(
+      "div.tile__head.tile__head--tools",
+      {},
+      addSel,
+      chipAddSel,
+      el("span.tile__spacer"),
+      exportSel
     ),
     strip,
     chartHost,

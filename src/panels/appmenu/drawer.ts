@@ -13,6 +13,8 @@ import type { AppState } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import { refreshRest, REST_TOKEN_KEY, setRestExposed, setRestToken } from "../../store/actions/rest";
 import { setTheme } from "../../store/actions/ui";
+import { visibleTiles } from "../../store/selectors/layout";
+import { copyTilePng, exportTileCsv, exportTilePng, exportTileSvg } from "../../export/export";
 import { openDrawer } from "../../ui/drawer";
 import { el } from "../../ui/dom";
 
@@ -76,6 +78,75 @@ export function openAppDrawer(store: Store<AppState>, ipc: Ipc): void {
     hint
   );
 
+  /* ---- Export (issue #30) ---------------------------------------------- */
+  // The section the module doc reserved: one row per DISPLAYED graph tile,
+  // same CSV/PNG/copy actions as the tile's own ⤓ menu. Rebuilt live while
+  // the drawer is open (a kind change or a layout-pattern change relabels
+  // or adds/removes rows).
+  const exportRows = el("div", { "data-testid": "app-export-tiles" });
+  const exportSection = el(
+    "section.drawer__section",
+    {},
+    el("h3.drawer__section-title", {}, "Export"),
+    exportRows,
+    el(
+      "p.drawer__hint",
+      {},
+      "CSV files carry a provenance header (device identity, acquisition " +
+        "settings) so they stay re-analysable and comparable years later. " +
+        "Also per tile (⤓) and per trace in the Traces panel."
+    )
+  );
+
+  const KIND_LABELS = { spectrum: "Spectrum", scope: "Scope", sweep: "Sweep" } as const;
+  const rebuildExportRows = (tiles: { id: string; kind: keyof typeof KIND_LABELS }[]): void => {
+    exportRows.replaceChildren(
+      ...tiles.map((t, i) =>
+        el(
+          "div.drawer__row",
+          {},
+          el("span.drawer__key", {}, `Graph ${i + 1} — ${KIND_LABELS[t.kind]}`),
+          el(
+            "button.btn.btn--small",
+            {
+              "data-testid": `app-export-csv-${t.id}`,
+              title: "Export the displayed curves as CSV (provenance header)",
+              onclick: () => void exportTileCsv(store, ipc, t.id),
+            },
+            "CSV…"
+          ),
+          el(
+            "button.btn.btn--small",
+            {
+              "data-testid": `app-export-png-${t.id}`,
+              title: "Export the graph as a PNG image",
+              onclick: () => void exportTilePng(store, ipc, t.id),
+            },
+            "PNG…"
+          ),
+          el(
+            "button.btn.btn--small",
+            {
+              "data-testid": `app-export-svg-${t.id}`,
+              title: "Export the graph as a vector SVG drawing",
+              onclick: () => void exportTileSvg(store, ipc, t.id),
+            },
+            "SVG…"
+          ),
+          el(
+            "button.btn.btn--small",
+            {
+              "data-testid": `app-export-copy-${t.id}`,
+              title: "Copy the graph image to the clipboard",
+              onclick: () => void copyTilePng(store, ipc, t.id),
+            },
+            "Copy"
+          )
+        )
+      )
+    );
+  };
+
   /* ---- Appearance ------------------------------------------------------ */
   const themeSel = el("select.field", {
     "data-testid": "app-theme",
@@ -91,6 +162,7 @@ export function openAppDrawer(store: Store<AppState>, ipc: Ipc): void {
     "div.appmenu",
     {},
     restSection,
+    exportSection,
     el(
       "section.drawer__section",
       {},
@@ -131,6 +203,11 @@ export function openAppDrawer(store: Store<AppState>, ipc: Ipc): void {
     (t) => {
       themeSel.value = t;
     }
+  ));
+  subs.push(store.select(
+    (s) => visibleTiles(s).map((t) => ({ id: t.id, kind: t.kind })),
+    rebuildExportRows,
+    (a, b) => JSON.stringify(a) === JSON.stringify(b)
   ));
 
   void refreshRest(store, ipc);

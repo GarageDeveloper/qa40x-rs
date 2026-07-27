@@ -19,6 +19,7 @@ import {
   stopProgram,
 } from "../../store/actions/programs";
 import { freezeTrace, setTraceColor } from "../../store/actions/traces";
+import { exportTraceCsv } from "../../export/export";
 import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openSweepDialog } from "./sweepdialog";
@@ -229,6 +230,24 @@ export function mountProgramsPanel(
       },
       "✕"
     );
+    // CSV export of the landed result (issue #30) — the program's trace
+    // shares its id, so the trace-export path serves it directly. The
+    // domain is the trace's OWN, not a hardcoded "sweep": a plot SCRIPT
+    // program can land fd or td frames instead (review finding #2), and
+    // this button is their only export entry point (program traces are
+    // excluded from the Traces panel).
+    const exportBtn = el(
+      "button.btn.btn--small",
+      {
+        "data-testid": `prog-export-${id}`,
+        onclick: () => {
+          const domains = store.get().traces.byId[id]?.domains ?? [];
+          const domain = (["sweep", "fd", "td"] as const).find((d) => domains.includes(d));
+          if (domain) void exportTraceCsv(store, ipc, id, domain);
+        },
+      },
+      "⤓"
+    );
     // Same color-picker dot as the Traces pool (10a): the program's trace
     // shares its id, so setTraceColor recolors the plotted curve directly.
     const dot = el("input.programs__dot", {
@@ -254,6 +273,7 @@ export function mountProgramsPanel(
         play,
         gear,
         freeze,
+        exportBtn,
         remove
       ),
       el("div.programs__type", { "data-testid": `prog-type-${id}` }),
@@ -296,6 +316,12 @@ export function mountProgramsPanel(
     freeze.disabled = !vm.hasData;
     freeze.title = vm.hasData
       ? "Freeze a named reference from this result"
+      : "No data yet — run first";
+
+    const exportBtn = node.querySelector<HTMLButtonElement>(`[data-testid="prog-export-${id}"]`)!;
+    exportBtn.disabled = !vm.hasData;
+    exportBtn.title = vm.hasData
+      ? "Export the result curve as CSV (provenance header)"
       : "No data yet — run first";
 
     const remove = node.querySelector<HTMLButtonElement>(`[data-testid="prog-remove-${id}"]`)!;

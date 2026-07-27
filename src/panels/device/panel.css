@@ -2,8 +2,14 @@
   display: flex;
   align-items: center;
   gap: 18px;
-  height: var(--topbar-h);
-  padding: 0 14px;
+  /* min-height + wrap, not a fixed height: connected, the bar's controls
+   * need ~1250 px — on a window narrower than that (minWidth is 960) a
+   * fixed-height nowrap bar clipped the theme/app-menu buttons off the
+   * right edge. Wrapping only engages below that width; the default
+   * 1440 px window keeps the familiar single-row bar. */
+  flex-wrap: wrap;
+  min-height: var(--topbar-h);
+  padding: 2px 14px;
   background: linear-gradient(var(--topbar-a), var(--topbar-b));
   border-bottom: 1px solid var(--line-1);
 }

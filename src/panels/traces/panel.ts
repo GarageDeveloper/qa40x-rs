@@ -18,6 +18,8 @@ import {
   setTraceColor,
 } from "../../store/actions/traces";
 import { fdShownTraceIds } from "../../store/selectors/layout";
+import { exportTraceCsv } from "../../export/export";
+import type { Domain } from "../../core/model";
 import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openTransformDialog } from "./transformdialog";
@@ -98,6 +100,22 @@ export function mountTracesPanel(
             if (mode) addWeightedCopy(store, ipc, id, mode);
           };
           row.append(wtSel);
+          // CSV export (issue #30): one option per domain this trace
+          // currently carries frames for — options live in update() (the
+          // badges' domains sig), the wire units + provenance header in
+          // export/csv.ts.
+          const exSel = el("select.traces__wt", {
+            "data-testid": `trace-export-${id}`,
+            title:
+              "Export this trace's data as CSV — wire units plus a " +
+              "provenance header (device identity, acquisition settings)",
+          }) as HTMLSelectElement;
+          exSel.onchange = () => {
+            const domain = exSel.value as Domain | "";
+            exSel.value = "";
+            if (domain) void exportTraceCsv(store, ipc, id, domain);
+          };
+          row.append(exSel);
           if (kind === "transform") {
             row.append(
               el(
@@ -148,6 +166,20 @@ export function mountTracesPanel(
           const sig = `${hasTd}:${hasFd}:${hasSw}:${r.fdShown}:${isMemory}`;
           if (badges.dataset.sig === sig) return;
           badges.dataset.sig = sig;
+          // Export options track the SAME domains sig as the badges — a
+          // trace offers exactly the CSVs it has frames for.
+          const exSel = node.querySelector<HTMLSelectElement>(
+            `[data-testid="trace-export-${r.meta.id}"]`
+          );
+          if (exSel) {
+            exSel.replaceChildren(
+              el("option", { value: "" }, "⤓"),
+              ...(hasTd ? [el("option", { value: "td" }, "Waveform CSV")] : []),
+              ...(hasFd ? [el("option", { value: "fd" }, "Spectrum CSV")] : []),
+              ...(hasSw ? [el("option", { value: "sweep" }, "Sweep CSV")] : [])
+            );
+            exSel.disabled = !hasTd && !hasFd && !hasSw;
+          }
           badges.replaceChildren();
           if (hasTd) {
             badges.append(
