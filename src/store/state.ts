@@ -10,6 +10,7 @@
 import type {
   ClipState,
   DeviceConfig,
+  DeviceEntry,
   DeviceMeta,
   LevelOffsetsDb,
   RestStatus,
@@ -619,8 +620,42 @@ export interface LayoutState {
   focus: string | null;
 }
 
+/**
+ * The enumerated-units slice (issue #25 lot D). Wire entries are stored
+ * VERBATIM (no frontend mapping layer to drift); `AppState.device` remains
+ * the OPEN device's live state until lot E folds it into `byId`.
+ *
+ * Never persisted: `WorkspaceDoc` enumerates its slices explicitly and this
+ * one stays out by design — a persisted device list would resurrect phantom
+ * units on a different bench.
+ */
+export interface DevicesState {
+  /** Display order — sticky for the session: a unit keeps its slot across a
+   * replug (same discipline as `LayoutState.order` keeping its hidden
+   * tail). */
+  order: string[];
+  /** Every unit seen this session, keyed by `"<source>/<unit-key>"`. */
+  byId: Record<string, DeviceEntry>;
+  /** Ids the LAST enumeration returned, in backend order (USB source first,
+   * then the built-in virtual). Membership here = "present now"; an id in
+   * `order` but not here is a remembered, currently absent unit. */
+  available: string[];
+  /** The user's EXPLICIT picker choice; null = "whatever auto-connect
+   * finds". Kept apart from `primary` so an untouched picker never turns
+   * auto-connect into auto-demo: `connect_device` gets a deviceId only when
+   * this is set. */
+  pick: string | null;
+  /** The unit the single-device UI describes and Connect opens. Derived at
+   * every refresh: open unit → pick → first available physical → first
+   * available → null. */
+  primary: string | null;
+  /** An enumeration is in flight (the bar keeps showing the last list). */
+  enumerating: boolean;
+}
+
 export interface AppState {
   device: DeviceState;
+  devices: DevicesState;
   acquisition: AcquisitionState;
   run: RunState;
   traces: TracesState;
@@ -804,6 +839,14 @@ export function initialState(): AppState {
       config: null,
       telemetry: null,
       offsets: null,
+    },
+    devices: {
+      order: [],
+      byId: {},
+      available: [],
+      pick: null,
+      primary: null,
+      enumerating: false,
     },
     acquisition: {
       fftSize: 32768,

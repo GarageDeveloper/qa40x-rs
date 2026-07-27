@@ -63,6 +63,20 @@ describe("v5 document", () => {
     expect(snapshotWorkspace(s)).toEqual(doc);
   });
 
+  it("the devices slice stays out of the document and untouched by a load (issue #25 lot D)", () => {
+    // A persisted device list would resurrect phantom units on a different
+    // bench — WorkspaceDoc enumerates its slices explicitly, devices is
+    // excluded by construction, and applying a doc must not reset it.
+    const store = freshStore();
+    expect("devices" in (snapshotWorkspace(store.get()) as object)).toBe(false);
+
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))));
+    const dest = freshStore();
+    const devicesBefore = dest.get().devices;
+    expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
+    expect(dest.get().devices).toBe(devicesBefore);
+  });
+
   it("normalizes transients: nothing plays or runs after a load", () => {
     const store = freshStore();
     store.update("test/play", (s) => ({

@@ -73,6 +73,43 @@ interface MixSlotError {
   error: string;
 }
 
+/** Mirrors `DeviceEntry`/`DeviceList` (src-tauri/src/device/wire.rs, issue
+ * #25 lot D) — the device bar's enumeration feed. */
+interface DeviceEntryWire {
+  id: string;
+  source_id: string;
+  source_kind: "Usb" | "Virtual";
+  source_label: string;
+  model: string;
+  serial: string;
+  serial_synthetic: boolean;
+  product: string;
+  firmware_version: number | null;
+  is_virtual: boolean;
+  capabilities: {
+    model_name: string;
+    input_channels: number;
+    output_channels: number;
+    sample_rates_hz: number[];
+    input_ranges_dbv: number[];
+    output_ranges_dbv: number[];
+    min_output_vrms: number;
+    max_output_vrms: number;
+    max_input_vrms: number;
+    min_measurement_hz: number;
+    max_measurement_hz: number;
+    calibration: "Unknown" | { FactoryEeprom: { page_bytes: number } };
+    supports_flash: boolean;
+    is_virtual: boolean;
+  };
+  open: boolean;
+}
+
+interface DeviceListWire {
+  devices: DeviceEntryWire[];
+  open: string[];
+}
+
 /* ---- v2 stream wire (mirrors src-tauri/src/stream.rs) ----------------- */
 
 /** Mirrors `TriggerConfig` (stream.rs) — level/hysteresis in level-volts of
@@ -215,6 +252,14 @@ export class FakeDevice {
   private present = true;
   /** True when the session was opened via connect_virtual_device (demo mode). */
   private virtualDevice = false;
+  /** How many physical units the bus offers (lot D picker specs poke it via
+   * setUnits; presence off hides them all, like a real unplug). */
+  private unitCount = 1;
+  /** The unit currently open, as a `"<source>/<unit-key>"` id. */
+  private openId: string | null = null;
+  /** Every `connect_device` deviceId argument, in call order (null = the
+   * arg-less legacy call) — what the picker specs assert against. */
+  connectDeviceIds: (string | null)[] = [];
   private generatorRunning = false;
   // Mirrors the real backend: `last_telemetry` does NO USB I/O and returns
   // null until a keepalive has run. A fake that always returned data here
@@ -292,8 +337,71 @@ export class FakeDevice {
     this.present = present;
     if (!present && this.connected) {
       this.connected = false;
+      this.openId = null;
       this.emitter("device-disconnected");
     }
+  }
+
+  /** How many physical units the bus offers (lot D picker specs). */
+  setUnits(n: number): void {
+    this.unitCount = n;
+  }
+
+  /* -- the enumeration model (mirrors DeviceRegistry::list) ------------- */
+
+  private physicalIds(): string[] {
+    if (!this.present) return [];
+    return Array.from({ length: this.unitCount }, (_, i) => `usb/E2E-FAKE-000${i + 1}`);
+  }
+
+  private static readonly VIRTUAL_ID = "virtual/E2E-VIRT-0001";
+
+  private deviceEntry(id: string, open: boolean): DeviceEntryWire {
+    const virtual = id.startsWith("virtual/");
+    const serial = id.split("/")[1];
+    // Real register-map tables (caps.rs pins them): the virtual unit is the
+    // QA403 of the demo backend (384 kHz), physical fakes are QA402s.
+    const rates = virtual ? [48000, 96000, 192000, 384000] : [48000, 96000, 192000];
+    return {
+      id,
+      source_id: virtual ? "virtual" : "usb",
+      source_kind: virtual ? "Virtual" : "Usb",
+      source_label: virtual ? "Built-in virtual" : "USB",
+      model: virtual ? "QA403" : "QA402",
+      serial,
+      serial_synthetic: false,
+      product: `${virtual ? "QA403" : "QA402"} Audio Analyzer (e2e fake)`,
+      firmware_version: open ? 991 : null,
+      is_virtual: virtual,
+      capabilities: {
+        model_name: virtual ? "QA403" : "QA402",
+        input_channels: 2,
+        output_channels: 2,
+        sample_rates_hz: rates,
+        input_ranges_dbv: [0, 6, 12, 18, 24, 30, 36, 42],
+        output_ranges_dbv: [-12, -2, 8, 18],
+        min_output_vrms: 1e-6,
+        max_output_vrms: 7.943,
+        max_input_vrms: 89.13,
+        min_measurement_hz: 5,
+        max_measurement_hz: rates[rates.length - 1] / 2,
+        calibration: open ? { FactoryEeprom: { page_bytes: 512 } } : "Unknown",
+        supports_flash: false,
+        is_virtual: virtual,
+      },
+      open,
+    };
+  }
+
+  private deviceList(): DeviceListWire {
+    const ids = [...this.physicalIds(), FakeDevice.VIRTUAL_ID];
+    const open = this.connected && this.openId !== null ? [this.openId] : [];
+    // An open unit that stopped enumerating stays listed (registry rule).
+    if (open.length && !ids.includes(open[0])) ids.push(open[0]);
+    return {
+      devices: ids.map((id) => this.deviceEntry(id, open.includes(id))),
+      open,
+    };
   }
 
   /** Arm the program gate: the next measurement-program command (e.g. a THD
@@ -324,22 +432,41 @@ export class FakeDevice {
         return this.present;
       case "is_device_connected":
         return this.connected;
-      case "connect_device":
+      case "connect_device": {
+        const wanted = (a.deviceId as string | undefined) ?? null;
+        this.connectDeviceIds.push(wanted);
+        // The two-id rule: connect accepts any ENUMERATED unit's id.
+        if (wanted !== null && !this.deviceList().devices.some((d) => d.id === wanted)) {
+          throw new Error(`Failed to connect: Not found (fake): ${wanted}`);
+        }
+        if (wanted !== null && wanted.startsWith("virtual/")) {
+          this.connected = true;
+          this.config.input_gain = 42;
+          this.virtualDevice = true;
+          this.openId = wanted;
+          return "Connected to the virtual QA40x (e2e fake device)";
+        }
         if (!this.present) throw new Error("No QA40x on the bus (fake)");
         this.connected = true;
         this.config.input_gain = 42; // connect forces the safe input range
         this.virtualDevice = false;
+        this.openId = wanted ?? this.physicalIds()[0];
         return "Connected to QA402 (e2e fake device)";
+      }
       case "connect_virtual_device":
         // Demo mode: attaches regardless of bus presence — the virtual
         // device lives in-process, exactly like the backend's simulator.
         this.connected = true;
         this.config.input_gain = 42;
         this.virtualDevice = true;
+        this.openId = FakeDevice.VIRTUAL_ID;
         return "Connected to the virtual QA40x (demo mode, e2e fake)";
+      case "list_devices":
+        return this.deviceList();
       case "disconnect_device":
         this.connected = false;
         this.virtualDevice = false;
+        this.openId = null;
         // Mirror the backend: the stream loop and the gap-free generator are
         // stopped BEFORE the device closes (clean Stopped, never an Error).
         this.stopStream(true);

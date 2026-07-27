@@ -14,6 +14,7 @@ import { invoke, Channel as TauriChannel } from "@tauri-apps/api/core";
 import type {
   Channel,
   DeviceConfig,
+  DeviceList,
   DeviceMeta,
   DryRun,
   ExtractionResult,
@@ -66,6 +67,11 @@ export interface Commands {
   // during a demo session so a newly plugged QA40x takes over.
   is_hardware_present: { args: Record<string, never>; result: boolean };
   get_device_info: { args: DeviceScoped; result: DeviceMeta | null };
+  // Enumeration is registry-level, not device-keyed: it lists units that
+  // are NOT open (so it takes no deviceId — the two-id rule above). The
+  // open unit's entry is enriched (firmware + calibration); the rest carry
+  // what the bus/model tables know.
+  list_devices: { args: Record<string, never>; result: DeviceList };
 
   // Configuration
   get_device_config: { args: DeviceScoped; result: DeviceConfig };
