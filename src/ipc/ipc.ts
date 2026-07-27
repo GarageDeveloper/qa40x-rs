@@ -37,35 +37,48 @@ import type {
 
 export { TauriChannel };
 
+/**
+ * Device-keyed commands accept an optional `deviceId` (issue #25 lot C):
+ * omitted ⇒ the backend's default device — every existing caller is
+ * unchanged. Nothing passes it yet; lot D's devices slice does. Backend
+ * contract: an id that names anything but an OPEN device rejects
+ * (`Unknown device: <id>`), never falls back.
+ */
+type DeviceScoped = { deviceId?: string };
+
 export interface Commands {
-  // Connection lifecycle
-  connect_device: { args: Record<string, never>; result: string };
+  // Connection lifecycle. `connect_device` with a `deviceId` opens that
+  // specific enumerated unit (any source, virtual included); without it,
+  // the first physical unit (legacy auto-connect).
+  connect_device: { args: DeviceScoped; result: string };
   // Demo mode: attach the embedded virtual QA40x (in-process simulator) —
   // same device surface as hardware, `DeviceMeta.is_virtual` flags it.
+  // Names its unit by construction — any-unit opens go through
+  // `connect_device` with a `deviceId`.
   connect_virtual_device: { args: Record<string, never>; result: string };
-  disconnect_device: { args: Record<string, never>; result: string };
-  is_device_connected: { args: Record<string, never>; result: boolean };
+  disconnect_device: { args: DeviceScoped; result: string };
+  is_device_connected: { args: DeviceScoped; result: boolean };
   is_device_present: { args: Record<string, never>; result: boolean };
   // Real hardware on the USB bus (the virtual device never counts) — polled
   // during a demo session so a newly plugged QA40x takes over.
   is_hardware_present: { args: Record<string, never>; result: boolean };
-  get_device_info: { args: Record<string, never>; result: DeviceMeta | null };
+  get_device_info: { args: DeviceScoped; result: DeviceMeta | null };
 
   // Configuration
-  get_device_config: { args: Record<string, never>; result: DeviceConfig };
-  read_device_config: { args: Record<string, never>; result: DeviceConfig };
-  set_input_gain: { args: { gainDbv: number }; result: string };
-  set_output_gain: { args: { gainDbv: number }; result: string };
-  set_sample_rate: { args: { rateHz: number }; result: string };
+  get_device_config: { args: DeviceScoped; result: DeviceConfig };
+  read_device_config: { args: DeviceScoped; result: DeviceConfig };
+  set_input_gain: { args: { gainDbv: number } & DeviceScoped; result: string };
+  set_output_gain: { args: { gainDbv: number } & DeviceScoped; result: string };
+  set_sample_rate: { args: { rateHz: number } & DeviceScoped; result: string };
 
   // Per-converter display offsets (one per channel per converter — never
   // borrow the other converter's offset, task #51)
   get_input_dbv_offset: {
-    args: { inputChannel: Channel };
+    args: { inputChannel: Channel } & DeviceScoped;
     result: InputDbvOffset;
   };
   get_output_dbv_offset: {
-    args: { outputChannel: Channel };
+    args: { outputChannel: Channel } & DeviceScoped;
     result: InputDbvOffset;
   };
 
@@ -73,25 +86,25 @@ export interface Commands {
   // output range, captures and analyzes; frames arrive over the Channel.
   // Every frame carries its own per-converter LevelOffsetsDb (B-3).
   stream_start: {
-    args: { config: StreamConfig; onFrame: TauriChannel<StreamMsg> };
+    args: { config: StreamConfig; onFrame: TauriChannel<StreamMsg> } & DeviceScoped;
     result: null;
   };
-  stream_update: { args: { config: StreamConfig }; result: null };
-  stream_stop: { args: Record<string, never>; result: null };
-  stream_status: { args: Record<string, never>; result: boolean };
-  stream_reset_averaging: { args: Record<string, never>; result: null };
-  stream_reset_measure_stats: { args: Record<string, never>; result: null };
-  sweep_stop: { args: Record<string, never>; result: null };
+  stream_update: { args: { config: StreamConfig } & DeviceScoped; result: null };
+  stream_stop: { args: DeviceScoped; result: null };
+  stream_status: { args: DeviceScoped; result: boolean };
+  stream_reset_averaging: { args: DeviceScoped; result: null };
+  stream_reset_measure_stats: { args: DeviceScoped; result: null };
+  sweep_stop: { args: DeviceScoped; result: null };
 
   // Output-only mode (M2): the summed mix drives the DAC gap-free, no
   // capture. The backend owns render → range-fit → scale; stop via the
   // (pre-existing) generator commands.
   output_only_start: {
-    args: { slots: MixerSlotDesc[] };
+    args: { slots: MixerSlotDesc[] } & DeviceScoped;
     result: OutputOnlyStatus;
   };
-  stop_generator: { args: Record<string, never>; result: string };
-  is_generator_running: { args: Record<string, never>; result: boolean };
+  stop_generator: { args: DeviceScoped; result: string };
+  is_generator_running: { args: DeviceScoped; result: boolean };
 
   // Per-trace measurements for the tile chips (measurements:: math; the
   // frontend memoizes by trace seq and only formats — plan M3).
@@ -124,7 +137,7 @@ export interface Commands {
       amplitudeDbfs: number;
       outputChannel: Channel;
       inputChannel: Channel;
-    };
+    } & DeviceScoped;
     result: ThdSweepResult;
   };
   // THD vs level (issue #27): sweeps the stimulus level at a fixed tone
@@ -138,7 +151,7 @@ export interface Commands {
       frequencyHz: number;
       outputChannel: Channel;
       inputChannel: Channel;
-    };
+    } & DeviceScoped;
     result: ThdSweepResult;
   };
   measure_frequency_response_multi: {
@@ -151,7 +164,7 @@ export interface Commands {
       wantRight: boolean;
       durationSecs: number;
       amplitudeDbfs: number;
-    };
+    } & DeviceScoped;
     result: FrequencyResponseTrace[];
   };
   // Wow & flutter (issue #28): FM-demodulate a captured reference tone
@@ -166,7 +179,7 @@ export interface Commands {
       outputChannel: Channel;
       inputChannel: Channel;
       generate: boolean;
-    };
+    } & DeviceScoped;
     result: WowFlutterResult;
   };
   // Measurement scripts (M4): the run streams `script-log` / `script-frame`
@@ -176,9 +189,9 @@ export interface Commands {
   script_status: { args: Record<string, never>; result: boolean };
 
   // Telemetry / keepalive
-  read_telemetry: { args: Record<string, never>; result: Telemetry };
-  keepalive: { args: Record<string, never>; result: Telemetry };
-  last_telemetry: { args: Record<string, never>; result: Telemetry | null };
+  read_telemetry: { args: DeviceScoped; result: Telemetry };
+  keepalive: { args: DeviceScoped; result: Telemetry };
+  last_telemetry: { args: DeviceScoped; result: Telemetry | null };
 
   // REST automation server
   rest_status: { args: Record<string, never>; result: RestStatus };
@@ -197,7 +210,7 @@ export interface Commands {
   list_qa40x_releases: { args: Record<string, never>; result: ReleaseInfo[] };
   download_qa40x_setup: { args: { url: string }; result: string };
   flash_dry_run: { args: { sha256: string }; result: DryRun };
-  flash_firmware: { args: { sha256: string }; result: null };
+  flash_firmware: { args: { sha256: string } & DeviceScoped; result: null };
 }
 
 export type CommandName = keyof Commands;
