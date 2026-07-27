@@ -1194,6 +1194,33 @@ mod tests {
         assert_eq!(list.open, vec!["usb/S".to_string()]);
     }
 
+    #[tokio::test]
+    async fn list_keeps_an_open_virtual_unit_that_stopped_enumerating_without_port_substitution() {
+        // Lot E's port-substitution step (`usb_port(&desc.transport)`)
+        // returns `None` for `Transport::Virtual` — a virtual open unit that
+        // stopped enumerating must fall straight through to the OLD
+        // append-tail path, never attempt (or crash on) a port match. This
+        // pins the `let Some(open_port) = usb_port(&desc.transport) else {
+        // continue }` branch actually firing for a transport with no bus
+        // position, distinct from the USB "vanished" case which DOES have one.
+        let src = Arc::new(FakeSource::new("virtual", false, &["V"]));
+        let reg = registry(vec![src.clone()]);
+        let v = reg.enumerate().await[0].id.clone();
+        reg.open(&v).await.expect("open V");
+
+        src.vanish("V");
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["virtual/V".to_string()]);
+        let entry = list
+            .devices
+            .iter()
+            .find(|d| d.id == "virtual/V")
+            .expect("still listed via the append-tail path, not lost");
+        assert!(entry.open);
+        assert_eq!(entry.slot, Some(0));
+        assert_eq!(entry.firmware_version, Some(42), "the enriched descriptor survives");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn shutdown_all_tears_slots_down_concurrently_despite_a_wedged_device() {
         // One wedged device (its mutex held by a stuck capture) must not

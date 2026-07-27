@@ -1513,6 +1513,180 @@ mod command_arg_tests {
             "unexpected error payload: {err:?}"
         );
     }
+
+    /// Issue #25 lot E: `open_additional` never treats an empty/garbage id as
+    /// "pick something" — the guard against `connect_additional_device`'s
+    /// `device_id: String` (REQUIRED, unlike every other device command's
+    /// `Option<String>`) ever degrading into a silent default (e.g. an
+    /// `unwrap_or_default()` regression feeding it `""`). NOTE: the command
+    /// layer's OWN arg deserialization (a missing `deviceId` key failing the
+    /// IPC call) could not be pinned through `command_arg_tests`' mock-IPC
+    /// pattern the way `sweep_stop`'s is: `connect_additional_device` takes
+    /// `app_handle: tauri::AppHandle`, which resolves to the concrete
+    /// `AppHandle<Wry>` (`#[default_runtime(crate::Wry, wry)]`) and cannot
+    /// satisfy `CommandArg<MockRuntime>` — `tauri::generate_handler!` simply
+    /// fails to compile with it under `tauri::test::mock_builder()`. This is
+    /// the same pre-existing limitation `connect_device` already has (never
+    /// unit-tested this way either), not something lot E introduced; fixing
+    /// it would mean making the command generic over `R: Runtime`, a
+    /// production-code change outside a test-only pass.
+    #[tokio::test]
+    async fn open_additional_with_an_empty_id_never_silently_opens_something() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let devices = { state.lock().await.devices.clone() };
+        devices.open_virtual().await.expect("demo unit opens on slot 0");
+
+        let err = devices
+            .open_additional(&device::DeviceId::from_wire(""))
+            .await
+            .expect_err("an empty id must never resolve to some open unit");
+        assert!(matches!(err, device::DeviceError::NotFound));
+        // NOT `runtimes().len() == 1`: `open_additional` reserves a free slot
+        // BEFORE attempting the open (`free_or_new_runtime`, then
+        // `open_locked`), so a failed open still grows the vector by one —
+        // consistent with the "slots never shrink" invariant. The reserved
+        // slot stays genuinely empty and gets reused by the NEXT
+        // open_additional call (`free_or_new_runtime` picks any runtime with
+        // nothing open first), so repeated bogus ids do not keep burning
+        // fresh slots toward MAX_DEVICES. What must hold is: nothing is
+        // open on it, and the default device is untouched.
+        assert_eq!(devices.runtimes().len(), 2, "a slot was reserved for the attempt, then left empty");
+        assert!(devices.runtimes()[1].current().is_none(), "the reserved slot has nothing open");
+        assert_eq!(devices.current().expect("slot 0 untouched").id.source(), "virtual");
+    }
+
+    /// Issue #25 lot E acceptance test through the REAL command/IPC layer
+    /// (mock runtime, actual `#[tauri::command]` deserialization + `State`
+    /// extraction for the command UNDER TEST): with a demo unit on slot 0
+    /// (opened through the real `connect_virtual_device` IPC call) and a
+    /// SECOND unit added directly through the registry (`open_additional` —
+    /// see the note on `connect_additional_device`'s AppHandle above for why
+    /// its own wrapper can't run under this harness; its body is exactly
+    /// this call), a keyed command naming the second device's id must reach
+    /// ITS runtime, never fall back to the default slot. `sweep_cancel` is a
+    /// per-runtime flag readable without going through the command layer
+    /// again, so it pins the routing precisely: if `sweep_stop`'s
+    /// `device_id` threading or `runtime_for_command` ever regressed to
+    /// always resolving slot 0 regardless of the id, this test would catch
+    /// it (rt0's flag would flip instead of rt1's, or both, or neither).
+    #[tokio::test]
+    async fn sweep_stop_with_the_second_devices_id_cancels_only_that_runtimes_flag() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let app = tauri::test::mock_builder()
+            .manage(app_state.clone())
+            .invoke_handler(tauri::generate_handler![connect_virtual_device, sweep_stop])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        invoke(&webview, "connect_virtual_device", serde_json::json!({}))
+            .expect("the demo unit opens on slot 0 through the real command");
+        {
+            let devices = { app_state.lock().await.devices.clone() };
+            devices
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .await
+                .expect("the built-in second virtual unit opens on a fresh slot");
+        }
+
+        let devices = { app_state.lock().await.devices.clone() };
+        let rt0 = devices.runtime_for(None).expect("default routes to slot 0");
+        let rt1 = devices
+            .runtime_for(Some("virtual/0DE0_0002"))
+            .expect("the second id routes to slot 1");
+        assert!(!rt0.sweep_cancel().load(Ordering::SeqCst), "nothing cancelled yet");
+        assert!(!rt1.sweep_cancel().load(Ordering::SeqCst), "nothing cancelled yet");
+
+        invoke(
+            &webview,
+            "sweep_stop",
+            serde_json::json!({ "deviceId": "virtual/0DE0_0002" }),
+        )
+        .expect("sweep_stop routes to the second device");
+
+        assert!(
+            rt1.sweep_cancel().load(Ordering::SeqCst),
+            "the SECOND runtime's sweep-cancel flag must be set"
+        );
+        assert!(
+            !rt0.sweep_cancel().load(Ordering::SeqCst),
+            "the DEFAULT (slot 0) runtime must be untouched by a keyed sweep_stop"
+        );
+    }
+
+    /// Companion to the sweep_stop routing test, over `disconnect_device` +
+    /// `is_device_connected` (both AppHandle-free, so both go through the
+    /// real IPC layer end to end): a keyed LIFECYCLE command (closing a
+    /// runtime, not just flipping a flag on it) must also target only the
+    /// named device. Disconnecting the second unit must leave the default
+    /// device connected and reachable by `None`; the second id must then be
+    /// gone (its slot freed, `UnknownDevice`) rather than the default device
+    /// having been torn down instead.
+    #[tokio::test]
+    async fn disconnect_device_with_the_second_devices_id_leaves_the_default_device_connected() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let app = tauri::test::mock_builder()
+            .manage(app_state.clone())
+            .invoke_handler(tauri::generate_handler![
+                connect_virtual_device,
+                disconnect_device,
+                is_device_connected,
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        invoke(&webview, "connect_virtual_device", serde_json::json!({}))
+            .expect("the demo unit opens on slot 0 through the real command");
+        {
+            let devices = { app_state.lock().await.devices.clone() };
+            devices
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .await
+                .expect("the second unit opens on a fresh slot");
+        }
+
+        let connected =
+            |body: tauri::ipc::InvokeResponseBody| -> bool { body.deserialize().expect("bool response") };
+        assert!(connected(
+            invoke(&webview, "is_device_connected", serde_json::json!({})).expect("default connected")
+        ));
+        assert!(connected(
+            invoke(
+                &webview,
+                "is_device_connected",
+                serde_json::json!({ "deviceId": "virtual/0DE0_0002" })
+            )
+            .expect("second device connected")
+        ));
+
+        invoke(
+            &webview,
+            "disconnect_device",
+            serde_json::json!({ "deviceId": "virtual/0DE0_0002" }),
+        )
+        .expect("disconnecting the second device by id");
+
+        // The default device (slot 0) must be entirely untouched.
+        assert!(
+            connected(
+                invoke(&webview, "is_device_connected", serde_json::json!({}))
+                    .expect("default still routes")
+            ),
+            "a keyed disconnect must never tear down the default runtime"
+        );
+        // The second device is gone — its slot freed, so naming it now errors.
+        invoke(
+            &webview,
+            "is_device_connected",
+            serde_json::json!({ "deviceId": "virtual/0DE0_0002" }),
+        )
+        .expect_err("the disconnected second device's id must no longer route anywhere");
+    }
 }
 
 #[cfg(test)]
