@@ -3,6 +3,7 @@ import { initialState, type AppState, type TraceMeta } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
 import {
   benchProvenance,
+  clipScopeWindow,
   columnsCsv,
   numCell,
   provenanceComments,
@@ -135,6 +136,28 @@ describe("benchProvenance", () => {
     // averaging off → no count line
     expect(lines.some((l) => l.startsWith("# averaging_count"))).toBe(false);
   });
+
+  it("device connected but not yet configured: identity lines, no ranges/offsets", () => {
+    // A real transient bench state (right after connect, before the config
+    // readback lands): `info` is set, `config`/`offsets` are still null. The
+    // header must not fabricate a sample rate or "calibrated=true" it never
+    // measured.
+    const s = stateWithDevice();
+    const lines = provenanceComments(
+      benchProvenance(
+        { ...s, device: { ...s.device, config: null, offsets: null } },
+        "0.3.0",
+        "2026-07-27T10:00:00.000Z"
+      )
+    );
+    expect(lines).toContain("# device_model=QA403");
+    expect(lines).toContain("# device_serial=AB12_CD34");
+    expect(lines.some((l) => l.startsWith("# sample_rate_hz"))).toBe(false);
+    expect(lines.some((l) => l.startsWith("# input_range_dbv"))).toBe(false);
+    expect(lines.some((l) => l.startsWith("# output_range_dbv"))).toBe(false);
+    expect(lines).toContain("# calibrated=false");
+    expect(lines.some((l) => l.startsWith("# offset_input"))).toBe(false);
+  });
 });
 
 describe("traceSourceLine", () => {
@@ -190,6 +213,7 @@ describe("tileSpectrumCsv", () => {
     const vm: SpectrumVM = {
       unitLabel: "dBV",
       harmonics: [],
+      dbrRefDb: null,
       series: [series("Input L", [0, 10], [-3, -6]), series("Input R", [0, 10], [-9, -12])],
     };
     const csv = tileSpectrumCsv(vm, ["# a=b"]);
@@ -205,10 +229,56 @@ describe("tileSpectrumCsv", () => {
     const vm: SpectrumVM = {
       unitLabel: "dBFS",
       harmonics: [],
+      dbrRefDb: null,
       series: [series("A", [0, 10], [-3, -6]), series("B", [0, 5, 10], [-1, -2, -3])],
     };
     const head = dataRows(tileSpectrumCsv(vm, []))[0];
     expect(head).toBe("frequency_hz (A),A (dBFS),frequency_hz (B),B (dBFS)");
+  });
+
+  it("quotes a series label that itself contains a comma", () => {
+    // A trace label with a comma (e.g. a user-renamed "Left, 2nd") must not
+    // silently shift the CSV's column count — textCell wraps the whole
+    // header cell in quotes, exactly like columnsCsv's unit tests, but here
+    // exercised through the real tile assembly path.
+    const vm: SpectrumVM = {
+      unitLabel: "dBV",
+      harmonics: [],
+      dbrRefDb: null,
+      series: [series("Left, 2nd", [0, 10], [-3, -6])],
+    };
+    const head = rows(tileSpectrumCsv(vm, []))[0];
+    expect(head).toBe('frequency_hz,"Left, 2nd (dBV)"');
+  });
+});
+
+describe("clipScopeWindow", () => {
+  const series = (samples: number[], sampleRate: number) => ({
+    id: "a",
+    label: "Input L",
+    color: "#fff",
+    samples: Float64Array.from(samples),
+    sampleRate,
+    seq: 1,
+  });
+
+  it("clips each series to the renderer's own displayCount rule", () => {
+    // 10 ms @ 1 kHz → round(10) = 10 samples out of 16 — the exported file
+    // must match the DRAWN extent (review finding #3), not the capture.
+    const vm: ScopeVM = { unitLabel: "V", trigger: null, series: [series(Array.from({ length: 16 }, (_, i) => i), 1000)] };
+    const clipped = clipScopeWindow(vm, 10);
+    expect(clipped.series[0].samples.length).toBe(10);
+    expect(Array.from(clipped.series[0].samples)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("keeps everything on a 'full' window, clamps to the data and to a 2-sample floor", () => {
+    const vm: ScopeVM = { unitLabel: "V", trigger: null, series: [series([1, 2, 3], 1000)] };
+    // null window = full capture, untouched (same object shape).
+    expect(clipScopeWindow(vm, null).series[0].samples.length).toBe(3);
+    // A window longer than the data never over-reads.
+    expect(clipScopeWindow(vm, 60_000).series[0].samples.length).toBe(3);
+    // A sub-sample window still keeps the renderer's 2-sample minimum.
+    expect(clipScopeWindow(vm, 0.5).series[0].samples.length).toBe(2);
   });
 });
 
@@ -256,6 +326,7 @@ describe("tileSweepCsv", () => {
           y: Float64Array.from([-0.1, -3]),
           phaseDeg: Float64Array.from([0, -90]),
           seq: 1,
+          yUnitLabel: "dB",
         },
       ],
     };
@@ -264,6 +335,87 @@ describe("tileSweepCsv", () => {
       "20,-0.1,0",
       "20000,-3,-90",
     ]);
+  });
+
+  it("labels each column with its OWN trace's y unit — a dB and a % sweep sharing a tile", () => {
+    // The tile-level unitLabel is fixed by the FIRST member only (chartvm);
+    // stamping it on every column mislabeled a THD-% column as dB (review
+    // finding #5) — a persisted, machine-parsed wrong claim.
+    const vm: SweepVM = {
+      unitLabel: "dB",
+      xUnit: "Hz",
+      omitted: [],
+      series: [
+        {
+          id: "a",
+          label: "THD dB",
+          curveLabel: null,
+          color: "#fff",
+          x: Float64Array.from([20, 20000]),
+          y: Float64Array.from([-80, -70]),
+          phaseDeg: null,
+          seq: 1,
+          yUnitLabel: "dB",
+        },
+        {
+          id: "b",
+          label: "THD pct",
+          curveLabel: null,
+          color: "#fff",
+          x: Float64Array.from([20, 20000]),
+          y: Float64Array.from([0.01, 0.031]),
+          phaseDeg: null,
+          seq: 1,
+          yUnitLabel: "%",
+        },
+      ],
+    };
+    expect(dataRows(tileSweepCsv(vm, []))[0]).toBe(
+      "frequency_hz,THD dB (dB),THD pct (%)"
+    );
+  });
+
+  it("gives each series its own x column with phase, on distinct grids; pads the shorter one", () => {
+    // A tile mixing two FR sweeps with different point counts (e.g. one
+    // finished a re-run at a coarser resolution) — same "distinct grids"
+    // branch as tileSpectrumCsv, but exercising phaseDeg AND row padding
+    // together, which the shared-x test above never reaches.
+    const vm: SweepVM = {
+      unitLabel: "dB",
+      xUnit: "Hz",
+      omitted: [],
+      series: [
+        {
+          id: "a",
+          label: "FR Left",
+          curveLabel: "Left",
+          color: "#fff",
+          x: Float64Array.from([20, 200, 20000]),
+          y: Float64Array.from([-0.1, -0.2, -3]),
+          phaseDeg: Float64Array.from([0, -10, -90]),
+          seq: 1,
+          yUnitLabel: "dB",
+        },
+        {
+          id: "b",
+          label: "FR Right",
+          curveLabel: "Right",
+          color: "#fff",
+          x: Float64Array.from([20, 20000]),
+          y: Float64Array.from([-0.2, -3.5]),
+          phaseDeg: null,
+          seq: 1,
+          yUnitLabel: "dB",
+        },
+      ],
+    };
+    const csvRows = dataRows(tileSweepCsv(vm, []));
+    expect(csvRows[0]).toBe(
+      "frequency_hz (FR Left),FR Left (dB),FR Left phase (deg),frequency_hz (FR Right),FR Right (dB)"
+    );
+    expect(csvRows).toHaveLength(4); // header + the longer series' 3 rows
+    // The shorter series' row 3 pads with empty cells, not zeros.
+    expect(csvRows[3]).toBe("20000,-3,-90,,");
   });
 });
 
@@ -307,7 +459,7 @@ describe("traceFdCsv", () => {
 });
 
 describe("traceSweepCsv", () => {
-  it("suffixes curve labels on multi-curve traces and honors frame units", () => {
+  it("suffixes curve labels on multi-curve traces and honors caller-resolved units", () => {
     const sweep = {
       freqs: Float64Array.from([0.5, 4]),
       curves: [
@@ -317,10 +469,30 @@ describe("traceSweepCsv", () => {
       xUnit: "rateHz" as const,
       yUnit: "%" as const,
     };
-    expect(dataRows(traceSweepCsv(meta({ label: "W&F" }), sweep, []))).toEqual([
+    expect(dataRows(traceSweepCsv(meta({ label: "W&F" }), sweep, [], "rateHz", "%"))).toEqual([
       "rate_hz,W&F Left (%),W&F Right (%)",
       "0.5,0.1,0.2",
       "4,0.05,0.1",
+    ]);
+  });
+
+  it("appends a phase column when the frame carries one (FR sweep frame)", () => {
+    // Unlike the multi-curve case above, this pins the single-curve path
+    // (no " Left"/" Right" suffix) together with phaseDeg — the trace-export
+    // twin of tileSweepCsv's phase test, but reading the raw frames-cache
+    // shape instead of a chartvm SweepSeriesVM.
+    const sweep = {
+      freqs: Float64Array.from([20, 20000]),
+      curves: [
+        { label: "Left", values: Float64Array.from([-0.1, -3]), phaseDeg: Float64Array.from([0, -90]) },
+      ],
+      xUnit: "Hz" as const,
+      yUnit: "dB" as const,
+    };
+    expect(dataRows(traceSweepCsv(meta({ label: "FR" }), sweep, [], "Hz", "dB"))).toEqual([
+      "frequency_hz,FR (dB),FR phase (deg)",
+      "20,-0.1,0",
+      "20000,-3,-90",
     ]);
   });
 });

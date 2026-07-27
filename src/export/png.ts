@@ -5,13 +5,14 @@
  * lines, on an opaque theme background so the file reads outside the app.
  *
  * DOM-in, bytes-out; the save/clipboard side effects live in export.ts.
+ * One PNG lane only — the clipboard path ships the SAME bytes and lets the
+ * backend decode (review finding #8: an eager RGBA lane base64'd ~25 MB of
+ * raw pixels per Retina export, and 34 MB more through IPC on copy).
  */
 
-/** Composited tile image, in both forms the two sinks want: PNG bytes for
- * a file, raw RGBA for the Rust clipboard command (no decoder Rust-side). */
+/** Composited tile image: PNG bytes + pixel dimensions. */
 export interface TileImage {
   pngBase64: string;
-  rgbaBase64: string;
   width: number;
   height: number;
 }
@@ -27,14 +28,23 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** Compose the tile's chart canvas with a title band and provenance footer.
- * Null when the tile has no rendered canvas yet (nothing to export). */
+ * Null when there is nothing meaningful to export: no canvas yet, a
+ * display:none tile (offsetParent null — e.g. NOT the focused one while ⛶
+ * focus holds the grid; its ResizeObserver clamped the canvas to a 40 px
+ * floor and the chart drew nothing — review finding #1: exporting that
+ * "successfully" hands the user a confident, empty image), or a canvas too
+ * small for the chart's own plot margins to leave any plot area. */
 export async function composeTileImage(
   tileRoot: HTMLElement,
   title: string,
   footerLines: string[]
 ): Promise<TileImage | null> {
   const src = tileRoot.querySelector<HTMLCanvasElement>(".tile__chart canvas");
-  if (!src || src.width === 0 || src.height === 0) return null;
+  if (!src || src.offsetParent === null) return null;
+  // canvas.ts margins: 54+16 px horizontal, 14+32 vertical — below ~half
+  // that nothing was drawn (drawStatic bails on a non-positive plot).
+  if (src.clientWidth <= 80 || src.clientHeight <= 56) return null;
+  if (src.width === 0 || src.height === 0) return null;
 
   const dpr = window.devicePixelRatio || 1;
   const style = getComputedStyle(tileRoot);
@@ -77,7 +87,5 @@ export async function composeTileImage(
   );
   if (!blob) return null;
   const pngBase64 = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
-  const rgba = ctx.getImageData(0, 0, out.width, out.height);
-  const rgbaBase64 = bytesToBase64(new Uint8Array(rgba.data.buffer));
-  return { pngBase64, rgbaBase64, width: out.width, height: out.height };
+  return { pngBase64, width: out.width, height: out.height };
 }

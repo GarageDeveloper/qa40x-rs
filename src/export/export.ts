@@ -13,11 +13,20 @@ import type { Store } from "../store/store";
 import { isRatioTrace, type AppState } from "../store/state";
 import type { Ipc } from "../ipc/ipc";
 import type { Domain, TraceId } from "../core/model";
-import { scopeVM, spectrumVM, sweepVM } from "../store/selectors/chartvm";
+import {
+  FD_UNIT_LABELS,
+  scopeVM,
+  spectrumVM,
+  sweepVM,
+  sweepUnitLabel,
+  sweepXUnit,
+} from "../store/selectors/chartvm";
 import { getFrames } from "../data/frames";
 import { toast } from "../store/actions/ui";
 import {
   benchProvenance,
+  clipScopeWindow,
+  numCell,
   provenanceComments,
   tileScopeCsv,
   tileSpectrumCsv,
@@ -107,12 +116,37 @@ export async function exportTileCsv(
   if (tile.kind === "spectrum") {
     const vm = spectrumVM(s, tile);
     if (vm.series.length > 0) {
-      csv = tileSpectrumCsv(vm, comments(s, [...extra, { key: "unit", value: vm.unitLabel }]));
+      const lines = [...extra, { key: "unit", value: vm.unitLabel }];
+      // A dBr file is meaningless without the subtracted reference (review
+      // finding #4): with an AUTO reference it's a runtime peak recorded
+      // nowhere else — write it in the tile's pre-dBr unit.
+      if (vm.dbrRefDb !== null) {
+        lines.push(
+          { key: "dbr_ref", value: numCell(vm.dbrRefDb) },
+          { key: "dbr_ref_unit", value: FD_UNIT_LABELS[tile.fdUnit] }
+        );
+      }
+      csv = tileSpectrumCsv(vm, comments(s, lines));
     }
   } else if (tile.kind === "scope") {
-    const vm = scopeVM(s, tile);
+    // Clip to the tile's displayed time window — the file must match the
+    // drawn extent, whether or not a trigger is aligned (review finding #3).
+    const vm = clipScopeWindow(scopeVM(s, tile), tile.timeWindowMs);
     if (vm.series.length > 0) {
-      csv = tileScopeCsv(vm, comments(s, [...extra, { key: "unit", value: vm.unitLabel }]));
+      const lines = [
+        ...extra,
+        { key: "unit", value: vm.unitLabel },
+        { key: "time_window_ms", value: tile.timeWindowMs === null ? "full" : String(tile.timeWindowMs) },
+        // t=0 is the displayed window's start, not the trigger instant.
+        { key: "time_origin", value: "window start" },
+      ];
+      if (vm.trigger) {
+        lines.push(
+          { key: "trigger_state", value: vm.trigger.state },
+          { key: "trigger_position_pct", value: String(tile.triggerPositionPct) }
+        );
+      }
+      csv = tileScopeCsv(vm, comments(s, lines));
     }
   } else {
     const vm = sweepVM(s, tile);
@@ -161,7 +195,15 @@ export async function exportTraceCsv(
   } else if (domain === "fd" && frames?.fd) {
     csv = traceFdCsv(meta, frames.fd, comments(s, extra), isRatioTrace(meta));
   } else if (domain === "sweep" && frames?.sweep) {
-    csv = traceSweepCsv(meta, frames.sweep, comments(s, extra));
+    // Units resolved with the tile's own frame-first-program-fallback rule
+    // (chartvm), never a bare frame read (review finding #6).
+    csv = traceSweepCsv(
+      meta,
+      frames.sweep,
+      comments(s, extra),
+      sweepXUnit(s, traceId, frames.sweep),
+      sweepUnitLabel(s, traceId, frames.sweep)
+    );
   }
   if (csv === null) {
     toast(store, "info", "Nothing to export yet — the trace has no such frame.");
@@ -251,11 +293,9 @@ export async function copyTilePng(
     return;
   }
   try {
-    await ipc.call("export_copy_image", {
-      width: image.width,
-      height: image.height,
-      rgbaBase64: image.rgbaBase64,
-    });
+    // Same PNG bytes as the file lane — the backend decodes (a raw-RGBA
+    // lane cost ~34 MB of IPC per Retina copy, review finding #8).
+    await ipc.call("export_copy_image", { pngBase64: image.pngBase64 });
     toast(store, "success", "Graph image copied to the clipboard.");
   } catch (e) {
     toast(store, "error", `Copy failed: ${String(e)}`);

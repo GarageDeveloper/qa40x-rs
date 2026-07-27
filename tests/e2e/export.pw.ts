@@ -65,6 +65,58 @@ test("tile ⤓ CSV: provenance header + display-unit columns", async ({ app }) =
   expect(Number.parseFloat(cells[0])).not.toBeNaN();
 });
 
+test("scope tile ⤓ CSV: time_s + volts columns", async ({ app }) => {
+  // tile-2 is the default layout's scope tile (Input L, tdUnit "v") — the
+  // spectrum test above never exercises tileScopeCsv's time-axis derivation
+  // through the real app (only csv.test.ts does, with a hand-built VM).
+  await app.setSelect("tile-export-tile-2", "csv");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [f] = await app.exportedFiles();
+
+  expect(f.path).toMatch(/^\/e2e\/qa40x-scope-\d{8}-\d{6}\.csv$/);
+  const lines = f.text.split("\n");
+  expect(lines).toContain("# graph=scope");
+  expect(lines).toContain("# unit=V");
+
+  const data = lines.filter((l) => l.length > 0 && !l.startsWith("#"));
+  expect(data[0]).toBe("time_s,Input L (V)");
+  // The file matches the DRAWN extent, not the whole capture (review
+  // finding #3): default 10 ms window @ 48 kHz → exactly 480 samples, not
+  // the 32 768-sample frame — and the window is in the provenance.
+  expect(lines).toContain("# time_window_ms=10");
+  expect(data.length).toBe(1 + 480);
+  // The time axis starts at 0 and is strictly increasing — derived from the
+  // series' own sample rate, not a stray index or the frequency axis.
+  const t0 = Number.parseFloat(data[1].split(",")[0]);
+  const t1 = Number.parseFloat(data[2].split(",")[0]);
+  expect(t0).toBe(0);
+  expect(t1).toBeGreaterThan(t0);
+});
+
+test("tile ⤓ CSV in dBr mode: header and provenance carry the dBr unit", async ({ app }) => {
+  // Same gear toggle as grid.pw.ts's "gear dBr re-references the level
+  // axis" test, but here checking the EXPORT wiring: chartvm's unitLabel
+  // becomes "dBr" and export.ts threads it into both the column header and
+  // the provenance `unit=` line, not just the on-screen axis.
+  await app.drv.click('[data-testid="tile-gear-tile-1"]');
+  await app.drv.click('[data-testid="gear-tab-axis"]');
+  await app.drv.click('[data-testid="gear-dbr"]');
+  await app.closeDialog();
+
+  await app.setSelect("tile-export-tile-1", "csv");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [f] = await app.exportedFiles();
+  const lines = f.text.split("\n");
+  expect(lines).toContain("# unit=dBr");
+  // The subtracted reference is IN the file (review finding #4): with an
+  // AUTO reference it's a runtime peak recorded nowhere else — without it a
+  // dBr export can never be re-absolutized.
+  expect(lines.some((l) => l.startsWith("# dbr_ref="))).toBe(true);
+  expect(lines).toContain("# dbr_ref_unit=dBV");
+  const data = lines.filter((l) => l.length > 0 && !l.startsWith("#"));
+  expect(data[0]).toBe("frequency_hz,Input L (dBr)");
+});
+
 test("trace ⤓ CSV: wire units + derived absolute column + source line", async ({ app }) => {
   await app.setSelect("trace-export-hw-in-left", "fd");
   await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
@@ -88,7 +140,7 @@ test("trace ⤓ CSV: wire units + derived absolute column + source line", async 
   expect(lines.filter((l) => !l.startsWith("#"))[0]).toBe("time_s,amplitude_fs,amplitude_v");
 });
 
-test("tile ⤓ PNG writes a real PNG; Copy hands a size-consistent RGBA image", async ({
+test("tile ⤓ PNG writes a real PNG; Copy ships the same PNG lane", async ({
   app,
 }) => {
   await app.setSelect("tile-export-tile-1", "png");
@@ -98,12 +150,38 @@ test("tile ⤓ PNG writes a real PNG; Copy hands a size-consistent RGBA image", 
   // atob'd binary: the PNG magic survives as latin-1 text.
   expect(f.text.startsWith("\u0089PNG")).toBe(true);
 
+  // Copy hands the backend PNG bytes (decoded Rust-side for the clipboard)
+  // — the fake validates the magic and reads the true IHDR dimensions.
   await app.setSelect("tile-export-tile-1", "copy");
   await expect.poll(async () => (await app.copiedImages()).length).toBe(1);
   const [img] = await app.copiedImages();
-  expect(img.width).toBeGreaterThan(0);
-  expect(img.height).toBeGreaterThan(0);
-  expect(img.byteLength).toBe(img.width * img.height * 4);
+  expect(img.width).toBeGreaterThan(100);
+  expect(img.height).toBeGreaterThan(100);
+  expect(img.byteLength).toBeGreaterThan(1000);
+});
+
+test("focus mode: a hidden tile's PNG/Copy refuses instead of exporting a blank", async ({
+  app,
+}) => {
+  // ⛶ focus tile-1 — the other tiles go display:none and their charts stop
+  // rendering; a drawer Copy of tile-3 must NOT hand over a confident,
+  // empty image (review finding #1), it must refuse with the info toast.
+  await app.drv.click('[data-testid="tile-focus-tile-1"]');
+  await app.drv.click('[data-testid="btn-app-menu"]');
+  await app.drv.waitUntil(
+    () => document.querySelector('[data-testid="app-export-copy-tile-3"]') !== null,
+    undefined as void
+  );
+  await app.drv.click('[data-testid="app-export-copy-tile-3"]');
+  await app.drv.waitUntil(
+    () => document.querySelector(".toast--info") !== null,
+    undefined as void
+  );
+  expect(await app.copiedImages()).toHaveLength(0);
+
+  // The focused tile itself still exports fine from the same drawer.
+  await app.drv.click('[data-testid="app-export-copy-tile-1"]');
+  await expect.poll(async () => (await app.copiedImages()).length).toBe(1);
 });
 
 test("a cancelled save dialog writes nothing", async ({ app }) => {

@@ -53,6 +53,12 @@ export interface SpectrumVM {
    * DISPLAY units like the series (empty when the tile toggle is off or the
    * source has none). The renderer draws them verbatim. */
   harmonics: HarmonicMarkVM[];
+  /** The dBr reference actually subtracted from every series (in the tile's
+   * pre-dBr unit — dBV/dBu/dBFS); null when dBr is off. Surfaced for the
+   * CSV export's provenance (issue #30 review finding #4): with an AUTO
+   * reference this is a runtime peak nothing else records, and without it a
+   * dBr file can never be re-absolutized. */
+  dbrRefDb: number | null;
 }
 
 export interface HarmonicMarkVM {
@@ -183,6 +189,12 @@ export interface SweepSeriesVM {
   /** Phase in degrees when the measurement carries it (FR sweeps). */
   phaseDeg: Float64Array | null;
   seq: number;
+  /** This curve's OWN y unit ("dB"/"%"), from its trace's frame (program
+   * fallback per `sweepUnitLabel`). The tile-level `unitLabel` is fixed by
+   * the FIRST member only — a THD-dB and a THD-% sweep can share a tile, and
+   * the CSV export must label each column truthfully (issue #30 review
+   * finding #5) instead of stamping the first trace's unit on all. */
+  yUnitLabel: string;
 }
 
 export interface SweepVM {
@@ -241,6 +253,7 @@ export function spectrumVM(s: AppState, tile: TileConfig): SpectrumVM {
     series.push({ id, label: t.label, color: t.color, x: fd.freqs, y, seq: t.seq });
   }
   let dbrRef = 0;
+  let dbrApplied = false;
   let unitLabel = FD_UNIT_LABELS[unit];
   if (tile.axis.dbrEnabled && series.length > 0) {
     let ref = tile.axis.dbrRefDb;
@@ -253,9 +266,15 @@ export function spectrumVM(s: AppState, tile: TileConfig): SpectrumVM {
       sv.y = Float64Array.from(sv.y, (v) => v - (ref as number));
     }
     dbrRef = ref;
+    dbrApplied = true;
     unitLabel = "dBr";
   }
-  return { series, unitLabel, harmonics: harmonicsVM(s, tile, dbrRef) };
+  return {
+    series,
+    unitLabel,
+    harmonics: harmonicsVM(s, tile, dbrRef),
+    dbrRefDb: dbrApplied ? dbrRef : null,
+  };
 }
 
 /** The chip-source trace's harmonic marks, shifted exactly like its series
@@ -289,7 +308,7 @@ function harmonicsVM(s: AppState, tile: TileConfig, dbrRef: number): HarmonicMar
  * the freeze-and-compare use case wow & flutter exists for. The
  * program-params lookup is only a fallback for frames predating this field.
  */
-function sweepUnitLabel(s: AppState, id: TraceId, sweep: DecodedSweep | undefined): string {
+export function sweepUnitLabel(s: AppState, id: TraceId, sweep: DecodedSweep | undefined): string {
   if (sweep?.yUnit) return sweep.yUnit;
   const p = s.programs.byId[id];
   if (p?.kind === "sweep") {
@@ -316,7 +335,7 @@ function sweepUnitLabel(s: AppState, id: TraceId, sweep: DecodedSweep | undefine
  * rate, not tone frequency), so it never silently shares "Hz"'s axis/floor
  * with an actual frequency sweep on the same tile (findings #3/#7).
  */
-function sweepXUnit(
+export function sweepXUnit(
   s: AppState,
   id: TraceId,
   sweep: DecodedSweep | undefined
@@ -361,6 +380,7 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
       continue;
     }
     const hiddenCurves = tile.hiddenCurves[id] ?? [];
+    const traceYUnit = sweepUnitLabel(s, id, sweep);
     sweep.curves.forEach((c, i) => {
       if (hiddenCurves.includes(c.label)) return; // per-curve legend hide
       series.push({
@@ -373,6 +393,7 @@ export function sweepVM(s: AppState, tile: TileConfig): SweepVM {
         y: c.values,
         phaseDeg: c.phaseDeg,
         seq: t.seq,
+        yUnitLabel: traceYUnit,
       });
     });
   }

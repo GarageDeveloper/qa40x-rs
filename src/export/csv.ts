@@ -64,7 +64,12 @@ export interface ProvenanceLine {
 }
 
 export function provenanceComments(lines: ProvenanceLine[]): string[] {
-  return ["# qa40x-rs data export", ...lines.map((l) => `# ${l.key}=${l.value}`)];
+  // Values can carry user text (trace labels in `trace_source`) — a newline
+  // there would truncate the comment and promote the rest to a data row.
+  return [
+    "# qa40x-rs data export",
+    ...lines.map((l) => `# ${l.key}=${l.value.replace(/[\r\n]+/g, " ")}`),
+  ];
 }
 
 /**
@@ -205,6 +210,29 @@ function timeAxis(count: number, sampleRate: number): Float64Array {
   return t;
 }
 
+/**
+ * Clip a scope VM to the tile's displayed time window — the EXACT rule the
+ * renderer applies (canvas.ts `displayCount`: `max(2, min(n, round(win_ms
+ * / 1000 · rate)))`, samples taken from the window start), but per series
+ * with its OWN sample rate. Without this, the CSV of a 10 ms window spans
+ * the whole 32k capture — 68× more than the drawn curve — and flips extent
+ * when a trigger toggles (issue #30 review finding #3: scopeVM only slices
+ * on the trigger-aligned path; the free-run path returns the full frame).
+ */
+export function clipScopeWindow(vm: ScopeVM, timeWindowMs: number | null): ScopeVM {
+  if (timeWindowMs === null) return vm;
+  return {
+    ...vm,
+    series: vm.series.map((sv) => {
+      const count = Math.max(
+        2,
+        Math.min(sv.samples.length, Math.round((timeWindowMs / 1000) * sv.sampleRate))
+      );
+      return count >= sv.samples.length ? sv : { ...sv, samples: sv.samples.subarray(0, count) };
+    }),
+  };
+}
+
 export function tileScopeCsv(vm: ScopeVM, comments: string[]): string {
   const columns: CsvColumn[] = [];
   const shared =
@@ -242,16 +270,20 @@ export function sweepXHeader(xUnit: "Hz" | "dBFS" | "rateHz"): string {
 export function tileSweepCsv(vm: SweepVM, comments: string[]): string {
   const columns: CsvColumn[] = [];
   const xHeader = sweepXHeader(vm.xUnit);
+  // Each column carries its OWN trace's y unit (review finding #5): the
+  // tile-level unitLabel is fixed by the first member only, and a THD-dB
+  // and a THD-% sweep can legitimately share one tile.
+  const unitOf = (sv: SweepVM["series"][number]): string => sv.yUnitLabel ?? vm.unitLabel;
   if (sharedX(vm.series.map((sv) => sv.x))) {
     if (vm.series.length > 0) columns.push({ header: xHeader, values: vm.series[0].x });
     for (const sv of vm.series) {
-      columns.push({ header: `${sv.label} (${vm.unitLabel})`, values: sv.y });
+      columns.push({ header: `${sv.label} (${unitOf(sv)})`, values: sv.y });
       if (sv.phaseDeg) columns.push({ header: `${sv.label} phase (deg)`, values: sv.phaseDeg });
     }
   } else {
     for (const sv of vm.series) {
       columns.push({ header: `${xHeader} (${sv.label})`, values: sv.x });
-      columns.push({ header: `${sv.label} (${vm.unitLabel})`, values: sv.y });
+      columns.push({ header: `${sv.label} (${unitOf(sv)})`, values: sv.y });
       if (sv.phaseDeg) columns.push({ header: `${sv.label} phase (deg)`, values: sv.phaseDeg });
     }
   }
@@ -311,12 +343,15 @@ export function traceFdCsv(
 export function traceSweepCsv(
   meta: TraceMeta,
   sweep: DecodedSweep,
-  comments: string[]
+  comments: string[],
+  // Resolved by the CALLER through chartvm's sweepXUnit/sweepUnitLabel so
+  // the export applies the SAME frame-first-then-program-fallback rule as
+  // the tile (issue #30 review finding #6 — a bare `sweep.xUnit ?? "Hz"`
+  // here silently mislabeled pre-field frames whose program still knows the
+  // axis, e.g. an old saved THD-vs-level doc landing on "frequency_hz").
+  xUnit: "Hz" | "dBFS" | "rateHz",
+  yUnit: string
 ): string {
-  // Same frame-carried unit rules as the sweep tile (issues #27/#28): the
-  // x unit rides the frame; missing on pre-field frames → "Hz".
-  const xUnit = sweep.xUnit ?? "Hz";
-  const yUnit = sweep.yUnit ?? "dB";
   const columns: CsvColumn[] = [{ header: sweepXHeader(xUnit), values: sweep.freqs }];
   for (const c of sweep.curves) {
     const label = sweep.curves.length > 1 ? `${meta.label} ${c.label}` : meta.label;

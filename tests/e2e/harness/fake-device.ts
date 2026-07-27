@@ -426,13 +426,26 @@ export class FakeDevice {
           contentsBase64: a.contentsBase64 as string,
         });
         return null;
-      case "export_copy_image":
+      case "export_copy_image": {
+        // The app ships PNG bytes (the backend decodes for the clipboard) —
+        // the fake verifies the magic and reads the true dimensions from
+        // the IHDR chunk (bytes 16..24), so specs assert a REAL image.
+        const png = atob(a.pngBase64 as string);
+        if (png.slice(1, 4) !== "PNG") {
+          throw new Error("export_copy_image: payload is not a PNG");
+        }
+        const be32 = (o: number): number =>
+          ((png.charCodeAt(o) << 24) |
+            (png.charCodeAt(o + 1) << 16) |
+            (png.charCodeAt(o + 2) << 8) |
+            png.charCodeAt(o + 3)) >>> 0;
         this.copiedImages.push({
-          width: a.width as number,
-          height: a.height as number,
-          byteLength: atob(a.rgbaBase64 as string).length,
+          width: be32(16),
+          height: be32(20),
+          byteLength: png.length,
         });
         return null;
+      }
 
       /* -- the mixer (Traces V2 Phase F wire) -- */
       case "mixer_set_slots": {

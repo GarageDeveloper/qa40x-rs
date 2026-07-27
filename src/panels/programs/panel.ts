@@ -230,13 +230,21 @@ export function mountProgramsPanel(
       },
       "✕"
     );
-    // CSV export of the landed result curve (issue #30) — the program's
-    // trace shares its id, so the trace-export path serves it directly.
+    // CSV export of the landed result (issue #30) — the program's trace
+    // shares its id, so the trace-export path serves it directly. The
+    // domain is the trace's OWN, not a hardcoded "sweep": a plot SCRIPT
+    // program can land fd or td frames instead (review finding #2), and
+    // this button is their only export entry point (program traces are
+    // excluded from the Traces panel).
     const exportBtn = el(
       "button.btn.btn--small",
       {
         "data-testid": `prog-export-${id}`,
-        onclick: () => void exportTraceCsv(store, ipc, id, "sweep"),
+        onclick: () => {
+          const domains = store.get().traces.byId[id]?.domains ?? [];
+          const domain = (["sweep", "fd", "td"] as const).find((d) => domains.includes(d));
+          if (domain) void exportTraceCsv(store, ipc, id, domain);
+        },
       },
       "⤓"
     );

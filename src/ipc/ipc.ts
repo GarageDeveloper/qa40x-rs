@@ -188,10 +188,7 @@ export interface Commands {
   // Data export (issue #30): the frontend builds the bytes (CSV text, PNG,
   // raw RGBA) — these only put them on disk / the system clipboard.
   export_write_file: { args: { path: string; contentsBase64: string }; result: null };
-  export_copy_image: {
-    args: { width: number; height: number; rgbaBase64: string };
-    result: null;
-  };
+  export_copy_image: { args: { pngBase64: string }; result: null };
 
   // Firmware panel (M5): extract + verify official firmware images, build
   // the dry-run byte plan, and (gated, confirmed) flash the connected unit.
