@@ -94,6 +94,11 @@ impl DeviceRegistry {
                     for d in descs {
                         if seen.insert(d.id.clone()) {
                             all.push(d);
+                        } else {
+                            // Never silent: a dropped duplicate is a unit the
+                            // user cannot select (two sources claiming the
+                            // same id, or a key-collision bug upstream).
+                            warn!("device id {} enumerated more than once — keeping the first", d.id);
                         }
                     }
                 }
@@ -113,6 +118,13 @@ impl DeviceRegistry {
             .iter()
             .find(|s| s.id().as_str() == id.source())
             .ok_or(DeviceError::NotFound)?;
+        // The previous unit is gone the moment the source starts releasing
+        // the handle — clear the bookkeeping BEFORE delegating, so a failed
+        // open (unit unplugged mid-open, claim raced by another app) never
+        // leaves `current` reporting a device that was already torn down.
+        // An unknown SOURCE errored out above without touching the device,
+        // so whatever was open before is honestly still open.
+        self.note_closed();
         let desc = source.open(id, &self.inner.handle).await?;
         *self.inner.current.lock().expect("current lock") =
             Some(OpenDevice { id: id.clone(), descriptor: desc.clone() });
@@ -122,8 +134,12 @@ impl DeviceRegistry {
     /// Open the first physical unit any source offers — the `connect_device`
     /// behavior (auto-connect to "the" QA40x). When nothing physical is on
     /// the bus, the handle's prior claim is still released, exactly like the
-    /// legacy `connect()` which released before scanning.
+    /// legacy `connect()` which released before scanning. A bus-scan FAILURE
+    /// is not "not found": the first scan error is returned so the user sees
+    /// the actual diagnostic (permission-denied backend, broken hub), as the
+    /// legacy `connect()` surfaced it.
     pub async fn open_first_physical(&self) -> Result<DeviceDescriptor, DeviceError> {
+        let mut scan_err: Option<DeviceError> = None;
         for source in &self.inner.sources {
             if !source.is_physical() {
                 continue;
@@ -134,12 +150,15 @@ impl DeviceRegistry {
                         return self.open(&d.id).await;
                     }
                 }
-                Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
+                Err(e) => {
+                    warn!("device source {} failed to enumerate: {}", source.id(), e);
+                    scan_err.get_or_insert(e);
+                }
             }
         }
         self.inner.handle.lock().await.release_claim().await;
         self.note_closed();
-        Err(DeviceError::NotFound)
+        Err(scan_err.unwrap_or(DeviceError::NotFound))
     }
 
     /// Open the first built-in virtual unit — the `connect_virtual_device`
@@ -254,6 +273,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_open_after_a_successful_one_does_not_keep_lying_about_the_old_device() {
+        // Review finding (#25 lot B): the USB source releases the prior claim
+        // BEFORE it can fail (unit unplugged mid-open, claim raced), so once
+        // the source was engaged, the previously open unit is gone —
+        // `current` must not keep reporting it.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open A");
+        assert_eq!(reg.current().expect("current").id, a);
+
+        // Unknown SOURCE: rejected before any source touches the device —
+        // the prior unit is honestly still open.
+        let missing_source = reg.open(&DeviceId::new(&crate::device::SourceId::new("nope"), "A")).await;
+        assert!(matches!(missing_source, Err(DeviceError::NotFound)));
+        assert_eq!(reg.current().expect("survives an unrouted open").id, a);
+
+        // Known source, unknown UNIT: the source was engaged (a real USB
+        // source has already released the claim by the time it notices), so
+        // the bookkeeping must be cleared, not left pointing at A.
+        let missing_unit = reg.open(&DeviceId::new(&crate::device::SourceId::new("usb"), "Z")).await;
+        assert!(matches!(missing_unit, Err(DeviceError::NotFound)));
+        assert!(reg.current().is_none(), "a failed open must clear the stale bookkeeping");
+    }
+
+    #[tokio::test]
+    async fn a_total_scan_failure_surfaces_the_scan_error_not_not_found() {
+        // Review finding (#25 lot B): a user whose USB backend is broken
+        // (permissions, dead hub) must see the OS diagnostic, not be told
+        // there is no device — the legacy connect() surfaced the scan error.
+        let reg = registry(vec![
+            Arc::new(FakeSource::failing("usb1", true)),
+            Arc::new(FakeSource::new("usb2", true, &[])),
+            Arc::new(FakeSource::new("virtual", false, &["V"])),
+        ]);
+        let err = reg.open_first_physical().await.expect_err("no unit to open");
+        assert_eq!(err.to_string(), "fake enumeration failure", "the first scan error must survive");
+    }
+
+    #[tokio::test]
     async fn a_second_open_supersedes_the_first() {
         let reg = registry(vec![
             Arc::new(FakeSource::new("usb", true, &["A", "B"])),
@@ -288,6 +346,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_first_physical_falls_through_an_empty_source_to_the_next_physical_one() {
+        // Two physical sources: the first enumerates OK but offers nothing.
+        // The scan must not stop there — an empty physical source is not the
+        // same as "no physical units anywhere".
+        let reg = registry(vec![
+            Arc::new(FakeSource::new("usb1", true, &[])),
+            Arc::new(FakeSource::new("usb2", true, &["A"])),
+        ]);
+        let d = reg.open_first_physical().await.expect("open from the second source");
+        assert_eq!(d.id.as_str(), "usb2/A");
+    }
+
+    #[tokio::test]
+    async fn open_first_physical_skips_a_failing_physical_source_and_tries_the_next() {
+        // A source erroring on enumerate (bus scan failure) must be logged
+        // and skipped, exactly like `enumerate()`'s union — but this is the
+        // open_first_physical loop's OWN skip-on-error path, not that one.
+        let reg = registry(vec![
+            Arc::new(FakeSource::failing("usb1", true)),
+            Arc::new(FakeSource::new("usb2", true, &["A"])),
+        ]);
+        let d = reg.open_first_physical().await.expect("open from the healthy source");
+        assert_eq!(d.id.as_str(), "usb2/A");
+    }
+
+    #[tokio::test]
     async fn open_virtual_picks_the_first_virtual_unit() {
         let reg = registry(vec![
             Arc::new(FakeSource::new("usb", true, &["A"])),
@@ -295,6 +379,25 @@ mod tests {
         ]);
         let d = reg.open_virtual().await.expect("open");
         assert_eq!(d.id.as_str(), "virtual/V1");
+    }
+
+    #[tokio::test]
+    async fn open_virtual_with_no_virtual_source_is_not_found_and_leaves_bookkeeping_untouched() {
+        // No virtual source at all. Unlike `open_first_physical` (which
+        // explicitly releases the handle's claim and clears bookkeeping on a
+        // failed scan — the legacy `connect()` behavior), `open_virtual` has
+        // no such teardown: a failed demo hand-over must not detach whatever
+        // physical unit is already open.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open the physical unit first");
+        assert!(reg.current().is_some());
+
+        assert!(matches!(reg.open_virtual().await, Err(DeviceError::NotFound)));
+        assert_eq!(
+            reg.current().expect("the prior open must survive a failed open_virtual").id,
+            a
+        );
     }
 
     #[tokio::test]
@@ -307,6 +410,18 @@ mod tests {
             Arc::new(FakeSource::new("usb", true, &["A"])),
         ]);
         assert!(with_hw.physical_present().await);
+    }
+
+    #[tokio::test]
+    async fn close_without_ever_opening_is_ok_and_bookkeeping_stays_clear() {
+        // `disconnect_device` can be invoked when nothing is open (e.g. a
+        // stale frontend action, or teardown running twice); the underlying
+        // `QA40xDevice::disconnect()` is documented best-effort and must not
+        // error just because there was nothing to tear down.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        assert!(reg.current().is_none());
+        reg.close().await.expect("closing an already-closed registry must not error");
+        assert!(reg.current().is_none());
     }
 
     #[tokio::test]

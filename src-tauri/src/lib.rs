@@ -317,9 +317,12 @@ async fn disconnect_device(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Res
 
 #[tauri::command]
 async fn is_device_connected(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<bool, String> {
-    let app_state = state.lock().await;
-    let device = app_state.device.lock().await;
-    Ok(device.is_connected().await)
+    // Scoped guard: never hold the AppState lock while awaiting the device
+    // mutex — a long capture would otherwise park this command holding
+    // AppState, stalling every sibling command behind it.
+    let device = state.lock().await.device.clone();
+    let connected = device.lock().await.is_connected().await;
+    Ok(connected)
 }
 
 /// Device identity (firmware version + serial + product), read at connect.
@@ -328,9 +331,10 @@ async fn is_device_connected(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> R
 async fn get_device_info(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Option<qa40x::DeviceMeta>, String> {
-    let app_state = state.lock().await;
-    let device = app_state.device.lock().await;
-    Ok(device.device_meta().await)
+    // Scoped guard — same rule as is_device_connected.
+    let device = state.lock().await.device.clone();
+    let meta = device.lock().await.device_meta().await;
+    Ok(meta)
 }
 
 /// Whether a QA40x (QA402 or QA403) is present on the USB bus (for auto-connect),

@@ -195,6 +195,29 @@ mod tests {
         assert_eq!(format!("{:04X}_{:04X}", v >> 16, v & 0xFFFF), b.serial);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_already_attached_error_formats_exactly_as_the_command_reports_it() {
+        // End-to-end pin of the user-facing string `connect_virtual_device`
+        // produces when the simulator is already imported elsewhere —
+        // preserved verbatim from the pre-registry path (#25 lot B review).
+        use crate::qa40x::QA40xDevice;
+
+        let sim = Simulator::new(demo_sim_options());
+        assert!(sim.try_import(), "first import wins");
+
+        let device = QA40xDevice::new();
+        let err = device
+            .connect_virtual_sim(sim.clone(), Model::Qa403)
+            .await
+            .expect_err("second attach must be refused");
+        let seam_err = DeviceError::from(err);
+        assert_eq!(
+            format!("Failed to connect to the virtual device: {}", seam_err),
+            "Failed to connect to the virtual device: Device error: Virtual device is already attached"
+        );
+        sim.release_import();
+    }
+
     #[tokio::test]
     async fn enumeration_does_not_instantiate_the_simulator() {
         let src = VirtualDeviceSource::builtin();

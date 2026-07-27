@@ -337,6 +337,14 @@ impl QA40xDevice {
     /// make-my-own-sim behavior on top of the same path. The sim is stored in
     /// `virtual_sim` so disconnect/reconnect release-and-reattach semantics
     /// are identical whichever door it came in through.
+    ///
+    /// OWNERSHIP: the slot always holds the LAST attached simulator — the
+    /// device is a borrower, not the owner. A process mixing both doors
+    /// (source-owned sim, then bare `connect_virtual()`) continues on
+    /// whichever sim was attached last; "state persists like a unit left
+    /// plugged in" is per simulator instance, not per device object. No app
+    /// runtime path mixes the two today (registry only); tests/examples that
+    /// call `connect_virtual()` directly never touch the registry's source.
     pub(crate) async fn connect_virtual_sim(&self, sim: Simulator, model: Model) -> Result<()> {
         // Release any prior claim (real or virtual), same as connect().
         {

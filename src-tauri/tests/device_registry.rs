@@ -6,8 +6,10 @@
 
 use tauri_app_lib::device::{Analyzer, CalibrationSource, DeviceRegistry, SourceKind};
 
-/// One registry-owned simulator at a time in this binary: the exclusive
-/// attach guard is per Simulator, but serializing keeps failures readable.
+/// Each test builds its own registry, hence its own Simulator (the exclusive
+/// attach guard is per instance, so tests could not collide on it). The lock
+/// only serializes the realtime-paced simulators so timing-sensitive
+/// assertions don't share CPU, and failures stay readable.
 static SIM_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The pinned demo serial (see `qa40x::transport::DEMO_SERIAL`).
@@ -99,6 +101,40 @@ async fn open_close_reopen_the_virtual_unit_by_id() {
     assert_eq!(again.identity.serial, DEMO_SERIAL);
     assert!(handle.lock().await.is_connected().await);
     reg.close().await.expect("second close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_analyzer_trait_method_runs_on_a_live_device_without_recursing() {
+    // The trait impl delegates to the INHERENT methods purely by method-
+    // resolution precedence (same names). If an inherent method were renamed,
+    // the identical call would bind to the trait method itself — infinite
+    // recursion at runtime, not a compile error. Driving the FULL trait
+    // surface on a live device pins every delegation.
+    use tauri_app_lib::qa40x::{InputGain, OutputGain, SampleRate};
+
+    let _sim = SIM_LOCK.lock().await;
+    let reg = DeviceRegistry::new();
+    reg.open_virtual().await.expect("open virtual");
+    let handle = reg.handle();
+    let dev = handle.lock().await;
+    let analyzer: &dyn Analyzer = &*dev;
+
+    assert!(analyzer.is_connected().await);
+    assert!(analyzer.identity().await.is_some());
+    assert!(analyzer.capabilities().await.is_some());
+    analyzer.set_input_range(InputGain::Gain18dBV).await.expect("set input range");
+    analyzer.set_output_range(OutputGain::Gain8dBV).await.expect("set output range");
+    analyzer.set_sample_rate(SampleRate::Rate96kHz).await.expect("set sample rate");
+    let cfg = analyzer.config().await;
+    assert_eq!(cfg.input_gain, InputGain::Gain18dBV);
+    assert_eq!(cfg.output_gain, OutputGain::Gain8dBV);
+    assert_eq!(cfg.sample_rate, SampleRate::Rate96kHz);
+    // No keepalive ran in this session — the cache read must be None, not I/O.
+    assert!(analyzer.last_telemetry().await.is_none());
+    analyzer.disconnect().await.expect("disconnect via the trait");
+    assert!(!analyzer.is_connected().await);
+    drop(dev);
+    reg.note_closed();
 }
 
 #[tokio::test(flavor = "multi_thread")]
