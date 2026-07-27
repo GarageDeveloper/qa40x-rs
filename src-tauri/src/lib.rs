@@ -117,25 +117,16 @@ async fn safe_shutdown(state: Arc<Mutex<AppState>>) {
         return;
     }
     log::info!("exit: safe-teardown entered");
-    let rt = { state.lock().await.devices.default_runtime() };
-    let device = rt.handle();
-    // A batched sweep holds the device for its WHOLE run (one long stream
-    // transaction); trip its cooperative cancel first or the device.lock
-    // below waits the sweep out — minutes, felt as a hang on quit.
-    rt.cancel_sweep();
-    rt.stream().stop_and_wait().await;
-    rt.generator().ensure_stopped().await;
-    log::info!("exit: loops stopped");
-    log::info!("exit: acquiring device lock");
-    let d = device.lock().await;
-    log::info!("exit: device lock acquired; checking connection");
-    if d.is_connected().await {
-        match d.disconnect().await {
-            Ok(_) => log::info!("exit: device left safe (42 dBV, stream stopped)"),
-            Err(e) => log::warn!("exit: safe teardown failed: {e}"),
+    let registry = { state.lock().await.devices.clone() };
+    // Per-device budget, equal to the callers' outer 20 s timeout so
+    // single-device behavior is unchanged. Lot E turns this loop into a
+    // join_all under the same outer budget. The sweep-cancel / stream /
+    // generator ordering lives in DeviceRuntime::shutdown.
+    const DEVICE_SHUTDOWN_BUDGET: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    for rt in registry.runtimes() {
+        if tokio::time::timeout(DEVICE_SHUTDOWN_BUDGET, rt.shutdown()).await.is_err() {
+            log::warn!("exit: a device's safe teardown exceeded its 20 s budget");
         }
-    } else {
-        log::info!("exit: no device connected, nothing to do");
     }
 }
 
@@ -235,10 +226,11 @@ async fn disconnect_device(
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
     // The stream loop (or the gap-free generator) owns captures; closing the
     // device underneath it would only manufacture a capture error. Hand the
-    // device back first — stop_and_wait returns once the loop fully exited,
-    // so its channel gets a clean Stopped, never an Error.
-    rt.stream().stop_and_wait().await;
-    rt.generator().ensure_stopped().await;
+    // device back first — quiesce returns once the loops fully exited, so
+    // the stream channel gets a clean Stopped, never an Error. (quiesce also
+    // trips the sweep cancel — the PR #35 follow-up: disconnect during a
+    // batched sweep no longer waits the sweep out.)
+    rt.quiesce().await;
 
     devices.close().await
         .map(|_| "Disconnected successfully".to_string())

@@ -332,6 +332,54 @@ impl DeviceRuntime {
         *self.inner.teardown_fault.lock().expect("fault lock") = Some(err);
     }
 
+    /* ---- quiesce / shutdown -------------------------------------------- */
+
+    /// Hand the device back: nothing must be driving it after this returns.
+    /// ORDER IS LOAD-BEARING (quit-hang post-mortem): a batched sweep holds
+    /// the device for its WHOLE run (one long stream transaction), so its
+    /// cooperative cancel is tripped BEFORE anything tries to take the
+    /// device lock — otherwise the callers below wait the sweep out
+    /// (minutes, felt as a hang). Then the stream loop, then the continuous
+    /// generator, each waited out so the device mutex is genuinely free.
+    pub async fn quiesce(&self) {
+        self.cancel_sweep();
+        self.stream().stop_and_wait().await;
+        self.generator().ensure_stopped().await;
+    }
+
+    /// [`Self::quiesce`] + the device-side safe state (42 dBV max-headroom
+    /// input range, STREAM_STOP, teardown) — the per-device half of the exit
+    /// path. Best-effort: failures are logged, never propagated (the process
+    /// is leaving).
+    pub async fn shutdown(&self) {
+        self.quiesce().await;
+        log::info!("exit: loops stopped");
+        // Lock order: lifecycle gate → device mutex. Short timeout and
+        // proceed regardless — the safe state must never be hostage to a
+        // wedged open (the outer per-device budget still bounds the whole).
+        let _gate = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            self.inner.lifecycle_gate.lock(),
+        )
+        .await
+        .map_err(|_| log::warn!("exit: lifecycle gate busy after 2 s — tearing down anyway"))
+        .ok();
+        log::info!("exit: acquiring device lock");
+        let handle = self.handle();
+        let d = handle.lock().await;
+        log::info!("exit: device lock acquired; checking connection");
+        if d.is_connected().await {
+            match d.disconnect().await {
+                Ok(_) => log::info!("exit: device left safe (42 dBV, stream stopped)"),
+                Err(e) => log::warn!("exit: safe teardown failed: {e}"),
+            }
+        } else {
+            log::info!("exit: no device connected, nothing to do");
+        }
+        drop(d);
+        self.note_closed();
+    }
+
     /* ---- liveness monitor ---------------------------------------------- */
 
     /// Claim the liveness-monitor slot for `gen`. `false` when a monitor is
