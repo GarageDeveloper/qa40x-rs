@@ -6,8 +6,38 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { DeviceList } from "../../gen";
 import type { Store } from "../store";
-import type { AppState, DevicesState } from "../state";
+import type { AppState, DevicesState, SessionKey } from "../state";
 import { slotOfSessionKey } from "../state";
+import { syncAllStreams } from "./stream";
+
+/**
+ * Make `key` the FOCUSED session — the Run/Space target, the single-device
+ * chrome's subject and the bench-source owner (Raphaël decisions 1–2).
+ * E4's focus selector / group headers call this; dormant in E3 (nothing
+ * changes the boot focus while only slot 0 exists).
+ *
+ * The focus is a WIRE-VISIBLE input: `buildStreamConfig` emits the DAC
+ * slot program for the focused session only, so every running stream must
+ * re-sync IN THIS GESTURE (E3 review #1) — without it, the old focus keeps
+ * generating until some unrelated bench edit fires a sync and the stimulus
+ * silently migrates mid-capture, garbling whatever reading straddles it.
+ * `primary` is re-derived for the same reason it is at every refresh: the
+ * chrome must describe the unit the transport now acts on (P1a).
+ */
+export function setFocusedSession(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key: SessionKey
+): void {
+  const s = store.get();
+  if (s.devices.focus === key || !s.devices.sessions[key]) return;
+  store.update("devices/focus", (st) => {
+    if (!st.devices.sessions[key]) return st;
+    const devices = { ...st.devices, focus: key };
+    return { ...st, devices: { ...devices, primary: derivePrimary(devices) } };
+  });
+  syncAllStreams(store, ipc);
+}
 
 /**
  * The primary derivation (the unit the single-device UI describes):

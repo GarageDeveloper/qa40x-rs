@@ -26,7 +26,7 @@ import { initialSession, initialState, SLOT0 } from "../state";
 import type { DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { fakeEntry, fakeList as list } from "./devices.fixtures";
-import { deriveDevices, pickDevice, refreshDevices, setDeviceAlias } from "./devices";
+import { deriveDevices, pickDevice, refreshDevices, setDeviceAlias, setFocusedSession } from "./devices";
 import { autoConnectTick, connect, deviceLost, setInputRange } from "./device";
 import { startRun } from "./stream";
 
@@ -514,5 +514,55 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
     }));
     deviceLost(store, "usb/A");
     expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
+  });
+});
+
+describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE-VISIBLE input", () => {
+  /** slot-0 plus an adopted, connected slot-1 session (streaming per arg). */
+  function twoSessions(streaming: { slot0: boolean; slot1: boolean }): AppState {
+    const s = initialState();
+    const base = initialSession(1);
+    return {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: streaming.slot0 },
+          },
+          "slot-1": {
+            ...base,
+            deviceId: "usb/B",
+            device: { ...base.device, status: "connected" as const },
+            run: { ...base.run, streaming: streaming.slot1 },
+          },
+        },
+      },
+    };
+  }
+
+  it("moves the focus and re-syncs EVERY running stream in the same gesture — the DAC slot program follows the focus, so waiting for an unrelated bench edit would migrate the stimulus mid-capture", () => {
+    const store = new Store(twoSessions({ slot0: true, slot1: true }), { freeze: true });
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    expect(store.get().devices.focus).toBe("slot-1");
+    const updates = calls.filter(([m]) => m === "stream_update");
+    expect(updates).toHaveLength(2); // both sessions stream → both re-synced
+    // The routed update carries slot-1's adopted id; slot 0 stays arg-less.
+    expect(updates.map(([, a]) => (a as { deviceId?: string }).deviceId).sort()).toEqual(
+      [undefined, "usb/B"].sort()
+    );
+  });
+
+  it("no-ops (store AND wire) for an unknown session key or the already-focused key", () => {
+    const store = new Store(twoSessions({ slot0: true, slot1: false }), { freeze: true });
+    const { ipc, calls } = recordingIpc(list());
+    const before = store.get();
+    setFocusedSession(store, ipc, "slot-7"); // no such session
+    setFocusedSession(store, ipc, SLOT0); // already focused
+    expect(store.get()).toBe(before);
+    expect(calls).toHaveLength(0);
   });
 });

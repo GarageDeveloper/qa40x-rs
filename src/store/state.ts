@@ -715,8 +715,10 @@ export interface AppState {
   layout: LayoutState;
   workspace: WorkspaceState;
   ui: UiState;
-  /** Per-endpoint trigger settings, keyed by `HW_TRACE_IDS.*` (plan §3.2).
-   * Read-through default: an absent entry means `DEFAULT_TRIGGER` ("off"). */
+  /** Per-endpoint trigger settings, keyed by the endpoint's slot-scoped
+   * trace id (plan §3.2; `hw-in-left` & co for slot 0, `hw-in-left@1` &
+   * co beyond — lot E3). Read-through default: an absent entry means
+   * `DEFAULT_TRIGGER` ("off"). */
   triggers: Record<TraceId, TriggerSettings>;
   /** The bench's loaded user weighting curve (issue #29), workspace-persisted. */
   weighting: WeightingState;

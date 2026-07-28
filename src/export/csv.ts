@@ -258,7 +258,10 @@ export function traceSourceLine(s: AppState, meta: TraceMeta): string {
   const src = meta.source;
   // Slot ≥ 1 endpoints name their device (lot E3) — two "Input L" rows in
   // one export must be tellable apart; slot 0 keeps its historic string
-  // verbatim. The capture_* header lines carry the model/serial.
+  // verbatim. The capture_* header lines carry the model/serial whenever
+  // the trace has a capture snapshot (always, once a frame landed —
+  // ingestFrame stamps every endpoint; the bench header itself still
+  // describes the FOCUSED device).
   const slot = hwSlotOfTraceId(meta.id) ?? 0;
   const dev = slot === 0 ? "" : ` (device #${slot + 1})`;
   switch (src.kind) {

@@ -70,24 +70,31 @@ export function focusedDeviceId(s: AppState): string | null {
  * The session that OWNS a trace (lot E3): a hw endpoint id carries its
  * slot (`hw-in-left` → slot 0, `hw-in-left@1` → slot 1); any other id
  * (memory / transform / program / unknown) resolves to the FOCUSED session
- * — those traces are bench artifacts, not device endpoints. Reads through
- * `runForTrace`/`deviceForTrace` fall back to the focused session when the
- * owning slot has no live session (a dormant doc-loaded trace): legible,
- * never a TypeError.
+ * — those traces are bench artifacts, not device endpoints.
  */
 export function sessionKeyForTrace(s: AppState, id: TraceId): SessionKey {
   const slot = hwSlotOfTraceId(id);
   return slot === null ? s.devices.focus : sessionKeyForSlot(slot);
 }
 
-/** The run state of the session owning `id` (see sessionKeyForTrace). */
+/** The run state of the session owning `id` (see sessionKeyForTrace).
+ * Falls back to the FOCUSED run when the owning slot has no live session
+ * (a dormant doc-loaded trace): transport/chip chrome reads stay legible,
+ * never a TypeError — and a dormant endpoint has no entry in any run's
+ * `triggers`, so the fallback can't show another device's state for it. */
 export function runForTrace(s: AppState, id: TraceId): RunState {
   return session(s, sessionKeyForTrace(s, id))?.run ?? focusedRun(s);
 }
 
-/** The device state of the session owning `id`. */
-export function deviceForTrace(s: AppState, id: TraceId): DeviceState {
-  return session(s, sessionKeyForTrace(s, id))?.device ?? focusedDevice(s);
+/** The device state of the session owning `id`, or NULL when the owning
+ * slot has no live session. Deliberately not a focused-device fallback
+ * (E3 review #4): a DeviceState carries calibration — sample rate, ranges,
+ * offsets — and silently substituting another converter's numbers is the
+ * exact bug class the four-offsets model closed. Callers own the "unknown
+ * device" presentation. (Dormant in E3 — E4's readout/export paths are the
+ * intended consumers.) */
+export function deviceForTrace(s: AppState, id: TraceId): DeviceState | null {
+  return session(s, sessionKeyForTrace(s, id))?.device ?? null;
 }
 
 /** Immutable write to one session. Returns `s` UNCHANGED (same reference)

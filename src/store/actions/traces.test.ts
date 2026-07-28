@@ -145,6 +145,18 @@ describe("reconcileHwTraces — the hw pool vs LIVE sessions (issue #25 lot E3, 
     expect(t.source).toEqual({ kind: "hw_input", channel: "left" });
   });
 
+  it("re-appends an endpoint present in byId but MISSING from order — an order/byId desync must not leave it unreachable (E3 review #2)", () => {
+    const s = initialState();
+    // A hand-edited/corrupt doc dropped the row but kept the meta.
+    const kept = s.traces.byId[HW_TRACE_IDS.inputL];
+    s.traces.order = s.traces.order.filter((id) => id !== HW_TRACE_IDS.inputL);
+    const next = reconcileHwTraces(s);
+    expect(next).not.toBe(s);
+    expect(next.traces.order).toContain(HW_TRACE_IDS.inputL);
+    // The existing meta is KEPT (user label/color), only the row returns.
+    expect(next.traces.byId[HW_TRACE_IDS.inputL]).toBe(kept);
+  });
+
   it("never deletes a doc-provided @1 trace when no slot-1 session exists (dormant, revives when the device comes back)", () => {
     const s = initialState();
     const dormant = { ...hwTraceMetas(1)[0], label: "Renamed while dormant" };

@@ -248,7 +248,10 @@ export function mountGridPanel(
         // selector (issue #26 review #6). EVERY session's run (lot E3):
         // tiles resolve their trigger reads to the endpoint's OWNING
         // session (runForTrace), so a non-focused device's latch must
-        // re-fire the feed too.
+        // re-fire the feed too. The focus itself is in the key (E3 review
+        // #1 sibling): non-hw chip sources resolve through the focused
+        // session, so a bare focus change must re-feed as well.
+        s.devices.focus,
         s.triggers,
         Object.values(s.devices.sessions).map((x) => [
           x.run.triggers,

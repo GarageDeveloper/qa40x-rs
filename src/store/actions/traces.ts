@@ -68,11 +68,17 @@ export function reconcileHwTraces(s: AppState): AppState {
   }
 
   // Slot-then-endpoint append order: stable for the traces panel and pinned.
+  // Presence means BOTH halves (E3 review #2): a doc whose `order` omits an
+  // id its `byId` still holds would otherwise leave that endpoint without a
+  // panel row or + picker entry forever, while ingest keeps stamping it.
+  const inOrder = new Set(s.traces.order);
   for (const key of sessionKeys(s)) {
     for (const meta of hwTraceMetas(slotOfSessionKey(key))) {
-      if ((nextById ?? s.traces.byId)[meta.id]) continue;
-      touch()[meta.id] = meta;
-      (nextOrder ??= [...s.traces.order]).push(meta.id);
+      if (!(nextById ?? s.traces.byId)[meta.id]) touch()[meta.id] = meta;
+      if (!inOrder.has(meta.id)) {
+        (nextOrder ??= [...s.traces.order]).push(meta.id);
+        inOrder.add(meta.id);
+      }
     }
   }
 

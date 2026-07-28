@@ -201,10 +201,12 @@ describe("sessionKeyForTrace/runForTrace/deviceForTrace — a trace's OWNING ses
     expect(deviceForTrace(s, "hw-in-left@1")).toBe(s.devices.sessions["slot-1"].device);
   });
 
-  it("runForTrace/deviceForTrace on an ABSENT slot-1 session fall back to the focused session, never throw (a dormant doc-loaded trace)", () => {
+  it("on an ABSENT slot-1 session: runForTrace falls back to the focused run (legible chrome, never a throw), deviceForTrace returns NULL — never another converter's calibration (E3 review #4)", () => {
     const s = initialState(); // no slot-1 session minted
     expect(() => runForTrace(s, "hw-in-left@1")).not.toThrow();
     expect(runForTrace(s, "hw-in-left@1")).toBe(focusedRun(s));
-    expect(deviceForTrace(s, "hw-in-left@1")).toBe(focusedDevice(s));
+    expect(deviceForTrace(s, "hw-in-left@1")).toBeNull();
+    // Non-hw ids resolve to the focused session, which always exists.
+    expect(deviceForTrace(s, "mem-1")).toBe(focusedDevice(s));
   });
 });
