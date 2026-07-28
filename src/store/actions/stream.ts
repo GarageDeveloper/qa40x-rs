@@ -18,13 +18,14 @@ import type {
   SourceMeta,
   TraceMeta,
 } from "../state";
-import { captureBenchSignature, HW_TRACE_IDS } from "../state";
+import { captureBenchSignature, hwTraceIds } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import {
   isRoutable,
   session,
   sessionArgs,
+  sessionKeys,
   updateDevice,
   updateRun,
 } from "../selectors/session";
@@ -146,30 +147,41 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
 /** The stream config is a pure projection of the state tree. The spectra
  * request is the display budget: an FFT is computed only for hardware
  * endpoints some displayed spectrum tile shows (#52). `sessionKey` keys
- * the sample-rate-dependent parts (bin snapping — see playedFrequencyHz);
- * acquisition/sources/display budget stay bench-global by design. */
+ * the sample-rate-dependent parts (bin snapping — see playedFrequencyHz)
+ * and, since lot E3, the endpoint projections: spectra/triggers/measures
+ * read through the session slot's own trace ids (wire shapes byte-identical
+ * — the slot dimension lives outside them, one config per device).
+ * Acquisition and the display budget stay bench-global by design.
+ *
+ * `slots` (the DAC program) is emitted for the FOCUSED session only
+ * (Raphaël decision 1, 2026-07-28: sources = focused device; added devices
+ * capture in monitor mode — an empty slot set). Per-device source routing
+ * is lot F. */
 export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamConfig {
+  const key = sessionKey ?? s.devices.focus;
+  const slot = session(s, key)?.slot ?? 0;
+  const ids = hwTraceIds(slot);
   const { mode, count } = s.acquisition.averaging;
   const fdShown = fdShownTraceIds(s);
   return {
     buffer_size: s.acquisition.fftSize,
-    slots: slotsFromSources(s, sessionKey),
+    slots: key === s.devices.focus ? slotsFromSources(s, key) : [],
     window: s.acquisition.window,
     averaging: {
       coherent: mode === "coherent",
       count: mode === "off" ? 1 : Math.max(1, count),
     },
     spectra: {
-      input_l: fdShown.has(HW_TRACE_IDS.inputL),
-      input_r: fdShown.has(HW_TRACE_IDS.inputR),
-      output_l: fdShown.has(HW_TRACE_IDS.outputL),
-      output_r: fdShown.has(HW_TRACE_IDS.outputR),
+      input_l: fdShown.has(ids.inputL),
+      input_r: fdShown.has(ids.inputR),
+      output_l: fdShown.has(ids.outputL),
+      output_r: fdShown.has(ids.outputR),
     },
     // M1: always auto-fit to the summed peak (a fixed-range UI lands with
     // the full output-range readout parity).
     output_range_dbv: null,
-    triggers: triggerRequest(s),
-    measures: measureRequest(s),
+    triggers: triggerRequest(s, slot),
+    measures: measureRequest(s, slot),
   };
 }
 
@@ -289,6 +301,11 @@ export function ingestFrame(
   if (frame.deviceId && sess.deviceId && frame.deviceId !== sess.deviceId) {
     warnFrameDeviceMismatch(key, frame.deviceId, sess.deviceId);
   }
+  // THIS session's endpoint traces (issue #25 lot E3): the frames cache,
+  // the trigger-snapshot cache and traces.byId all key on these ids, so
+  // two sessions streaming concurrently land on disjoint traces — slot 0
+  // keeps hw-in-left & co verbatim.
+  const ids = hwTraceIds(sess.slot);
   const seq = ++ingestSeq;
   const off = frame.offsets;
   // One snapshot for the whole frame (issue #40), computed BEFORE the cache
@@ -321,7 +338,7 @@ export function ingestFrame(
     }
   };
   put(
-    HW_TRACE_IDS.inputL,
+    ids.inputL,
     off.input_l,
     frame.input.l,
     frame.fd.inputL,
@@ -330,7 +347,7 @@ export function ingestFrame(
     frame.measures.inputL
   );
   put(
-    HW_TRACE_IDS.inputR,
+    ids.inputR,
     off.input_r,
     frame.input.r,
     frame.fd.inputR,
@@ -339,7 +356,7 @@ export function ingestFrame(
     frame.measures.inputR
   );
   put(
-    HW_TRACE_IDS.outputL,
+    ids.outputL,
     off.output_l,
     frame.output?.l,
     frame.fd.outputL,
@@ -348,7 +365,7 @@ export function ingestFrame(
     frame.measures.outputL
   );
   put(
-    HW_TRACE_IDS.outputR,
+    ids.outputR,
     off.output_r,
     frame.output?.r,
     frame.fd.outputR,
@@ -363,25 +380,25 @@ export function ingestFrame(
   // keyed by the endpoint that latched it. `waiting`/`stopped` write nothing
   // (the previous snapshot, if any, keeps holding NORMAL/SINGLE's picture).
   const snapSamples: Record<string, Float64Array> = {
-    [HW_TRACE_IDS.inputL]: frame.input.l.samples,
-    [HW_TRACE_IDS.inputR]: frame.input.r.samples,
+    [ids.inputL]: frame.input.l.samples,
+    [ids.inputR]: frame.input.r.samples,
   };
   if (frame.output) {
-    snapSamples[HW_TRACE_IDS.outputL] = frame.output.l.samples;
-    snapSamples[HW_TRACE_IDS.outputR] = frame.output.r.samples;
+    snapSamples[ids.outputL] = frame.output.l.samples;
+    snapSamples[ids.outputR] = frame.output.r.samples;
   }
   const snapOffsets: Record<string, number | null> = {
-    [HW_TRACE_IDS.inputL]: off.input_l,
-    [HW_TRACE_IDS.inputR]: off.input_r,
-    [HW_TRACE_IDS.outputL]: off.output_l,
-    [HW_TRACE_IDS.outputR]: off.output_r,
+    [ids.inputL]: off.input_l,
+    [ids.inputR]: off.input_r,
+    [ids.outputL]: off.output_l,
+    [ids.outputR]: off.output_r,
   };
   const runTriggers: RunState["triggers"] = {};
   const endpoints: [string, DecodedFrame["trigger"]["inputL"]][] = [
-    [HW_TRACE_IDS.inputL, frame.trigger.inputL],
-    [HW_TRACE_IDS.inputR, frame.trigger.inputR],
-    [HW_TRACE_IDS.outputL, frame.trigger.outputL],
-    [HW_TRACE_IDS.outputR, frame.trigger.outputR],
+    [ids.inputL, frame.trigger.inputL],
+    [ids.inputR, frame.trigger.inputR],
+    [ids.outputL, frame.trigger.outputL],
+    [ids.outputR, frame.trigger.outputR],
   ];
   // A `stopped` report may come from the in-flight frame captured under the
   // PRE-re-arm config — any other state proves the current config's scan
@@ -641,4 +658,18 @@ export function syncStream(
         toast(store, "error", `Stream update: ${e}`);
       }
     });
+}
+
+/**
+ * Push the current config to EVERY session's running stream (lot E3):
+ * bench-global mutators — acquisition, trigger settings, trace pool,
+ * layout, workspace load — reshape every device's config, not just the
+ * focused one's. Each per-session sync no-ops when that session is not
+ * streaming and refuses an unroutable slot ≥ 1 (syncStream's own gates).
+ * Focus-bound mutators (sources, transport, output-only) keep calling
+ * `syncStream` directly — decision D3: sources ride the focused device.
+ * Dormant with one session: exactly one syncStream, as before.
+ */
+export function syncAllStreams(store: Store<AppState>, ipc: Ipc): void {
+  for (const key of sessionKeys(store.get())) syncStream(store, ipc, key);
 }

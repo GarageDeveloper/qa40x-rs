@@ -12,10 +12,13 @@
 import type { TraceId } from "../../core/model";
 import type { MeasureRequest } from "../../gen";
 import { SCOPE_MEASURE_KEYS } from "../../core/measure";
-import { HW_TRACE_IDS, type AppState } from "../state";
+import { hwTraceIds, type AppState } from "../state";
 import { chipSourceTraceId, visibleTiles } from "./layout";
 
-export function measureRequest(s: AppState): MeasureRequest {
+/** `slot` projects the request for ONE device's stream (lot E3) — same
+ * contract as `triggerRequest`: byte-identical wire shape, the four booleans
+ * read through `slot`'s endpoint ids; default 0 = the historic request. */
+export function measureRequest(s: AppState, slot = 0): MeasureRequest {
   const wanted = new Set<TraceId>();
   for (const tile of visibleTiles(s)) {
     // Sweeps have no chip strip (tile.ts hides it) — their stale `measures`
@@ -33,10 +36,11 @@ export function measureRequest(s: AppState): MeasureRequest {
     const src = chipSourceTraceId(tile);
     if (src) wanted.add(src);
   }
+  const ids = hwTraceIds(slot);
   return {
-    input_l: wanted.has(HW_TRACE_IDS.inputL),
-    input_r: wanted.has(HW_TRACE_IDS.inputR),
-    output_l: wanted.has(HW_TRACE_IDS.outputL),
-    output_r: wanted.has(HW_TRACE_IDS.outputR),
+    input_l: wanted.has(ids.inputL),
+    input_r: wanted.has(ids.inputR),
+    output_l: wanted.has(ids.outputL),
+    output_r: wanted.has(ids.outputR),
   };
 }

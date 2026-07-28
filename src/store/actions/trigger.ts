@@ -15,8 +15,8 @@ import type { TraceId } from "../../core/model";
 import type { Store } from "../store";
 import type { AppState, TriggerEdge, TriggerMode, TriggerSettings } from "../state";
 import { DEFAULT_TRIGGER } from "../state";
-import { updateFocusedRun } from "../selectors/session";
-import { syncStream } from "./stream";
+import { sessionKeyForTrace, updateRun } from "../selectors/session";
+import { syncAllStreams } from "./stream";
 
 function patchTrigger(
   store: Store<AppState>,
@@ -51,14 +51,16 @@ export function setTriggerMode(
     const toSingle = mode === "single";
     const next = toSingle ? { ...cur, mode, armEpoch: cur.armEpoch + 1 } : { ...cur, mode };
     const withTrigger = { ...s, triggers: { ...s.triggers, [endpointId]: next } };
+    // The endpoint's OWNING session (lot E3): arming `hw-in-left@1` marks
+    // slot 1's run pending, whatever the focus is.
     return toSingle
-      ? updateFocusedRun(withTrigger, (r) => ({
+      ? updateRun(withTrigger, sessionKeyForTrace(s, endpointId), (r) => ({
           ...r,
           trigArmPending: { ...r.trigArmPending, [endpointId]: true },
         }))
       : withTrigger;
   });
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 export function setTriggerEdge(
@@ -68,7 +70,7 @@ export function setTriggerEdge(
   edge: TriggerEdge
 ): void {
   patchTrigger(store, "trigger/edge", endpointId, (t) => (t.edge === edge ? t : { ...t, edge }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /**
@@ -95,7 +97,7 @@ export function setTriggerLevelV(
   patchTrigger(store, "trigger/level", endpointId, (t) =>
     t.levelV === levelV ? t : { ...t, levelV }
   );
-  if (opts.sync ?? true) syncStream(store, ipc);
+  if (opts.sync ?? true) syncAllStreams(store, ipc);
 }
 
 /** `hystV: null` = auto (2 % of the frame's own peak, floored at 1e-4 FS —
@@ -117,7 +119,7 @@ export function setTriggerHystV(
   patchTrigger(store, "trigger/hyst", endpointId, (t) =>
     t.hystV === next ? t : { ...t, hystV: next }
   );
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Re-arm a SINGLE shot: bump `armEpoch`. The backend re-arms on ANY change
@@ -127,13 +129,14 @@ export function setTriggerHystV(
 export function armSingle(store: Store<AppState>, ipc: Ipc, endpointId: TraceId): void {
   store.update("trigger/arm", (s) => {
     const cur = s.triggers[endpointId] ?? DEFAULT_TRIGGER;
-    return updateFocusedRun(
+    return updateRun(
       {
         ...s,
         triggers: { ...s.triggers, [endpointId]: { ...cur, armEpoch: cur.armEpoch + 1 } },
       },
+      sessionKeyForTrace(s, endpointId),
       (r) => ({ ...r, trigArmPending: { ...r.trigArmPending, [endpointId]: true } })
     );
   });
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }

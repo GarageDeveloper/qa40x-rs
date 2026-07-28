@@ -94,9 +94,11 @@ export interface WorkspaceDoc {
   layout: LayoutState;
   /** Frozen ❄ memory-trace data, keyed by trace id. */
   refFrames: Record<TraceId, PersistedFrames>;
-  /** Per-endpoint trigger settings (Lot A, issue #26), keyed by
-   * `HW_TRACE_IDS.*`. `armEpoch` is normalized to 0 on save/load — a SINGLE
-   * arm is a live-session gesture, never a saved-bench fact. */
+  /** Per-endpoint trigger settings (Lot A, issue #26), keyed by the
+   * endpoint's slot-scoped trace id (lot E3: `hw-in-left` & co for slot 0,
+   * `hw-in-left@1` & co beyond — so the doc persists the SLOT, never a
+   * device id). `armEpoch` is normalized to 0 on save/load — a SINGLE arm
+   * is a live-session gesture, never a saved-bench fact. */
   triggers: Record<TraceId, TriggerSettings>;
   /** The bench's loaded user weighting curve (issue #29), or null if none
    * was ever imported. `userWeightingCurveName` is display-only. */

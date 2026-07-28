@@ -245,10 +245,18 @@ export function mountGridPanel(
         // the stream is stopped — without these in the key, a trigger config
         // change with no running stream (no new frame to re-feed on) left
         // the chip stale until something else happened to fire this
-        // selector (issue #26 review #6).
+        // selector (issue #26 review #6). EVERY session's run (lot E3):
+        // tiles resolve their trigger reads to the endpoint's OWNING
+        // session (runForTrace), so a non-focused device's latch must
+        // re-fire the feed too. The focus itself is in the key (E3 review
+        // #1 sibling): non-hw chip sources resolve through the focused
+        // session, so a bare focus change must re-feed as well.
+        s.devices.focus,
         s.triggers,
-        focusedRun(s).triggers,
-        focusedRun(s).trigArmPending,
+        Object.values(s.devices.sessions).map((x) => [
+          x.run.triggers,
+          x.run.trigArmPending,
+        ]),
       ]),
     () => {
       const s = store.get();

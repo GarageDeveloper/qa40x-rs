@@ -44,7 +44,7 @@ import {
   updateFocusedRun,
 } from "../selectors/session";
 import { removeTraceEverywhere } from "./traces";
-import { startRun, stopRun, syncStream } from "./stream";
+import { startRun, stopRun, syncAllStreams } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 import { toast } from "./ui";
 
@@ -152,7 +152,7 @@ export function removeProgram(store: Store<AppState>, ipc: Ipc, id: string): voi
     };
   });
   removeTraceEverywhere(store, id);
-  syncStream(store, ipc); // its tile memberships left the fd budget
+  syncAllStreams(store, ipc); // its tile memberships left the fd budget
 }
 
 function patchProgram(

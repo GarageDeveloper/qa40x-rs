@@ -9,7 +9,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { clearAllFrames, putFrames } from "../../data/frames";
 import { clearTriggerSnapshots, putTriggerSnapshot } from "../../data/triggered";
-import { initialState, type AppState, type TileConfig } from "../state";
+import { initialSession, initialState, type AppState, type TileConfig } from "../state";
 import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS } from "../state";
 import { DBU_OVER_DBV_DB } from "../../core/units";
 import { focusedDevice, focusedRun } from "./session";
@@ -460,6 +460,41 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     const vm = scopeVM(s, tile(s));
     const mem = vm.series.find((sv) => sv.id === "mem-1")!;
     expect(Array.from(mem.samples)).toEqual([0.1, -0.1]); // offsetDb 0 ⇒ identity, unsliced
+  });
+
+  it("a scope on an @1 endpoint reads its trigger state from slot 1's OWN run, not the focused (slot-0) one's (issue #25 lot E3)", () => {
+    const srcId = "hw-in-left@1";
+    putTriggerSnapshot(srcId, {
+      seq: 1,
+      state: "triggered",
+      index: 500,
+      frac: 0.3,
+      sampleRate: 48000,
+      samples: { [srcId]: Float64Array.from({ length: 1000 }, (_, i) => i) },
+      offsetDb: { [srcId]: 20 },
+      capture: null,
+    });
+    const s = stateWith([srcId]);
+    s.acquisition.fftSize = 1000;
+    focusedDevice(s).config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    tile(s).kind = "scope";
+    tile(s).tdUnit = "v";
+    tile(s).timeWindowMs = 10;
+    tile(s).triggerPositionPct = 50;
+    s.triggers[srcId] = { mode: "auto", edge: "rising", levelV: 0.5, hystV: null, armEpoch: 0 };
+    // slot-1's OWN run says "triggered"...
+    s.devices.sessions["slot-1"] = {
+      ...initialSession(1),
+      run: { ...initialSession(1).run, triggers: { [srcId]: { state: "triggered", index: 500, frac: 0.3 } } },
+    };
+    // ...while the FOCUSED (slot-0) run reports something else entirely for
+    // the SAME id — proving the read does not come from focusedRun().
+    focusedRun(s).triggers[srcId] = { state: "waiting", index: 999, frac: 0 };
+
+    const vm = scopeVM(s, tile(s));
+    expect(vm.trigger).not.toBeNull();
+    expect(vm.trigger!.state).toBe("triggered");
+    expect(vm.trigger!.held).toBe(false); // "triggered" is not held — "waiting" (the wrong read) would be
   });
 });
 

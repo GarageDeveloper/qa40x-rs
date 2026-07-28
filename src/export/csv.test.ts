@@ -319,6 +319,24 @@ describe("traceSourceLine", () => {
       traceSourceLine(s, meta({ source: { kind: "memory", frozenFrom: "gone" } }))
     ).toBe("frozen copy of gone");
   });
+
+  it("slot ≥ 1 endpoints name their device; slot 0 stays verbatim (issue #25 lot E3)", () => {
+    expect(
+      traceSourceLine(s, meta({ id: "hw-in-left", source: { kind: "hw_input", channel: "left" } }))
+    ).toBe("hardware input L"); // unchanged historic string
+    expect(
+      traceSourceLine(
+        s,
+        meta({ id: "hw-in-left@1", source: { kind: "hw_input", channel: "left" } })
+      )
+    ).toBe("hardware input L (device #2)");
+    expect(
+      traceSourceLine(
+        s,
+        meta({ id: "hw-out-right@2", source: { kind: "hw_output", channel: "right" } })
+      )
+    ).toBe("hardware output R (device #3)");
+  });
 });
 
 /* ------------------------------------------------------------------ */

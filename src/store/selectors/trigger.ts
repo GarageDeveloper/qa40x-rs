@@ -10,9 +10,16 @@
  */
 import type { TraceId } from "../../core/model";
 import type { TriggerConfig, TriggerRequest } from "../../gen";
-import { DEFAULT_TRIGGER, HW_TRACE_IDS, type AppState, type TileConfig } from "../state";
+import {
+  DEFAULT_TRIGGER,
+  hwSlotOfTraceId,
+  hwTraceIds,
+  sessionKeyForSlot,
+  type AppState,
+  type TileConfig,
+} from "../state";
 import { chipSourceTraceId, visibleTiles } from "./layout";
-import { focusedDevice } from "./session";
+import { focusedDevice, session } from "./session";
 
 /**
  * The endpoint a tile's trigger aligns to: the explicit `triggerSource` when
@@ -30,11 +37,24 @@ export function tileTriggerSourceId(s: AppState, tile: TileConfig): TraceId | nu
 
 /** A scope tile's displayed window, in samples: the whole capture
  * (`timeWindowMs === null`) or `ms` worth of the device's sample rate,
- * clamped to the fftSize (a window can't outgrow the capture it slices). */
+ * clamped to the fftSize (a window can't outgrow the capture it slices).
+ *
+ * "The device" is the one the tile's TRIGGER SOURCE belongs to (lot E3:
+ * the slot rides the endpoint id — a tile scoping `hw-in-left@1` sizes its
+ * window in slot 1's sample rate, which also reaches the wire via
+ * `pre_samples`). Non-hw or absent source falls back to the focused
+ * session — identical behavior while one session exists. */
 export function tileWindowSamples(s: AppState, tile: TileConfig): number {
   const fftSize = s.acquisition.fftSize;
   if (tile.timeWindowMs === null) return fftSize;
-  const sampleRate = focusedDevice(s).config?.sample_rate ?? 48000;
+  const srcId = tileTriggerSourceId(s, tile);
+  const slot = srcId === null ? null : hwSlotOfTraceId(srcId);
+  const sampleRate =
+    (slot !== null
+      ? session(s, sessionKeyForSlot(slot))?.device.config?.sample_rate
+      : undefined) ??
+    focusedDevice(s).config?.sample_rate ??
+    48000;
   const samples = Math.round((tile.timeWindowMs / 1000) * sampleRate);
   return Math.min(Math.max(samples, 1), fftSize);
 }
@@ -65,8 +85,14 @@ export function triggerPreSamples(s: AppState, endpointId: TraceId): number {
  * setting is not "off" AND at least one visible scope tile actually points
  * its trigger there (the display-budget rule, #52's trigger twin — no scan
  * for an endpoint nothing shows).
+ *
+ * `slot` projects the request for ONE device's stream (lot E3): the wire
+ * shape stays byte-identical — the four channels are `slot`'s endpoints,
+ * read through their slot-scoped trace ids. Default 0 = the historic
+ * single-device request, pinned unchanged.
  */
-export function triggerRequest(s: AppState): TriggerRequest {
+export function triggerRequest(s: AppState, slot = 0): TriggerRequest {
+  const ids = hwTraceIds(slot);
   const build = (endpointId: TraceId): TriggerConfig | null => {
     const t = s.triggers[endpointId] ?? DEFAULT_TRIGGER;
     if (t.mode === "off") return null;
@@ -84,9 +110,9 @@ export function triggerRequest(s: AppState): TriggerRequest {
     };
   };
   return {
-    input_l: build(HW_TRACE_IDS.inputL),
-    input_r: build(HW_TRACE_IDS.inputR),
-    output_l: build(HW_TRACE_IDS.outputL),
-    output_r: build(HW_TRACE_IDS.outputR),
+    input_l: build(ids.inputL),
+    input_r: build(ids.inputR),
+    output_l: build(ids.outputL),
+    output_r: build(ids.outputR),
   };
 }

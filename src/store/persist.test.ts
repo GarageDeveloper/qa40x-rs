@@ -8,8 +8,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import v4Blob from "../../tests/e2e/fixtures/workspace-v4.json";
 import { Store } from "./store";
-import type { AppState, SweepProgram } from "./state";
-import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, initialSession, initialState } from "./state";
+import type { AppState, SweepProgram, TraceMeta } from "./state";
+import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, hwTraceMetas, initialSession, initialState } from "./state";
 import {
   isQuotaExceeded,
   migrate,
@@ -35,6 +35,18 @@ function freshStore(): Store<AppState> {
 }
 
 describe("v5 document", () => {
+  it("golden pin: snapshotWorkspace(initialState()).traces.order is the 4 historic ids, as string literals (issue #25 lot E3)", () => {
+    // Written as literals, not through HW_TRACE_IDS — a saved doc's ORDER
+    // is user-facing (traces panel row order); a silent reorder here would
+    // be invisible to every OTHER pin that reads through the same constant.
+    expect(snapshotWorkspace(initialState()).traces.order).toEqual([
+      "hw-in-left",
+      "hw-in-right",
+      "hw-out-left",
+      "hw-out-right",
+    ]);
+  });
+
   it("snapshot → JSON → migrate → apply round-trips the bench", () => {
     const store = freshStore();
     // A bench with something in every slice: rename, collapse, tile tweak.
@@ -182,6 +194,50 @@ describe("v5 document", () => {
       // Loadable onto a live store without throwing.
       expect(applyWorkspaceDoc(freshStore(), stubIpc, doc!)).toBe(true);
     }
+  });
+});
+
+describe("F6: reconcileHwTraces wired into applyWorkspaceDoc (issue #25 lot E3)", () => {
+  it("a doc carrying an @1 endpoint trace + tile membership (a 2-device bench's save) keeps it DORMANT when loaded on a 1-device bench", () => {
+    const store = freshStore();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))))!;
+    const dormant: TraceMeta = { ...hwTraceMetas(1)[0], label: "Renamed on the 2-device bench" };
+    doc.traces.order = [...doc.traces.order, dormant.id];
+    doc.traces.byId = { ...doc.traces.byId, [dormant.id]: dormant };
+    doc.layout.tiles["tile-1"].traces = [...doc.layout.tiles["tile-1"].traces, dormant.id];
+
+    const dest = freshStore(); // no slot-1 session — a 1-device bench
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    const s = dest.get();
+    expect(s.traces.byId[dormant.id]).toEqual(dormant); // kept, untouched
+    expect(s.traces.order).toContain(dormant.id);
+    expect(s.layout.tiles["tile-1"].traces).toContain(dormant.id);
+  });
+
+  it("a doc MISSING slot-0's own endpoints (a hand-edited/corrupted blob) gets them RE-MINTED by the reconcile", () => {
+    const store = freshStore();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))))!;
+    // Never happens from a real save (Traces V2's "never deletable"
+    // invariant) — exercised here as a defensive/hand-edited-doc case.
+    doc.traces.order = doc.traces.order.filter((id) => id !== HW_TRACE_IDS.inputL);
+    delete doc.traces.byId[HW_TRACE_IDS.inputL];
+    doc.layout.tiles["tile-1"].traces = doc.layout.tiles["tile-1"].traces.filter(
+      (id) => id !== HW_TRACE_IDS.inputL
+    );
+
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    const s = dest.get();
+    expect(s.traces.byId[HW_TRACE_IDS.inputL]).toBeDefined();
+    expect(s.traces.order).toContain(HW_TRACE_IDS.inputL);
+  });
+
+  it("a slot-0-only doc round-trips JSON-identical through load — the reconcile is a no-op when nothing is missing", () => {
+    const store = freshStore();
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))))!;
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(snapshotWorkspace(dest.get())).toEqual(doc);
   });
 });
 

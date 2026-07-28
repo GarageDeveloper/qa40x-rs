@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, beforeEach } from "vitest";
 import { clearAllFrames } from "../../data/frames";
-import { initialState, HW_TRACE_IDS, type AppState } from "../state";
+import { initialSession, initialState, HW_TRACE_IDS, type AppState } from "../state";
 import { focusedDevice } from "./session";
 import { tileTriggerSourceId, tileWindowSamples, triggerPreSamples, triggerRequest } from "./trigger";
 
@@ -175,5 +175,97 @@ describe("triggerPreSamples / triggerRequest", () => {
       hysteresis_v: 0.01,
       arm_epoch: 3,
     });
+  });
+});
+
+describe("triggerRequest(s, slot) — per-slot projection (issue #25 lot E3)", () => {
+  beforeEach(() => clearAllFrames());
+
+  it("slot 1 reads s.triggers keyed on the @1 id, gated on an @1-scoped visible tile", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    tile(s).kind = "scope";
+    tile(s).traces = ["hw-in-left@1"];
+    s.triggers["hw-in-left@1"] = {
+      mode: "auto",
+      edge: "rising",
+      levelV: 0.2,
+      hystV: null,
+      armEpoch: 0,
+    };
+    const req = triggerRequest(s, 1);
+    expect(req.input_l).toMatchObject({ mode: "auto", edge: "rising", level_v: 0.2 });
+    expect(req.input_r).toBeNull();
+  });
+
+  it("triggerRequest(s, 0) is byte-identical to the historic arg-less call — the default is pinned unchanged", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    tile(s).kind = "scope";
+    tile(s).traces = [HW_TRACE_IDS.inputL];
+    s.triggers[HW_TRACE_IDS.inputL] = {
+      mode: "normal",
+      edge: "falling",
+      levelV: -0.1,
+      hystV: 0.02,
+      armEpoch: 2,
+    };
+    expect(triggerRequest(s, 0)).toEqual(triggerRequest(s));
+  });
+
+  it("slot 1's request is independent of an identically-shaped slot-0 setting", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    tile(s).kind = "scope";
+    tile(s).traces = [HW_TRACE_IDS.inputL]; // slot 0 only — slot 1 has no member tile
+    s.triggers[HW_TRACE_IDS.inputL] = {
+      mode: "auto",
+      edge: "rising",
+      levelV: 0.2,
+      hystV: null,
+      armEpoch: 0,
+    };
+    s.triggers["hw-in-left@1"] = {
+      mode: "auto",
+      edge: "rising",
+      levelV: 0.2,
+      hystV: null,
+      armEpoch: 0,
+    };
+    // slot 0 is requested (a visible scope tile points at it)...
+    expect(triggerRequest(s, 0).input_l).not.toBeNull();
+    // ...but slot 1's identical setting is NOT — no tile scopes @1 (#52's rule).
+    expect(triggerRequest(s, 1).input_l).toBeNull();
+  });
+});
+
+describe("tileWindowSamples — slot-scoped sample rate (issue #25 lot E3)", () => {
+  it("sizes the window in the trigger source's OWNING slot's sample rate, not the focused one's", () => {
+    const s = initialState();
+    focusedDevice(s).config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.devices.sessions["slot-1"] = {
+      ...initialSession(1),
+      device: {
+        ...initialSession(1).device,
+        config: { input_gain: 0, output_gain: 0, sample_rate: 96000 },
+      },
+    };
+    s.acquisition.fftSize = 32768;
+    tile(s).kind = "scope";
+    tile(s).traces = ["hw-in-left@1"];
+    tile(s).triggerSource = "hw-in-left@1";
+    tile(s).timeWindowMs = 10; // 960 samples @ 96 kHz — would be 480 @ the focused 48 kHz
+    expect(tileWindowSamples(s, tile(s))).toBe(960);
+  });
+
+  it("falls back to the focused session's rate for a non-hw / absent trigger source", () => {
+    const s = initialState();
+    focusedDevice(s).config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    s.acquisition.fftSize = 32768;
+    tile(s).kind = "scope";
+    tile(s).traces = ["mem-1"]; // a frozen/memory trace — never a hw endpoint
+    tile(s).triggerSource = "mem-1";
+    tile(s).timeWindowMs = 10; // 480 samples @ the focused 48 kHz
+    expect(tileWindowSamples(s, tile(s))).toBe(480);
   });
 });

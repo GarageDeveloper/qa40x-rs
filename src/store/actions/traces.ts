@@ -13,10 +13,81 @@ import { clearFrames, getFrames, putFrames } from "../../data/frames";
 import { resetChain, syncChains } from "../../data/chains";
 import { clearMeasures } from "../../data/measures";
 import { shownTraces } from "../selectors/layout";
+import { sessionKeys } from "../selectors/session";
 import type { Store } from "../store";
-import type { AppState, TraceMeta } from "../state";
-import { HW_TRACE_IDS, isRatioTrace, nextTraceColor } from "../state";
-import { syncStream } from "./stream";
+import type { AppState, HwTraceSource, TraceMeta, TraceSource } from "../state";
+import {
+  HW_TRACE_IDS,
+  hwTraceMetas,
+  hwTraceSource,
+  isRatioTrace,
+  nextTraceColor,
+  slotOfSessionKey,
+} from "../state";
+import { syncAllStreams } from "./stream";
+
+/** Two hw sources are the same endpoint. */
+function sameHwSource(a: TraceSource, b: HwTraceSource): boolean {
+  return (
+    (a.kind === "hw_input" || a.kind === "hw_output") &&
+    a.kind === b.kind &&
+    a.channel === b.channel
+  );
+}
+
+/**
+ * Reconcile the hardware-endpoint pool against the LIVE sessions (issue #25
+ * lot E3, the F6 fix): every open slot gets its 4 endpoint traces, and any
+ * pool entry whose id names a hw endpoint gets its `source` forced back to
+ * the canonical one — a hand-edited doc must not turn `hw-in-left` into a
+ * `memory` trace (user `label`/`color` are kept: those are theirs).
+ *
+ * NEVER deletes (D1, 2026-07-28): a slot-n endpoint trace with no live
+ * session stays in the pool, dormant — a doc from a 2-device bench loaded on
+ * a 1-device bench keeps its layout and revives when the device comes back
+ * (E4's add-device). Idempotent and reference-stable: returns `s` UNCHANGED
+ * when nothing is missing, so the auto-save dedupe never thrashes.
+ *
+ * Callers: `applyWorkspaceDoc` (a doc replaces the pool wholesale — this
+ * restores the live bench's endpoints), and E4's session-mint path via
+ * `store.update("traces/reconcile-hw", reconcileHwTraces)` when a slot ≥ 1
+ * session appears (dormant in E3 — no E3 flow mints one).
+ */
+export function reconcileHwTraces(s: AppState): AppState {
+  let nextById: Record<TraceId, TraceMeta> | null = null;
+  let nextOrder: TraceId[] | null = null;
+  const touch = (): Record<TraceId, TraceMeta> => (nextById ??= { ...s.traces.byId });
+
+  for (const id of s.traces.order) {
+    const canonical = hwTraceSource(id);
+    const t = s.traces.byId[id];
+    if (!canonical || !t) continue;
+    if (!sameHwSource(t.source, canonical)) {
+      touch()[id] = { ...t, source: canonical };
+    }
+  }
+
+  // Slot-then-endpoint append order: stable for the traces panel and pinned.
+  // Presence means BOTH halves (E3 review #2): a doc whose `order` omits an
+  // id its `byId` still holds would otherwise leave that endpoint without a
+  // panel row or + picker entry forever, while ingest keeps stamping it.
+  const inOrder = new Set(s.traces.order);
+  for (const key of sessionKeys(s)) {
+    for (const meta of hwTraceMetas(slotOfSessionKey(key))) {
+      if (!(nextById ?? s.traces.byId)[meta.id]) touch()[meta.id] = meta;
+      if (!inOrder.has(meta.id)) {
+        (nextOrder ??= [...s.traces.order]).push(meta.id);
+        inOrder.add(meta.id);
+      }
+    }
+  }
+
+  if (!nextById && !nextOrder) return s;
+  return {
+    ...s,
+    traces: { order: nextOrder ?? s.traces.order, byId: nextById ?? s.traces.byId },
+  };
+}
 
 /** Muted overlay tint for a frozen copy of `color` (8-digit hex alpha). */
 function frozenColor(color: string): string {
@@ -150,7 +221,7 @@ export function deleteTrace(store: Store<AppState>, ipc: Ipc, id: TraceId): void
   const meta = store.get().traces.byId[id];
   if (!meta || (meta.source.kind !== "memory" && meta.source.kind !== "transform")) return;
   removeTraceEverywhere(store, id);
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Shared pool/tiles/cache removal (also used when a program is removed). */
@@ -282,6 +353,6 @@ export function configureTransform(
   });
   // The transform may read a hardware endpoint no displayed tile shows —
   // the fd display budget resolves through it (selectors/layout.ts).
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
   syncChains(store, ipc);
 }

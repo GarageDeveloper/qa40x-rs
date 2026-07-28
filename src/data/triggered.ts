@@ -1,9 +1,10 @@
 /**
  * The trigger snapshot cache — the HELD scope picture, outside the store
  * (plan §3.3, mirrors data/frames.ts). Keyed by trigger-SOURCE endpoint
- * (`HW_TRACE_IDS.*`): one snapshot per endpoint a tile can trigger on, not
- * per tile — several tiles sharing a trigger source share the same held
- * picture.
+ * trace id — slot-scoped since lot E3 (`hw-in-left`, `hw-in-left@1`, …), so
+ * two sessions' latches never overwrite each other: one snapshot per
+ * endpoint a tile can trigger on, not per tile — several tiles sharing a
+ * trigger source share the same held picture.
  *
  * `ingestFrame` (store/actions/stream.ts) writes here only on `triggered` /
  * `auto` alignments; `waiting`/`stopped` frames leave the previous snapshot
@@ -25,9 +26,10 @@ export interface TriggerSnapshot {
   index: number;
   frac: number;
   sampleRate: number;
-  /** Every hw endpoint's samples AT THIS FRAME (they share one capture, so
-   * slicing every channel at the same index/frac is valid regardless of
-   * which endpoint fired) — keyed by `HW_TRACE_IDS.*`. */
+  /** Every hw endpoint's samples AT THIS FRAME (the 4 endpoints of the ONE
+   * device that latched — they share one capture, so slicing every channel
+   * at the same index/frac is valid regardless of which endpoint fired) —
+   * keyed by that session's slot-scoped endpoint ids (lot E3). */
   samples: Record<TraceId, Float64Array>;
   /** Each entry's own converter offset, baked at latch time. */
   offsetDb: Record<TraceId, number | null>;

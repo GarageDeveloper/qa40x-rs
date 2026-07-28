@@ -26,7 +26,8 @@ import {
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
 import { anyProgramLock } from "../selectors/session";
-import { syncStream } from "./stream";
+import { syncAllStreams } from "./stream";
+import { reconcileHwTraces } from "./traces";
 import { toast } from "./ui";
 
 /** A quota-exceeded save is either a one-off (a huge document on THIS
@@ -112,9 +113,17 @@ export function applyWorkspaceDoc(
     },
   }));
 
+  // F6 (issue #25 lot E3): the doc replaced the trace pool WHOLESALE — put
+  // back the endpoint traces of every LIVE session the doc didn't know
+  // about (their data re-lands with that session's next frame; the ids are
+  // recomputed from the slot, so they match). Doc-provided traces for
+  // absent slots stay, dormant (see reconcileHwTraces). At boot, and on
+  // every existing single-device doc, this is a no-op by construction.
+  store.update("workspace/reconcile-hw-traces", reconcileHwTraces);
+
   // A running stream keeps running and simply follows the new bench (its
   // slots empty out — nothing plays; its display budget follows the tiles).
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
   syncChains(store, ipc);
   return true;
 }

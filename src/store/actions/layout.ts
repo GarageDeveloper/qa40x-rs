@@ -20,7 +20,7 @@ import {
   defaultTile,
   patternTileCount,
 } from "../state";
-import { syncStream } from "./stream";
+import { syncAllStreams } from "./stream";
 
 function patchTile(
   store: Store<AppState>,
@@ -70,7 +70,7 @@ export function setPattern(
     const focus = s.layout.focus && shown.includes(s.layout.focus) ? s.layout.focus : null;
     return { ...s, layout: { pattern, order, tiles, focus } };
   });
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Swap a tile's graph kind. Chips whose domain no longer matches are reset
@@ -96,7 +96,7 @@ export function setTileKind(
                 : [],
         }
   );
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 export function setTileFdUnit(store: Store<AppState>, tileId: string, fdUnit: FdUnit): void {
@@ -116,7 +116,7 @@ export function addTraceToTile(
   patchTile(store, "layout/add-trace", tileId, (t) =>
     t.traces.includes(traceId) ? t : { ...t, traces: [...t.traces, traceId] }
   );
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 export function removeTraceFromTile(
@@ -136,7 +136,7 @@ export function removeTraceFromTile(
       hiddenCurves,
     };
   });
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Legend-chip toggle for ONE curve of a multi-curve sweep trace (v1: each
@@ -174,7 +174,7 @@ export function toggleTraceHidden(
         : [...t.hidden, traceId],
     };
   });
-  syncStream(store, ipc); // hidden curves leave the fd budget
+  syncAllStreams(store, ipc); // hidden curves leave the fd budget
 }
 
 /** Replace a tile's whole membership (gear dialog Traces tab). */
@@ -185,7 +185,7 @@ export function setTileTraces(
   traces: TraceId[]
 ): void {
   patchTile(store, "layout/set-traces", tileId, (t) => ({ ...t, traces: [...traces] }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Move the tile at visible position `from` to position `to` (drag-reorder).
@@ -222,7 +222,7 @@ export function setTileMeasures(
   measures: string[]
 ): void {
   patchTile(store, "layout/measures", tileId, (t) => ({ ...t, measures: [...measures] }));
-  syncStream(store, ipc); // suite chips drive the backend MeasureRequest
+  syncAllStreams(store, ipc); // suite chips drive the backend MeasureRequest
 }
 
 export function setTileChipSource(
@@ -234,7 +234,7 @@ export function setTileChipSource(
   patchTile(store, "layout/chip-source", tileId, (t) =>
     t.chipSource === chipSource ? t : { ...t, chipSource }
   );
-  syncStream(store, ipc); // the measured endpoint may have changed
+  syncAllStreams(store, ipc); // the measured endpoint may have changed
 }
 
 export function setTileAxis(
@@ -289,7 +289,7 @@ export function setTileTriggerSource(
   patchTile(store, "layout/trigger-source", tileId, (t) =>
     t.triggerSource === triggerSource ? t : { ...t, triggerSource }
   );
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /**
@@ -316,7 +316,7 @@ export function setTileTriggerPosition(
   patchTile(store, "layout/trigger-position", tileId, (t) =>
     t.triggerPositionPct === clamped ? t : { ...t, triggerPositionPct: clamped }
   );
-  if (opts.sync ?? true) syncStream(store, ipc);
+  if (opts.sync ?? true) syncAllStreams(store, ipc);
 }
 
 /** Display-only: draw the level/position marker handles (persisted with the

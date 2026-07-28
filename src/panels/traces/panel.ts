@@ -10,6 +10,7 @@
 import "./panel.css";
 import type { Store } from "../../store/store";
 import type { AppState, TraceMeta } from "../../store/state";
+import { hwSlotOfTraceId } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
   addTransformTrace,
@@ -73,9 +74,13 @@ export function mountTracesPanel(
             title: "Trace color — click to change",
           }) as HTMLInputElement;
           dot.addEventListener("input", () => setTraceColor(store, id, dot.value));
+          const hwSlot = hwSlotOfTraceId(id);
           const row = el(
             "div.traces__row",
-            {},
+            // Hw endpoint rows carry their device slot (lot E3) — the hook
+            // E4's device grouping and multi-device e2e will key on; slot-0
+            // rows are otherwise byte-identical.
+            hwSlot === null ? {} : { "data-slot": String(hwSlot) },
             dot,
             el("span.traces__label"),
             el("span.traces__badges")

@@ -29,6 +29,7 @@ import { initialSession, initialState, SLOT0 } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { focusedRun } from "../selectors/session";
 import { withDevice, withRun } from "./sessions.fixtures";
+import { reconcileHwTraces } from "./traces";
 import { Store } from "../store";
 import {
   __resetSessionGlobals,
@@ -364,6 +365,36 @@ describe("buildStreamConfig — triggers (Lot A, issue #26)", () => {
       armEpoch: 5,
     };
     expect(buildStreamConfig(s).averaging).toEqual({ coherent: false, count: 8 });
+  });
+});
+
+describe("buildStreamConfig — per-slot projections (issue #25 lot E3)", () => {
+  it("spectra reads through the SESSION's own slot-scoped ids — slot 0's request is unaffected", () => {
+    const s = addSlot1(initialState());
+    s.layout.pattern = "1";
+    s.layout.tiles["tile-1"].traces = ["hw-in-left@1", "hw-out-left@1"];
+    const cfg = buildStreamConfig(s, "slot-1");
+    expect(cfg.spectra).toEqual({
+      input_l: true,
+      input_r: false,
+      output_l: true,
+      output_r: false,
+    });
+    expect(buildStreamConfig(s, SLOT0).spectra).toEqual({
+      input_l: false,
+      input_r: false,
+      output_l: false,
+      output_r: false,
+    });
+  });
+
+  it("`slots` (the DAC program) is emitted for the FOCUSED session only (Raphaël decision 1, 2026-07-28)", () => {
+    const s = addSlot1(initialState());
+    s.sources = { order: ["a"], byId: { a: sineSource("a") } };
+    expect(s.devices.focus).toBe(SLOT0); // still focused on slot-0
+    expect(buildStreamConfig(s, SLOT0).slots).toHaveLength(1); // focused: its sources play
+    expect(buildStreamConfig(s, "slot-1").slots).toEqual([]); // non-focused: empty (monitor mode)
+    expect(buildStreamConfig(s).slots).toHaveLength(1); // arg-less default == the focused session
   });
 });
 
@@ -812,11 +843,6 @@ describe("ingestFrame — per-session routing (issue #25 lot E2)", () => {
     __resetSessionGlobals();
   });
 
-  // SCOPE of this isolation (E2 review #7): only the run/device HALVES are
-  // per-session. The frames cache and traces.byId keys (HW_TRACE_IDS.*)
-  // stay bench-global until E3 slots the trace ids — two sessions streaming
-  // concurrently WOULD interleave on the same four traces today. This pin
-  // must not be read as trace-pool isolation.
   it("ingestFrame(store, 'slot-1', frame) writes slot-1's run.stats/clip and device.offsets, and leaves slot-0 untouched", () => {
     const store = new Store(initialState(), { freeze: true });
     store.update("test/add-slot1", addSlot1);
@@ -843,6 +869,61 @@ describe("ingestFrame — per-session routing (issue #25 lot E2)", () => {
     // slot-0 never asked for — still its fresh initial values.
     expect(s.devices.sessions[SLOT0].run.stats.frames).toBe(0);
     expect(s.devices.sessions[SLOT0].device.offsets).toBeNull();
+  });
+
+  const align = (
+    state: "triggered" | "waiting" | "auto" | "stopped",
+    index: number,
+    frac: number
+  ): TriggerAlign => ({ state, index, frac, level_fs: 0, hysteresis_fs: 0 });
+
+  it("two LIVE sessions' endpoint traces land on independent, slot-scoped ids — the frames cache, traces.byId stamps and the trigger snapshot cache never interleave (issue #25 lot E3, resolving the E2 review #7 caveat)", () => {
+    const store = new Store(initialState(), { freeze: true });
+    // Slot 1 needs its pool entries minted before ingest can stamp them
+    // (traces.byId[id] must exist — the same F6 reconcile a real slot-1
+    // session gets in E4).
+    store.update("test/add-slot1-and-reconcile", (s) => reconcileHwTraces(addSlot1(s)));
+
+    const f0 = minimalFrame({
+      frames: 3,
+      offsets: { input_l: 10, input_r: 10, output_l: 10, output_r: 10, calibrated: true },
+    });
+    f0.input.l.samples = Float64Array.from([1, 2, 3]);
+    f0.trigger.inputL = align("triggered", 1, 0.1);
+
+    const f1 = minimalFrame({
+      frames: 5,
+      offsets: { input_l: 20, input_r: 20, output_l: 20, output_r: 20, calibrated: true },
+    });
+    f1.input.l.samples = Float64Array.from([9, 8, 7]);
+    f1.trigger.inputL = align("triggered", 2, 0.2);
+
+    ingestFrame(store, SLOT0, f0);
+    ingestFrame(store, "slot-1", f1);
+
+    // The frames cache: each slot's Input L holds ITS OWN samples.
+    expect(Array.from(getFrames(HW_TRACE_IDS.inputL)!.td!.samples)).toEqual([1, 2, 3]);
+    expect(Array.from(getFrames("hw-in-left@1")!.td!.samples)).toEqual([9, 8, 7]);
+
+    // traces.byId: both stamped independently — neither ingest clobbers the other.
+    const s = store.get();
+    const t0 = s.traces.byId[HW_TRACE_IDS.inputL];
+    const t1 = s.traces.byId["hw-in-left@1"];
+    expect(t0.offsetDb).toBe(10);
+    expect(t1.offsetDb).toBe(20);
+    expect(t0.seq).not.toBe(t1.seq); // distinct monotonic ingest stamps
+    expect(t0.capture).not.toBe(t1.capture); // separate sessions ⇒ separate memoized capture
+
+    // The trigger-snapshot cache: slot-1's latch is a DIFFERENT entry from slot 0's.
+    const snap0 = getTriggerSnapshot(HW_TRACE_IDS.inputL);
+    const snap1 = getTriggerSnapshot("hw-in-left@1");
+    expect(snap0).toBeDefined();
+    expect(snap1).toBeDefined();
+    expect(snap0).not.toBe(snap1);
+    expect(snap0!.index).toBe(1);
+    expect(snap1!.index).toBe(2);
+    expect(Array.from(snap0!.samples[HW_TRACE_IDS.inputL])).toEqual([1, 2, 3]);
+    expect(Array.from(snap1!.samples["hw-in-left@1"])).toEqual([9, 8, 7]);
   });
 
   it("ingestFrame on an absent session key is a no-op — no cache write, no store change", () => {
