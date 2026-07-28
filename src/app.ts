@@ -35,6 +35,7 @@ import {
   anyProgramLock,
   focusedDevice,
   focusedRun,
+  sessionKeys,
 } from "./store/selectors/session";
 import { refreshRest } from "./store/actions/rest";
 import { toast } from "./store/actions/ui";
@@ -177,8 +178,16 @@ export async function mountApp(
     void refreshDevices(store, ipc);
   });
 
-  // Telemetry poll while connected (cached read — no register I/O).
-  setInterval(() => void refreshTelemetry(store, ipc), TELEMETRY_POLL_MS);
+  // Telemetry poll while connected (cached read — no register I/O). EVERY
+  // session (lot E4, C2 fix): the keepalive doubles as the LINK-LED ping
+  // (#31/#54) — a second connected unit with no keepalive goes dark and
+  // never populates its telemetry. refreshTelemetry itself no-ops for
+  // sessions that aren't connected.
+  setInterval(() => {
+    for (const key of sessionKeys(store.get())) {
+      void refreshTelemetry(store, ipc, key);
+    }
+  }, TELEMETRY_POLL_MS);
 
   // Auto-connect (v1 parity): at startup and after a replug, connect as
   // soon as a device is present — unless the user disconnected by hand.
