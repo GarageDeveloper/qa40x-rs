@@ -14,7 +14,7 @@ import type { SessionKey } from "../../store/sessionkey";
 import type { Ipc } from "../../ipc/ipc";
 import {
   connect,
-  connectVirtual,
+  demoAddVirtual,
   disconnect,
   setInputRange,
   setOutputRange,
@@ -116,15 +116,18 @@ export function mountDevicePanel(
         void connect(store, ipc, { deviceId: pickedDeviceId(store.get()) });
     },
   }, "Connect");
-  // Demo mode: one click attaches the embedded virtual QA403 — for trying
-  // the app with no hardware, and for development. Hidden once connected;
-  // the DEMO chip then marks the session so it can't pass for a measurement.
+  // Demo mode: one click ADDS the embedded virtual QA403 (the + device
+  // path, never a slot-0 supersede — lot E4) and focuses it — for trying
+  // the app with no hardware, and for development. Hidden once the focused
+  // session is connected; the DEMO chip then marks the session so it can't
+  // pass for a measurement.
   const demoBtn = el("button.btn", {
     "data-testid": "btn-demo",
-    title: "Demo mode — connect to a built-in virtual QA403 (no hardware needed)",
+    title:
+      "Demo mode — add a built-in virtual QA403 alongside (no hardware needed)",
     onclick: () => {
       if (focusedDevice(store.get()).status === "disconnected")
-        void connectVirtual(store, ipc);
+        void demoAddVirtual(store, ipc);
     },
   }, "Demo");
   const demoChip = el(

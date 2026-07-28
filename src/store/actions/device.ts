@@ -7,7 +7,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, LevelOffsetsDb, RunState, SessionKey } from "../state";
 import { SLOT0, sessionKeyForSlot, slotOfSessionKey } from "../state";
-import { autoConnectDeviceId } from "../selectors/devices";
+import { addableEntries, autoConnectDeviceId } from "../selectors/devices";
 import {
   isRoutable,
   session,
@@ -15,7 +15,7 @@ import {
   updateDevice,
   updateRun,
 } from "../selectors/session";
-import { dropSession, mintSession, refreshDevices } from "./devices";
+import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
 import { disposeSession, syncAllStreams, syncStream } from "./stream";
 import {
   purgeSlotEndpointTraces,
@@ -143,41 +143,36 @@ export async function connect(
 const demoHwPresent = new Map<SessionKey, boolean | null>();
 
 /**
- * Demo mode: connect to the embedded virtual QA40x. No hardware, no
- * download — the backend runs the simulator in-process and the whole app
- * (measurements, generator, REST, scripts) works on it. The session is
- * badged via `DeviceMeta.is_virtual`.
+ * Demo mode (reshaped in lot E4 — Raphaël 2026-07-29): the button ADDS a
+ * built-in virtual unit through the SAME path as the Traces panel's
+ * + device, then focuses it — never a slot-0 supersede. The old
+ * `connect_virtual_device` flow parked the simulator on the DEFAULT slot,
+ * so "disconnect the QA402 → Demo" left the hardware with no way back
+ * short of a replug (demo had taken its slot). Now slot 0 stays the
+ * hardware's: the auto-connect tick can (re)claim it while the demo
+ * session keeps running alongside — the one-click no-hardware experience
+ * is unchanged because the focus moves to the fresh session in the same
+ * gesture (transport, sources and chrome all follow it).
+ *
+ * (`connect_virtual_device` itself remains backend-side: REST/scripting
+ * and an explicit virtual pick through the toolbar still target slot 0.)
  */
-export async function connectVirtual(
+export async function demoAddVirtual(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  demoHwPresent.set(SLOT0, null);
-  store.update("device/connecting", (s) =>
-    updateDevice(s, SLOT0, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
-  );
-  try {
-    await ipc.call("connect_virtual_device", {});
-    const info = await ipc.call("get_device_info", {});
-    store.update("device/connected", (s) =>
-      updateDevice(s, SLOT0, (d) => ({ ...d, status: "connected", present: true, info }))
-    );
-    // Seed the hand-over baseline NOW: hardware plugged in from here on is a
-    // transition; hardware already on the bus was an explicit non-choice.
-    try {
-      demoHwPresent.set(SLOT0, await ipc.call("is_hardware_present", {}));
-    } catch {
-      demoHwPresent.set(SLOT0, null); // unknown — the tick records a baseline first
-    }
-    await refreshConfig(store, ipc, SLOT0);
-    toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
-  } catch (e) {
-    store.update("device/connect-failed", (s) =>
-      updateDevice(s, SLOT0, (d) => ({ ...d, status: "disconnected" }))
-    );
-    toast(store, "error", `Demo mode failed: ${e}`);
+  const virtual = addableEntries(store.get()).find((e) => e.is_virtual);
+  if (!virtual) {
+    // The built-in source always enumerates two virtual units, so this is
+    // only the boot race (no scan landed yet) or every virtual already open.
+    toast(store, "info", "No virtual device available — retry in a moment");
+    return;
   }
-  void refreshDevices(store, ipc);
+  await addDevice(store, ipc, virtual.id);
+  const added = Object.values(store.get().devices.sessions).find(
+    (x) => x.deviceId === virtual.id
+  );
+  if (added) setFocusedSession(store, ipc, added.key);
 }
 
 /**
