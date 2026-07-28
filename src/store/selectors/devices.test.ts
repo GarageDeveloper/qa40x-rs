@@ -6,7 +6,7 @@
  * through the slice.
  */
 import { describe, expect, it } from "vitest";
-import { initialSession, initialState, SLOT0 } from "../state";
+import { hwTraceMetas, initialSession, initialState, SLOT0 } from "../state";
 import type { AppState } from "../state";
 import { fakeEntry } from "../actions/devices.fixtures";
 import { deriveDevices } from "../actions/devices";
@@ -19,6 +19,7 @@ import {
   outputRangesDbv,
   physicalAvailable,
   primaryCaps,
+  reviveCandidateId,
   primaryEntry,
   sampleRatesHz,
   sessionLabel,
@@ -306,5 +307,69 @@ describe("sessionLabel — group header / focus selector display name (issue #25
       devices: { ...s.devices, sessions: { ...s.devices.sessions, "slot-1": initialSession(1) } },
     };
     expect(sessionLabel(withSession, "slot-1")).toBe("Device #2");
+  });
+});
+
+describe("reviveCandidateId — one-click dormant-group revival (issue #25 lot E4, Raphaël 2026-07-28)", () => {
+  /** A bench with `entry` enumerated and a slot-1 endpoint trace whose
+   * capture provenance names (model, serial). */
+  function dormantSlot1(
+    entry: DeviceEntry,
+    provenance: { model: string; serial: string } | null
+  ): AppState {
+    const s = withDevices(fakeEntry("usb/A", { open: true, slot: 0 }), entry);
+    const meta = hwTraceMetas(1)[0];
+    return {
+      ...s,
+      traces: {
+        order: [...s.traces.order, meta.id],
+        byId: {
+          ...s.traces.byId,
+          [meta.id]: provenance
+            ? {
+                ...meta,
+                capture: {
+                  device: { ...provenance, firmware: null, isVirtual: false },
+                  sampleRateHz: 48000,
+                  inputRangeDbv: 42,
+                  outputRangeDbv: 8,
+                  offsets: null,
+                  fftSize: 32768,
+                  window: "hann",
+                  averaging: { mode: "off", count: 1 },
+                  capturedAt: "2026-07-28T23:00:00.000Z",
+                },
+              }
+            : meta,
+        },
+      },
+    };
+  }
+
+  it("matches the dormant slot's capture provenance (model+serial) against the addable units", () => {
+    const s = dormantSlot1(fakeEntry("usb/B"), { model: "QA402", serial: "B" });
+    expect(reviveCandidateId(s, 1)).toBe("usb/B");
+  });
+
+  it("null when the provenance-named unit is not enumerated, or the serial/model differ", () => {
+    const wrongSerial = dormantSlot1(fakeEntry("usb/B"), { model: "QA402", serial: "OTHER" });
+    expect(reviveCandidateId(wrongSerial, 1)).toBeNull();
+    const wrongModel = dormantSlot1(fakeEntry("usb/B"), { model: "QA403", serial: "B" });
+    expect(reviveCandidateId(wrongModel, 1)).toBeNull();
+  });
+
+  it("null when the rows never captured (no provenance), and always null for slot 0", () => {
+    const noProvenance = dormantSlot1(fakeEntry("usb/B"), null);
+    expect(reviveCandidateId(noProvenance, 1)).toBeNull();
+    const s = dormantSlot1(fakeEntry("usb/B"), { model: "QA402", serial: "B" });
+    expect(reviveCandidateId(s, 0)).toBeNull();
+  });
+
+  it("null when the matched unit is not ADDABLE (already open — a stale doc must not offer stealing an open unit)", () => {
+    const s = dormantSlot1(fakeEntry("usb/B", { open: true, slot: 1 }), {
+      model: "QA402",
+      serial: "B",
+    });
+    expect(reviveCandidateId(s, 1)).toBeNull();
   });
 });

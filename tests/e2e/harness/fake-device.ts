@@ -387,13 +387,21 @@ export class FakeDevice {
         if (!this.deviceList().devices.some((d) => d.id === wanted)) {
           throw new Error(`Failed to connect: Not found (fake): ${wanted}`);
         }
-        // First free NON-DEFAULT slot (a disconnected unit's slot is
-        // reused with a FRESH unit — a fresh runtime open), else a new
-        // slot, capped like registry::MAX_DEVICES.
-        let slot = 1;
-        while (this.units.get(slot)?.connected) slot++;
-        if (slot >= 8) {
-          throw new Error("Failed to connect: All device slots are in use");
+        // Preferred slot honored when free (the revive gesture — mirrors
+        // registry::free_or_new_runtime's hint arm), else first free
+        // NON-DEFAULT slot (a disconnected unit's slot is reused with a
+        // FRESH unit — a fresh runtime open), else a new slot, capped like
+        // registry::MAX_DEVICES.
+        const hint = a.slot as number | undefined;
+        let slot: number;
+        if (hint !== undefined && hint >= 1 && hint < 8 && !this.units.get(hint)?.connected) {
+          slot = hint;
+        } else {
+          slot = 1;
+          while (this.units.get(slot)?.connected) slot++;
+          if (slot >= 8) {
+            throw new Error("Failed to connect: All device slots are in use");
+          }
         }
         const fresh = new FakeUnit(syntheticLoopbackProvider());
         fresh.connected = true;

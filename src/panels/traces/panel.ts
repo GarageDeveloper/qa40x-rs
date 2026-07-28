@@ -23,6 +23,7 @@ import { deviceGroups, ungroupedTraceIds } from "../../store/selectors/traces";
 import {
   addableEntries,
   deviceLabel,
+  reviveCandidateId,
   sessionInputRanges,
   sessionLabel,
   sessionOutputRanges,
@@ -108,16 +109,30 @@ export function mountTracesPanel(
       // pool on every ingested frame through the JSON comparison below.
       const rowOf = (id: TraceId): Row | null => {
         const meta = s.traces.byId[id];
-        return meta && meta.source.kind !== "program"
-          ? {
-              id,
-              kind: meta.source.kind,
-              color: meta.color,
-              label: meta.label,
-              domains: meta.domains,
-              fdShown: fdShown.has(id),
-            }
+        if (!meta || meta.source.kind === "program") return null;
+        // Hover provenance for bench artifacts (❄/transform): which
+        // device produced this data, at what rate, when — from the
+        // capture snapshot (issue #40; `derived` marks a transform's
+        // inherited provenance).
+        const kind = meta.source.kind;
+        const cap =
+          kind === "memory" || kind === "transform" ? meta.capture : null;
+        const tip = cap?.device
+          ? `${cap.derived ? "Derived from" : "Captured on"} ${cap.device.model} · ${cap.device.serial}` +
+            (cap.sampleRateHz !== null ? ` @ ${cap.sampleRateHz / 1000} kHz` : "") +
+            (cap.capturedAt !== null
+              ? ` — ${cap.capturedAt.slice(0, 16).replace("T", " ")}`
+              : "")
           : null;
+        return {
+          id,
+          kind,
+          color: meta.color,
+          label: meta.label,
+          domains: meta.domains,
+          fdShown: fdShown.has(id),
+          tip,
+        };
       };
       const groups: GroupItem[] = deviceGroups(s).map((g) => {
         const sess = s.devices.sessions[g.key];
@@ -139,6 +154,10 @@ export function mountTracesPanel(
             collapsed: s.workspace.collapsed.includes(
               traceGroupCollapseKey(g.slot)
             ),
+            reviveId:
+              !g.live || sess?.device.status === "disconnected"
+                ? reviveCandidateId(s, g.slot)
+                : null,
             inputRanges: sessionInputRanges(s, g.key),
             outputRanges: sessionOutputRanges(s, g.key),
             rates: sessionRates(s, g.key),

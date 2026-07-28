@@ -6,6 +6,7 @@
  */
 import type { DeviceCapabilities, DeviceEntry } from "../../gen";
 import type { AppState } from "../state";
+import { hwTraceIds } from "../hwtraces";
 import type { SessionKey } from "../sessionkey";
 import { slotOfSessionKey } from "../sessionkey";
 import { focusedDevice, session } from "./session";
@@ -134,6 +135,32 @@ export function addableEntries(s: AppState): DeviceEntry[] {
   return availableEntries(s).filter(
     (d) => !d.open && !held.has(d.id) && !s.devices.adding.includes(d.id)
   );
+}
+
+/**
+ * The addable unit a DORMANT (or disconnected) group's own capture
+ * provenance names, if it is on the bus — the one-click revive target
+ * (Raphaël 2026-07-28: "pourquoi ne pas le ressusciter directement ?").
+ * A group only knows its SLOT (docs are bench-portable, never device-
+ * bound), but its endpoint traces carry the model+serial of the device
+ * that PRODUCED their frames (issue #40's snapshot, persisted with the
+ * doc) — matched here against the current enumeration. Null when the
+ * group never captured, or its unit is not enumerable right now: the
+ * generic + device menu stays the fallback.
+ */
+export function reviveCandidateId(s: AppState, slot: number): string | null {
+  if (slot === 0) return null;
+  const addable = addableEntries(s);
+  if (addable.length === 0) return null;
+  for (const id of Object.values(hwTraceIds(slot))) {
+    const dev = s.traces.byId[id]?.capture?.device;
+    if (!dev) continue;
+    const match = addable.find(
+      (e) => e.serial === dev.serial && e.model === dev.model
+    );
+    if (match) return match.id;
+  }
+  return null;
 }
 
 /** A session's display name for group headers and the focus selector:

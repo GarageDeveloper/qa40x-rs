@@ -197,29 +197,39 @@ test("removing a device purges its slot and the toolbar select returns to the lo
   expect(await app.openSlots()).toEqual([0]);
 });
 
-test("a dormant group REVIVES when its unit is re-added — same slot, same rows, never a duplicate group (the D1 promise)", async ({
+test("a dormant group REVIVES in one click from its own header — same slot, same rows, never a duplicate group (the D1 promise)", async ({
   app,
 }) => {
   await addUnitB(app);
+  // Frames must land before the loss: the revive match rides the CAPTURE
+  // PROVENANCE the rows persist (model+serial, issue #40).
+  await app.groupRun(1);
+  await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(0);
   await app.unplugUnit(UNIT_B);
   await expect.poll(() => app.groupTitle(1)).toContain("not connected");
 
-  // The unit comes back on the bus (bus-wide replug clears the unplug)…
+  // The unit comes back on the bus (bus-wide replug clears the unplug).
+  // The dormant header's transport reads "Connect" and arms itself as
+  // soon as the provenance-matched unit is enumerable again.
   await app.setPresent(true);
+  await expect.poll(() => app.groupRunLabel(1)).toBe("Connect");
   await expect
-    .poll(() => app.addableOptions(), { timeout: 15_000 })
-    .toContain(UNIT_B);
-  // …and re-adding it lands on the SAME freed slot: the dormant group's
-  // rows come back to life instead of a second group appearing.
-  await app.addDeviceFromPanel(UNIT_B);
+    .poll(() => app.groupRunDisabled(1), { timeout: 15_000 })
+    .toBe(false);
+
+  // One click on the group itself — no + device trip: the unit reopens on
+  // the SAME slot and the group's rows come back to life.
+  await app.groupRun(1);
   await expect
     .poll(async () => (await app.sessions()).byKey["slot-1"]?.status)
     .toBe("connected");
+  expect((await app.sessions()).byKey["slot-1"].deviceId).toBe(UNIT_B);
   expect(await app.groupCount()).toBe(2);
   expect(await app.groupTitle(1)).not.toContain("not connected");
   const rows = await app.poolRows();
   expect(rows.map((r) => r.id)).toEqual([...SLOT0_IDS, ...SLOT1_IDS]);
   // And it runs again.
+  await expect.poll(() => app.groupRunLabel(1)).toBe("Run");
   await expect.poll(() => app.groupRunDisabled(1)).toBe(false);
   await app.groupRun(1);
   await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(0);

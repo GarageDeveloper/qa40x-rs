@@ -214,16 +214,25 @@ async fn connect_device(
 /// lot E4): the frontend mints the session with the id already adopted, so
 /// no command can ever fall through to the default runtime while waiting
 /// for an enumeration to land.
+/// `slot` (optional): the caller's preferred runtime slot — the Traces
+/// panel's revive-a-dormant-group gesture asks for the group's OWN slot so
+/// its slot-keyed trace rows come back to life. Occupied/invalid hints fall
+/// back to the normal first-free allocation; the answer's `slot` is the
+/// authority.
 #[tauri::command]
 async fn connect_additional_device(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     device_id: String,
+    slot: Option<u32>,
 ) -> Result<device::AddedDevice, String> {
     info!("Connect additional device command called ({device_id})");
     let devices = { state.lock().await.devices.clone() };
     let desc = devices
-        .open_additional(&device::DeviceId::from_wire(device_id))
+        .open_additional(
+            &device::DeviceId::from_wire(device_id),
+            slot.map(|s| s as usize),
+        )
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
 
@@ -1553,7 +1562,7 @@ mod command_arg_tests {
         devices.open_virtual().await.expect("demo unit opens on slot 0");
 
         let err = devices
-            .open_additional(&device::DeviceId::from_wire(""))
+            .open_additional(&device::DeviceId::from_wire(""), None)
             .await
             .expect_err("an empty id must never resolve to some open unit");
         assert!(matches!(err, device::DeviceError::NotFound));
@@ -1602,7 +1611,7 @@ mod command_arg_tests {
         {
             let devices = { app_state.lock().await.devices.clone() };
             devices
-                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
                 .await
                 .expect("the built-in second virtual unit opens on a fresh slot");
         }
@@ -1661,7 +1670,7 @@ mod command_arg_tests {
         {
             let devices = { app_state.lock().await.devices.clone() };
             devices
-                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
                 .await
                 .expect("the second unit opens on a fresh slot");
         }

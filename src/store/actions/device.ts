@@ -297,7 +297,13 @@ function runStoppedByDisconnect(r: RunState): RunState {
 export async function addDevice(
   store: Store<AppState>,
   ipc: Ipc,
-  deviceId: string
+  deviceId: string,
+  opts: {
+    /** Preferred slot — the revive-a-dormant-group gesture asks for the
+     * group's own slot so its rows come back to life. The ANSWER's slot
+     * is the authority (an occupied hint falls back backend-side). */
+    slot?: number;
+  } = {}
 ): Promise<void> {
   const s0 = store.get();
   if (s0.devices.adding.includes(deviceId)) return;
@@ -311,7 +317,10 @@ export async function addDevice(
     devices: { ...s.devices, adding: [...s.devices.adding, deviceId] },
   }));
   try {
-    const { device_id, slot } = await ipc.call("connect_additional_device", { deviceId });
+    const { device_id, slot } = await ipc.call("connect_additional_device", {
+      deviceId,
+      ...(opts.slot !== undefined ? { slot: opts.slot } : {}),
+    });
     const key = sessionKeyForSlot(slot);
     store.update("devices/mint-session", (s) => mintSession(s, slot, device_id));
     store.update("traces/reconcile-hw", reconcileHwTraces);

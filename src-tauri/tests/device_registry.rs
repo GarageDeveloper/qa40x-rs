@@ -164,7 +164,7 @@ async fn two_virtual_units_live_simultaneously_with_independent_state() {
         .find(|d| d.identity.is_virtual && d.identity.serial != DEMO_SERIAL)
         .expect("the second virtual unit enumerates")
         .id;
-    let added = reg.open_additional(&second_id).await.expect("second unit on slot 1");
+    let added = reg.open_additional(&second_id, None).await.expect("second unit on slot 1");
     assert_eq!(added.identity.serial, "0DE0_0002", "0x1D round-trip of the pinned serial");
 
     let rt0 = reg.runtime_for(Some(demo.id.as_str())).expect("slot 0 routes");

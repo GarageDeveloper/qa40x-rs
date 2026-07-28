@@ -66,9 +66,11 @@ export interface Commands {
   // rejected). `deviceId` is REQUIRED here, unlike every DeviceScoped
   // command: it names the unit to OPEN, and the answer carries the opened
   // id + slot so the caller mints its session with the id already adopted
-  // (no unroutable window).
+  // (no unroutable window). `slot` is the OPTIONAL preferred slot (the
+  // revive-a-dormant-group gesture asks for the group's own slot);
+  // occupied/invalid hints fall back — the answer's slot is the authority.
   connect_additional_device: {
-    args: { deviceId: string };
+    args: { deviceId: string; slot?: number };
     result: AddedDevice;
   };
   disconnect_device: { args: DeviceScoped; result: string };

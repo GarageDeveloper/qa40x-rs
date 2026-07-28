@@ -32,6 +32,12 @@ export interface Row {
   domains: Domain[];
   /** Some displayed spectrum tile shows this trace (fd budget member). */
   fdShown: boolean;
+  /** Hover provenance for bench artifacts (❄/transform — Raphaël
+   * 2026-07-28: "Input L #2 ❄2" alone doesn't say which device once it
+   * left the list): device identity + rate + instant from the capture
+   * snapshot (issue #40). Null for hw endpoints (their group header
+   * already names the device). */
+  tip: string | null;
 }
 
 export function createTraceRow(
@@ -136,6 +142,7 @@ export function updateTraceRow(node: HTMLElement, r: Row): void {
   ];
   if (dot.value !== r.color) dot.value = r.color;
   label.textContent = r.label;
+  label.title = r.tip ?? "";
 
   // Badges: TD/SW when frames carry those domains; FD lit when a
   // spectrum landed, dimmed-with-reason when the display budget

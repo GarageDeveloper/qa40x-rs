@@ -252,6 +252,10 @@ export class AppV2 {
     await this.drv.click(`[data-testid="group-run-${slot}"]`);
   }
 
+  async groupRunLabel(slot: number): Promise<string | null> {
+    return this.drv.text(`[data-testid="group-run-${slot}"]`);
+  }
+
   async groupRunDisabled(slot: number): Promise<boolean> {
     return this.drv.eval(
       (v: number) =>

@@ -20,6 +20,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { SessionKey } from "../../store/sessionkey";
 import { setDeviceAlias } from "../../store/actions/devices";
 import {
+  addDevice,
   removeDevice,
   setInputRange,
   setOutputRange,
@@ -27,6 +28,7 @@ import {
 } from "../../store/actions/device";
 import { startRun, stopRun } from "../../store/actions/stream";
 import { togglePanelCollapsed } from "../../store/actions/workspace";
+import { reviveCandidateId } from "../../store/selectors/devices";
 import { session } from "../../store/selectors/session";
 import { el } from "../../ui/dom";
 
@@ -57,6 +59,10 @@ export interface GroupVM {
    * `traces-group-<slot>` — Raphaël 2026-07-28: reclaim the space once a
    * device is set up). */
   collapsed: boolean;
+  /** For a group with no usable connection: the enumerated unit its
+   * capture provenance names (reviveCandidateId) — the transport button
+   * then reads "Connect" and revives the group in one click. */
+  reviveId: string | null;
   inputRanges: number[];
   outputRanges: number[];
   rates: number[];
@@ -135,14 +141,22 @@ export function createDeviceGroup(
     {
       "data-testid": `group-run-${slot}`,
       onclick: () => {
-        const sess = session(store.get(), key);
-        if (!sess) return;
-        if (sess.run.streaming) void stopRun(store, ipc, key);
-        // No playAllIfIdle: a group Run is a per-device capture start —
-        // only the toolbar transport arms the bench sources (they play on
-        // the FOCUSED device; flipping them from a monitor-mode group
-        // would rewrite user intent for another device's stream).
-        else void startRun(store, ipc, { sessionKey: key });
+        const s = store.get();
+        const sess = session(s, key);
+        if (sess && sess.device.status === "connected") {
+          if (sess.run.streaming) void stopRun(store, ipc, key);
+          // No playAllIfIdle: a group Run is a per-device capture start —
+          // only the toolbar transport arms the bench sources (they play
+          // on the FOCUSED device; flipping them from a monitor-mode group
+          // would rewrite user intent for another device's stream).
+          else void startRun(store, ipc, { sessionKey: key });
+          return;
+        }
+        // Revive gesture (dormant group, or a disconnected session): the
+        // capture provenance names the unit — re-open it on THIS slot so
+        // the group's rows come back to life.
+        const reviveId = reviveCandidateId(s, slot);
+        if (reviveId !== null) void addDevice(store, ipc, reviveId, { slot });
       },
     },
     "Run"
@@ -240,15 +254,28 @@ export function createDeviceGroup(
       alias.value = vm.alias;
     }
 
-    runBtn.textContent = vm.streaming ? "Stop" : "Run";
-    const runBlocked =
-      !vm.live || vm.status !== "connected" || !vm.routable || vm.stopping || vm.locked;
+    // Revive mode (a slot ≥ 1 group that is dormant, or whose session's
+    // device dropped): the transport button becomes "Connect" and reopens
+    // the provenance-matched unit on THIS slot — one click, no + device
+    // trip (Raphaël 2026-07-28). Same button, same place in the header: no
+    // layout shift. Never slot 0 — the default device connects from the
+    // top bar.
+    const reviveMode =
+      vm.slot !== 0 && (!vm.live || vm.status === "disconnected");
+    runBtn.textContent = reviveMode ? "Connect" : vm.streaming ? "Stop" : "Run";
+    const runBlocked = reviveMode
+      ? vm.reviveId === null
+      : vm.status !== "connected" || !vm.routable || vm.stopping || vm.locked;
     runBtn.toggleAttribute("disabled", runBlocked);
-    runBtn.title = !vm.live
-      ? "Not connected — re-add the device from the + device menu above (it reopens on this same slot and these rows come back to life)"
-      : vm.status !== "connected"
+    runBtn.title = reviveMode
+      ? vm.reviveId !== null
+        ? "Reconnect this device — it reopens on this same slot and these rows come back to life"
+        : "Not connected — its unit is not on the bus (or these rows never captured); re-add a device from the + device menu above"
+      : vm.status === "disconnected"
         ? "Not connected"
-        : !vm.routable
+        : vm.status === "connecting"
+          ? "Connecting…"
+          : !vm.routable
           ? "Device id not adopted yet — one enumeration away; retry in a moment"
           : vm.locked
             ? "A measurement program owns this device"
