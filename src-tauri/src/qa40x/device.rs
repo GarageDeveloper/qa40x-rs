@@ -818,7 +818,12 @@ impl QA40xDevice {
         crate::device::usb::any_unit_present().await
     }
 
-    /// Check if device is still physically connected by looking for it in USB device list
+    /// Check if device is still physically connected by looking for it in USB
+    /// device list. NOTE: "any QA40x on the bus", not per-unit — the liveness
+    /// monitor no longer uses this (issue #25 lot E: it probes the open
+    /// unit's own bus position via `device::usb::unit_present_at`, without
+    /// the device mutex); this remains for the virtual path and the
+    /// integration tests.
     pub async fn check_physical_connection(&self) -> bool {
         // If not logically connected, return false immediately
         if !self.is_connected().await {
@@ -830,9 +835,9 @@ impl QA40xDevice {
             return true;
         }
 
-        // Check if device is still present in USB device list. Deliberately
-        // the same "any QA40x on the bus" predicate as before lot B —
-        // serial-scoped presence is a lot-C change.
+        // Any QA40x on the bus — the pre-registry predicate, kept for this
+        // legacy entry point (per-unit presence lives in
+        // `device::usb::unit_present_at`, used by the liveness monitor).
         let device_found = crate::device::usb::any_unit_present().await;
 
         if !device_found {

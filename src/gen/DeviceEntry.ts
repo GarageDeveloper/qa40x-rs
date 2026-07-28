@@ -35,4 +35,11 @@ firmware_version: number | null, is_virtual: boolean, capabilities: DeviceCapabi
 /**
  * Whether this unit is currently open on a runtime.
  */
-open: boolean, };
+open: boolean, 
+/**
+ * The registry runtime slot this unit is open on (issue #25 lot E) —
+ * `None` when not open. Slot indices are stable for a whole session
+ * (the vector never shrinks), so slot-keyed trace ids survive a
+ * disconnect/reconnect of the same slot; slot 0 is the default device.
+ */
+slot: number | null, };

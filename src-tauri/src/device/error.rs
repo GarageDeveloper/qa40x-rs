@@ -17,6 +17,17 @@ pub enum DeviceError {
     #[error("Unknown device: {0}")]
     UnknownDevice(String),
 
+    /// `open_additional` named a unit that is already open on some runtime
+    /// (issue #25 lot E). Distinct from a supersede: adding a device must
+    /// never silently steal an open unit's claim onto a second runtime.
+    #[error("Device already open: {0}")]
+    AlreadyOpen(String),
+
+    /// Every device slot is occupied (issue #25 lot E,
+    /// [`super::registry::MAX_DEVICES`]).
+    #[error("All device slots are in use")]
+    NoFreeSlot,
+
     /// A source failed to enumerate or open (bus scan error, simulator
     /// already attached, ...).
     #[error("{0}")]
@@ -47,6 +58,9 @@ impl From<DeviceError> for QA40xError {
             DeviceError::NotFound => QA40xError::DeviceNotFound,
             DeviceError::UnknownDevice(id) => {
                 QA40xError::DeviceError(format!("Unknown device: {id}"))
+            }
+            e @ (DeviceError::AlreadyOpen(_) | DeviceError::NoFreeSlot) => {
+                QA40xError::DeviceError(e.to_string())
             }
             DeviceError::Source(s) => QA40xError::DeviceError(s),
             DeviceError::Device(e) => e,

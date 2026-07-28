@@ -35,6 +35,11 @@ pub struct DeviceEntry {
     pub capabilities: DeviceCapabilities,
     /// Whether this unit is currently open on a runtime.
     pub open: bool,
+    /// The registry runtime slot this unit is open on (issue #25 lot E) —
+    /// `None` when not open. Slot indices are stable for a whole session
+    /// (the vector never shrinks), so slot-keyed trace ids survive a
+    /// disconnect/reconnect of the same slot; slot 0 is the default device.
+    pub slot: Option<u32>,
 }
 
 impl DeviceEntry {
@@ -47,6 +52,7 @@ impl DeviceEntry {
         source_kind: SourceKind,
         source_label: String,
         open: bool,
+        slot: Option<u32>,
     ) -> Self {
         Self {
             id: desc.id.as_str().to_string(),
@@ -61,6 +67,7 @@ impl DeviceEntry {
             is_virtual: desc.identity.is_virtual,
             capabilities: desc.capabilities.clone(),
             open,
+            slot,
         }
     }
 }
@@ -108,8 +115,13 @@ mod tests {
 
     #[test]
     fn the_entry_carries_the_display_model_name_not_the_enum_variant() {
-        let entry =
-            DeviceEntry::from_descriptor(&descriptor(Model::Qa402), SourceKind::Usb, "USB".into(), false);
+        let entry = DeviceEntry::from_descriptor(
+            &descriptor(Model::Qa402),
+            SourceKind::Usb,
+            "USB".into(),
+            false,
+            None,
+        );
         // serde would render the Model enum as "Qa402" — the DTO must ship
         // what the UI prints.
         assert_eq!(entry.model, "QA402");
@@ -117,16 +129,23 @@ mod tests {
         assert_eq!(entry.source_id, "usb");
         assert_eq!(entry.source_kind, SourceKind::Usb);
         assert!(!entry.open);
+        assert_eq!(entry.slot, None, "not open ⇒ no slot");
         assert_eq!(entry.firmware_version, None);
     }
 
     #[test]
     fn the_entry_forwards_capabilities_verbatim() {
-        let entry =
-            DeviceEntry::from_descriptor(&descriptor(Model::Qa403), SourceKind::Usb, "USB".into(), true);
+        let entry = DeviceEntry::from_descriptor(
+            &descriptor(Model::Qa403),
+            SourceKind::Usb,
+            "USB".into(),
+            true,
+            Some(1),
+        );
         assert_eq!(entry.capabilities.sample_rates_hz, vec![48_000, 96_000, 192_000, 384_000]);
         assert_eq!(entry.capabilities.input_ranges_dbv, vec![0, 6, 12, 18, 24, 30, 36, 42]);
         assert_eq!(entry.capabilities.output_ranges_dbv, vec![-12, -2, 8, 18]);
         assert!(entry.open);
+        assert_eq!(entry.slot, Some(1));
     }
 }

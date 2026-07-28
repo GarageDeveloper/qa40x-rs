@@ -21,10 +21,16 @@ async fn enumeration_lists_the_virtual_unit_with_full_capabilities() {
     let reg = DeviceRegistry::new();
 
     // A dev bench may have real hardware plugged in — assert on the virtual
-    // subset, which must be exactly the one pinned demo unit.
+    // subset: the pinned demo unit FIRST (open_virtual picks the first free
+    // one, so the demo path lands on it), plus lot E's second unit.
     let descs = reg.enumerate().await;
     let virt: Vec<_> = descs.iter().filter(|d| d.identity.is_virtual).collect();
-    assert_eq!(virt.len(), 1, "exactly one built-in virtual unit in lot B");
+    assert_eq!(virt.len(), 2, "the built-in virtual units: demo + lot E's second");
+    assert_eq!(
+        virt[1].id.as_str(),
+        "virtual/0DE0_0002",
+        "the second unit's serial is pinned and distinct"
+    );
     let d = virt[0];
     assert_eq!(d.id.as_str(), format!("virtual/{DEMO_SERIAL}"));
     assert_eq!(d.id.source(), "virtual");
@@ -135,6 +141,60 @@ async fn every_analyzer_trait_method_runs_on_a_live_device_without_recursing() {
     assert!(!analyzer.is_connected().await);
     drop(dev);
     reg.note_closed();
+}
+
+/// Issue #25 lot E, end to end over the built-in virtual source: TWO devices
+/// live at once without any hardware — the demo unit on slot 0 plus the
+/// second virtual unit added on slot 1 — each with its own device object and
+/// register state; closing one leaves the other untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_virtual_units_live_simultaneously_with_independent_state() {
+    use tauri_app_lib::qa40x::SampleRate;
+
+    let _sim = SIM_LOCK.lock().await;
+    let reg = DeviceRegistry::new();
+
+    // Demo path first (slot 0), then add the second unit (slot 1).
+    let demo = reg.open_virtual().await.expect("demo on slot 0");
+    assert_eq!(demo.identity.serial, DEMO_SERIAL);
+    let second_id = reg
+        .enumerate()
+        .await
+        .into_iter()
+        .find(|d| d.identity.is_virtual && d.identity.serial != DEMO_SERIAL)
+        .expect("the second virtual unit enumerates")
+        .id;
+    let added = reg.open_additional(&second_id).await.expect("second unit on slot 1");
+    assert_eq!(added.identity.serial, "0DE0_0002", "0x1D round-trip of the pinned serial");
+
+    let rt0 = reg.runtime_for(Some(demo.id.as_str())).expect("slot 0 routes");
+    let rt1 = reg.runtime_for(Some(added.id.as_str())).expect("slot 1 routes");
+
+    // Both genuinely connected, on DISTINCT device objects.
+    assert!(rt0.handle().lock().await.is_connected().await);
+    assert!(rt1.handle().lock().await.is_connected().await);
+    assert!(!std::sync::Arc::ptr_eq(&rt0.handle(), &rt1.handle()));
+
+    // Independent register state: a rate set on one never leaks to the other.
+    rt1.handle()
+        .lock()
+        .await
+        .set_sample_rate(SampleRate::Rate192kHz)
+        .await
+        .expect("set rate on slot 1");
+    let rate0 = rt0.handle().lock().await.get_config().await.sample_rate;
+    let rate1 = rt1.handle().lock().await.get_config().await.sample_rate;
+    assert_eq!(rate1, SampleRate::Rate192kHz);
+    assert_ne!(rate0, SampleRate::Rate192kHz, "slot 0 must keep its own rate");
+
+    // Close slot 1 only: the demo session survives untouched.
+    reg.close_runtime(&rt1).await.expect("close slot 1");
+    assert!(!rt1.handle().lock().await.is_connected().await);
+    assert!(rt0.handle().lock().await.is_connected().await, "slot 0 survives slot 1's close");
+    assert_eq!(reg.current().expect("slot 0 still open").id, demo.id);
+
+    reg.close().await.expect("close slot 0");
+    assert!(reg.slot_of(demo.id.as_str()).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,17 +1,24 @@
-//! The [`DeviceRegistry`]: owns the session's device handle, unions its
-//! sources' enumerations, and opens units onto the handle.
+//! The [`DeviceRegistry`]: owns the session's device runtimes, unions its
+//! sources' enumerations, and opens units onto runtime slots.
 //!
-//! Lot B invariants:
-//! - the handle is created ONCE at construction and never replaced — every
-//!   consumer (REST, scripting, stream loop, measurement sessions) holds the
-//!   same `Arc`, so swapping it would silently detach them;
-//! - still exactly one open device (`current` is an `Option`, not a map —
-//!   lot E changes that);
+//! Lot B/E invariants:
+//! - slot 0 is THE default runtime, created ONCE at construction and never
+//!   replaced — every default-device consumer (REST, scripting, stream loop,
+//!   measurement sessions) holds `Arc`s out of it, so swapping it would
+//!   silently detach them. Lot E extends the rule to every slot: the slot
+//!   vector GROWS and never shrinks within a session, and a slot's runtime
+//!   is never replaced — slot indices stay stable so slot-keyed trace ids
+//!   (lot E3) survive a disconnect/reconnect of the same slot;
 //! - `current()` is bookkeeping, not authority: the device's own state
 //!   (`is_connected`) remains the truth, and unplug/bootloader paths call
 //!   [`DeviceRegistry::note_closed`] so the two never disagree for long.
+//!
+//! Lock order: registry `open_gate` → runtime `lifecycle_gate` → device
+//! mutex. `close_runtime` takes only the runtime gate, so a close never
+//! cycles with an open.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use log::warn;
 use tokio::sync::Mutex;
@@ -26,6 +33,11 @@ use super::usb::UsbDeviceSource;
 use super::virt::VirtualDeviceSource;
 use super::wire::{DeviceEntry, DeviceList};
 
+/// Ceiling on simultaneously allocated runtime slots (issue #25 lot E) — a
+/// backstop far above any real bench, so a UI bug can't leak runtimes
+/// unbounded.
+pub const MAX_DEVICES: usize = 8;
+
 /// The unit currently open on the handle.
 #[derive(Clone, Debug)]
 pub struct OpenDevice {
@@ -33,13 +45,51 @@ pub struct OpenDevice {
     pub descriptor: DeviceDescriptor,
 }
 
+/// The exact bus position of a USB transport, if any — the scan-stable unit
+/// identity (`usb::matches_port` rationale).
+fn usb_port(t: &Transport) -> Option<(&str, &[u8])> {
+    match t {
+        Transport::Usb { bus_id, port_chain, .. } => Some((bus_id.as_str(), port_chain.as_slice())),
+        Transport::Virtual => None,
+    }
+}
+
+/// A unit key's serial part — everything before the first collision
+/// separator (`usb::keys_for` builds `<serial>@<path>` keys when serial
+/// twins collide; a plain serial has no `@`).
+fn base_unit_key(id: &DeviceId) -> &str {
+    id.unit_key().split('@').next().unwrap_or("")
+}
+
+/// Whether `candidate` is the OPEN unit under a re-keyed identity (lot-D
+/// review #2): same source, same exact bus position, and the SAME serial
+/// base — the shape `usb::keys_for` produces when a serial twin appears
+/// (`S` → `S@path-…`) or disappears (`S@path-…` → `S`). A DIFFERENT unit
+/// swapped onto the same physical port (the everyday one-cable bench swap)
+/// carries its own serial and must NEVER match — substituting it would hide
+/// the newly plugged unit behind the stale open descriptor (adversarial
+/// review, MUST-FIX #1).
+fn rekeyed_twin_of(open: &DeviceDescriptor, candidate: &DeviceDescriptor) -> bool {
+    candidate.id.source() == open.id.source()
+        && usb_port(&candidate.transport).is_some()
+        && usb_port(&candidate.transport) == usb_port(&open.transport)
+        && base_unit_key(&candidate.id) == base_unit_key(&open.id)
+}
+
 struct RegistryInner {
     sources: Vec<Arc<dyn DeviceSource>>,
-    /// Lot C: exactly one runtime — the default device slot. Lot E: a map
-    /// keyed by `DeviceId` plus this one as the default slot. The open/close
-    /// bookkeeping (current unit, generation, serialization gate) lives on
-    /// the runtime itself.
-    runtime: DeviceRuntime,
+    /// The runtime slots (issue #25 lot E). Slot 0 exists from construction
+    /// and is the default device; the vector grows on demand (up to
+    /// [`MAX_DEVICES`]) and NEVER shrinks — see the module doc. std Mutex
+    /// held only for reads/pushes, never across an await.
+    runtimes: StdMutex<Vec<DeviceRuntime>>,
+    /// Serializes slot SELECTION + open across the whole registry: an open
+    /// holds it for its WHOLE duration, so two concurrent opens can neither
+    /// interleave on one runtime nor race each other onto the same free
+    /// slot. Deliberate cost (documented, accepted): a wedged USB open
+    /// blocks adding another device for its duration — exactly the
+    /// serialization the single lifecycle gate imposed before lot E.
+    open_gate: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -61,46 +111,65 @@ impl DeviceRegistry {
         Self {
             inner: Arc::new(RegistryInner {
                 sources,
-                runtime: DeviceRuntime::new(),
+                runtimes: StdMutex::new(vec![DeviceRuntime::new()]),
+                open_gate: Mutex::new(()),
             }),
         }
     }
 
-    /// The default device's runtime — the same runtime instance on every
-    /// call (the never-replaced invariant, now covering the whole runtime).
+    /// The default device's runtime (slot 0) — the same runtime instance on
+    /// every call (the never-replaced invariant, covering the whole runtime).
     pub fn default_runtime(&self) -> DeviceRuntime {
-        self.inner.runtime.clone()
+        self.inner.runtimes.lock().expect("runtimes lock")[0].clone()
     }
 
-    /// Every runtime the registry owns (lot C: exactly one). The shutdown
-    /// path iterates this so lot E's N-runtime map is a routing change.
+    /// Every runtime slot the registry has allocated, in slot order. The
+    /// shutdown path tears all of them down concurrently.
     pub fn runtimes(&self) -> Vec<DeviceRuntime> {
-        vec![self.inner.runtime.clone()]
+        self.inner.runtimes.lock().expect("runtimes lock").clone()
+    }
+
+    /// The slot index of the runtime with `id` open, if any.
+    pub fn slot_of(&self, id: &str) -> Option<usize> {
+        self.inner
+            .runtimes
+            .lock()
+            .expect("runtimes lock")
+            .iter()
+            .position(|rt| rt.device_id().is_some_and(|open| open.as_str() == id))
     }
 
     /// Resolve a command's optional `device_id` to its runtime. `None` ⇒ the
     /// default device (the REST/scripting/e2e path, unchanged). `Some(id)`
-    /// that is not currently open ⇒ [`DeviceError::UnknownDevice`], never a
-    /// silent fallback: a caller naming a device that isn't there must fail.
-    /// Cheap std-lock read — never queues behind a capture.
+    /// that is not currently open on ANY slot ⇒
+    /// [`DeviceError::UnknownDevice`], never a silent fallback: a caller
+    /// naming a device that isn't there must fail. Cheap std-lock read —
+    /// never queues behind a capture.
     pub fn runtime_for(&self, device_id: Option<&str>) -> Result<DeviceRuntime, DeviceError> {
         match device_id {
             None => Ok(self.default_runtime()),
-            Some(id) => match self.inner.runtime.device_id() {
-                Some(open) if open.as_str() == id => Ok(self.default_runtime()),
-                _ => Err(DeviceError::UnknownDevice(id.to_string())),
-            },
+            Some(id) => self
+                .inner
+                .runtimes
+                .lock()
+                .expect("runtimes lock")
+                .iter()
+                .find(|rt| rt.device_id().is_some_and(|open| open.as_str() == id))
+                .cloned()
+                .ok_or_else(|| DeviceError::UnknownDevice(id.to_string())),
         }
     }
 
-    /// The one device object of the session — the same `Arc` on every call.
+    /// The DEFAULT device object of the session — the same `Arc` on every
+    /// call (slot 0's handle).
     pub fn handle(&self) -> DeviceHandle {
-        self.inner.runtime.handle()
+        self.default_runtime().handle()
     }
 
-    /// The device's telemetry cache cell (readable without the device mutex).
+    /// The default device's telemetry cache cell (readable without the
+    /// device mutex).
     pub fn telemetry_cell(&self) -> Arc<Mutex<Option<Telemetry>>> {
-        self.inner.runtime.telemetry_cell()
+        self.default_runtime().telemetry_cell()
     }
 
     /// Union of all sources' enumerations, in source registration order,
@@ -130,66 +199,104 @@ impl DeviceRegistry {
     }
 
     /// The frontend device bar's answer (issue #25 lot D): the enumeration
-    /// union with the OPEN unit's entry substituted by its ENRICHED
+    /// union with each OPEN unit's entry substituted by its ENRICHED
     /// descriptor (firmware version + calibration source, knowable only from
-    /// an open — [`DeviceSource::open`] returns it and the runtime keeps it).
-    /// An open unit that stopped enumerating (unplugged mid-teardown, or its
-    /// whole source erroring) is appended rather than dropped, in open order:
-    /// the bar must keep showing what the app is still connected to.
+    /// an open — [`DeviceSource::open`] returns it and the runtime keeps it),
+    /// carrying its runtime slot. An open unit that stopped enumerating
+    /// (unplugged mid-teardown, or its whole source erroring) is appended
+    /// rather than dropped, in slot order: the bar must keep showing what
+    /// the app is still connected to.
     ///
-    /// Substitution matches on the exact wire id. Known caveat (lot-D
-    /// review #2, deliberate): when a serial-twin appears, `usb::keys_for`
+    /// Substitution matches on the exact wire id first, then — for an open
+    /// unit whose id no longer enumerates — on the USB bus position (lot E,
+    /// closing lot-D review #2): when a serial-twin appears, `usb::keys_for`
     /// promotes both twins' keys to path-suffixed ids, so the open unit's
-    /// OLD id no longer enumerates and it is appended alongside its own
-    /// re-keyed entry — the bar briefly shows a ghost until reconnect.
-    /// Matching by serial instead would mis-substitute exactly in the twin
-    /// case that causes the re-key; revisit with lot E's per-unit runtimes.
+    /// OLD id vanishes from the enumeration while the unit itself still sits
+    /// at its port. The port-matched enumeration entry is REPLACED by the
+    /// enriched open descriptor under its stable open id (the id every
+    /// routed command still resolves), so the bar shows no ghost pair; the
+    /// twin at the other port lists normally under its suffixed id.
     pub async fn list(&self) -> DeviceList {
-        // Open units first (lot C: at most one), keyed for substitution.
-        let mut open_descs: std::collections::HashMap<String, DeviceDescriptor> =
+        // Open units in slot order, keyed for substitution.
+        let mut open_descs: std::collections::HashMap<String, (DeviceDescriptor, u32)> =
             std::collections::HashMap::new();
         let mut open_ids = Vec::new();
-        for rt in self.runtimes() {
+        for (slot, rt) in self.runtimes().iter().enumerate() {
             if let Some(cur) = rt.current() {
                 open_ids.push(cur.id.as_str().to_string());
-                open_descs.insert(cur.id.as_str().to_string(), cur.descriptor);
+                open_descs.insert(cur.id.as_str().to_string(), (cur.descriptor, slot as u32));
+            }
+        }
+
+        // One enumerate per source, gathered up front: the port-based
+        // substitution below needs to know whether an open id appears
+        // ANYWHERE in the union before any entry is emitted.
+        let mut per_source: Vec<(SourceKind, String, Vec<DeviceDescriptor>)> = Vec::new();
+        for source in &self.inner.sources {
+            match source.enumerate().await {
+                Ok(descs) => per_source.push((source.kind(), source.label(), descs)),
+                Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
+            }
+        }
+        let enumerated: std::collections::HashSet<&str> = per_source
+            .iter()
+            .flat_map(|(_, _, descs)| descs.iter().map(|d| d.id.as_str()))
+            .collect();
+
+        // Open ids absent from the union, matched to their RE-KEYED twin
+        // entry: same bus position AND same serial base (`rekeyed_twin_of`).
+        // Position alone is not identity — a different unit swapped onto the
+        // same port must list as itself, never be hidden behind the stale
+        // open descriptor.
+        let mut port_sub: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (open_id, (desc, _)) in &open_descs {
+            if enumerated.contains(open_id.as_str()) {
+                continue;
+            }
+            if let Some(twin) = per_source
+                .iter()
+                .flat_map(|(_, _, descs)| descs.iter())
+                .find(|d| rekeyed_twin_of(desc, d))
+            {
+                port_sub.insert(twin.id.as_str().to_string(), open_id.clone());
             }
         }
 
         let mut seen = std::collections::HashSet::new();
         let mut devices = Vec::new();
-        for source in &self.inner.sources {
-            match source.enumerate().await {
-                Ok(descs) => {
-                    for d in descs {
-                        if !seen.insert(d.id.clone()) {
-                            // Same never-silent rule as `enumerate()`.
-                            warn!("device id {} enumerated more than once — keeping the first", d.id);
-                            continue;
-                        }
-                        let (desc, open) = match open_descs.remove(d.id.as_str()) {
-                            Some(enriched) => (enriched, true),
-                            None => (d, false),
-                        };
-                        devices.push(DeviceEntry::from_descriptor(
-                            &desc,
-                            source.kind(),
-                            source.label(),
-                            open,
-                        ));
-                    }
+        for (kind, label, descs) in per_source {
+            for d in descs {
+                if !seen.insert(d.id.clone()) {
+                    // Same never-silent rule as `enumerate()`.
+                    warn!("device id {} enumerated more than once — keeping the first", d.id);
+                    continue;
                 }
-                Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
+                let hit = match open_descs.remove(d.id.as_str()) {
+                    Some(hit) => Some(hit),
+                    None => port_sub
+                        .get(d.id.as_str())
+                        .and_then(|open_id| open_descs.remove(open_id)),
+                };
+                let (desc, open, slot) = match hit {
+                    Some((enriched, slot)) => {
+                        // Defensive: the enriched id replaces the enumerated
+                        // one — never list both.
+                        seen.insert(enriched.id.clone());
+                        (enriched, true, Some(slot))
+                    }
+                    None => (d, false, None),
+                };
+                devices.push(DeviceEntry::from_descriptor(&desc, kind, label.clone(), open, slot));
             }
         }
 
-        // Whatever is open but no longer enumerable stays listed — iterated
-        // in OPEN order (not HashMap order) so the appended tail is stable
+        // Whatever is open but no longer enumerable (nor port-matched) stays
+        // listed — iterated in SLOT order so the appended tail is stable
         // across refreshes and the frontend's option list never jitters.
         for id in &open_ids {
-            let Some(desc) = open_descs.remove(id) else { continue };
+            let Some((desc, slot)) = open_descs.remove(id) else { continue };
             if !seen.insert(desc.id.clone()) {
-                continue; // already listed (defensive — lot E's N runtimes)
+                continue; // already listed (defensive)
             }
             let (kind, label) = self
                 .inner
@@ -207,27 +314,79 @@ impl DeviceRegistry {
                     };
                     (kind, desc.source.as_str().to_string())
                 });
-            devices.push(DeviceEntry::from_descriptor(&desc, kind, label, true));
+            devices.push(DeviceEntry::from_descriptor(&desc, kind, label, true, Some(slot)));
         }
 
         DeviceList { devices, open: open_ids }
     }
 
-    /// Open the unit `id` onto the session handle. A second open supersedes
-    /// the first (the source releases the handle's prior claim first —
-    /// exactly what the pre-registry `connect()` did on reconnect). Held
-    /// under the runtime's lifecycle gate for its WHOLE duration, so
-    /// concurrent opens serialize and a concurrent `close()` waits this one
-    /// out (lot-B review finding #1).
+    /// Open the unit `id` onto the DEFAULT slot (slot 0). A second open
+    /// supersedes the first (the source releases the handle's prior claim
+    /// first — exactly what the pre-registry `connect()` did on reconnect);
+    /// re-opening the unit already on slot 0 remains the legacy reconnect.
+    /// A unit open on ANOTHER slot is rejected (`AlreadyOpen`) — this was
+    /// the one open path left able to steal an open unit's claim, and its
+    /// failure mode was worse: `open_locked` clears slot 0's bookkeeping
+    /// before the source engages, so a doomed steal would ALSO destroy
+    /// whatever slot 0 was running (adversarial review, MUST-FIX #2).
+    /// Held under the registry's open gate + the runtime's lifecycle gate
+    /// for its WHOLE duration, so concurrent opens serialize and a
+    /// concurrent `close()` waits this one out (lot-B review finding #1).
     pub async fn open(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
-        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
-        self.open_locked(id).await
+        let _open_gate = self.inner.open_gate.lock().await;
+        let rt = self.default_runtime();
+        if self.open_elsewhere(&rt).contains(id.as_str()) {
+            return Err(DeviceError::AlreadyOpen(id.as_str().to_string()));
+        }
+        let _gate = rt.lifecycle_gate().lock().await;
+        self.open_locked(&rt, id).await
     }
 
-    /// The open body, ASSUMING the lifecycle gate is already held by the
-    /// caller. `open_first_physical`/`open_virtual` call this — calling the
-    /// public `open()` from them would re-enter the gate and deadlock.
-    async fn open_locked(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
+    /// Open the unit `id` onto a FREE slot, as an ADDITIONAL device (issue
+    /// #25 lot E — the traces panel's add-device path). Never a supersede:
+    /// a unit already open on any slot is rejected with
+    /// [`DeviceError::AlreadyOpen`] — silently re-opening it onto a second
+    /// runtime would steal its claim out from under the first (planner
+    /// finding F2). The first free slot is reused (slot indices stay
+    /// stable); a fresh runtime is allocated only when every slot is
+    /// occupied, up to [`MAX_DEVICES`].
+    pub async fn open_additional(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
+        let _open_gate = self.inner.open_gate.lock().await;
+        if self.slot_of(id.as_str()).is_some() {
+            return Err(DeviceError::AlreadyOpen(id.as_str().to_string()));
+        }
+        let rt = self.free_or_new_runtime()?;
+        let _gate = rt.lifecycle_gate().lock().await;
+        self.open_locked(&rt, id).await
+    }
+
+    /// The first NON-DEFAULT runtime with nothing open, else a freshly
+    /// allocated slot. Additional devices never occupy slot 0 (adversarial
+    /// review #5): the default slot belongs to the connect/demo flows —
+    /// REST, scripting and every unrouted command drive it, and
+    /// `open_first_physical`/`open_virtual` may supersede it, so an added
+    /// unit landing there would silently become the default AND be silently
+    /// supersedable by the auto-connect tick. Only ever called under the
+    /// open gate, so two concurrent opens cannot race onto the same free
+    /// slot.
+    fn free_or_new_runtime(&self) -> Result<DeviceRuntime, DeviceError> {
+        let mut slots = self.inner.runtimes.lock().expect("runtimes lock");
+        if let Some(rt) = slots.iter().skip(1).find(|rt| rt.current().is_none()) {
+            return Ok(rt.clone());
+        }
+        if slots.len() >= MAX_DEVICES {
+            return Err(DeviceError::NoFreeSlot);
+        }
+        let rt = DeviceRuntime::new();
+        slots.push(rt.clone());
+        Ok(rt)
+    }
+
+    /// The open body, ASSUMING the open gate and `rt`'s lifecycle gate are
+    /// already held by the caller. `open_first_physical`/`open_virtual` call
+    /// this — calling the public `open()` from them would re-enter the gates
+    /// and deadlock.
+    async fn open_locked(&self, rt: &DeviceRuntime, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
         let source = self
             .inner
             .sources
@@ -240,23 +399,42 @@ impl DeviceRegistry {
         // leaves `current` reporting a device that was already torn down.
         // An unknown SOURCE errored out above without touching the device,
         // so whatever was open before is honestly still open.
-        self.inner.runtime.note_closed();
-        let desc = source.open(id, &self.inner.runtime.handle()).await?;
-        self.inner.runtime.note_open(id.clone(), desc.clone());
+        rt.note_closed();
+        let desc = source.open(id, &rt.handle()).await?;
+        rt.note_open(id.clone(), desc.clone());
         Ok(desc)
     }
 
-    /// Open the first physical unit any source offers — the `connect_device`
-    /// behavior (auto-connect to "the" QA40x). When nothing physical is on
-    /// the bus, the handle's prior claim is still released, exactly like the
-    /// legacy `connect()` which released before scanning. A bus-scan FAILURE
-    /// is not "not found": the first scan error is returned so the user sees
-    /// the actual diagnostic (permission-denied backend, broken hub), as the
+    /// Every id currently open on a runtime OTHER than `target` — the units
+    /// an open on `target` must never steal (planner F2).
+    fn open_elsewhere(&self, target: &DeviceRuntime) -> std::collections::HashSet<String> {
+        self.inner
+            .runtimes
+            .lock()
+            .expect("runtimes lock")
+            .iter()
+            .filter(|rt| !rt.same_as(target))
+            .filter_map(|rt| rt.device_id().map(|id| id.as_str().to_string()))
+            .collect()
+    }
+
+    /// Open the first physical unit any source offers onto the DEFAULT slot
+    /// — the `connect_device` behavior (auto-connect to "the" QA40x). Units
+    /// open on ANOTHER slot are skipped (lot E: re-opening one would steal
+    /// its claim); re-opening the unit already on slot 0 itself remains the
+    /// legacy reconnect semantics. When nothing physical is available, the
+    /// handle's prior claim is still released, exactly like the legacy
+    /// `connect()` which released before scanning. A bus-scan FAILURE is not
+    /// "not found": the first scan error is returned so the user sees the
+    /// actual diagnostic (permission-denied backend, broken hub), as the
     /// legacy `connect()` surfaced it.
     pub async fn open_first_physical(&self) -> Result<DeviceDescriptor, DeviceError> {
         // One gate acquisition for the whole scan+open (open_locked, NOT the
-        // public open(), which would re-enter the gate and deadlock).
-        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
+        // public open(), which would re-enter the gates and deadlock).
+        let _open_gate = self.inner.open_gate.lock().await;
+        let rt = self.default_runtime();
+        let _gate = rt.lifecycle_gate().lock().await;
+        let skip = self.open_elsewhere(&rt);
         let mut scan_err: Option<DeviceError> = None;
         for source in &self.inner.sources {
             if !source.is_physical() {
@@ -264,8 +442,8 @@ impl DeviceRegistry {
             }
             match source.enumerate().await {
                 Ok(descs) => {
-                    if let Some(d) = descs.first() {
-                        return self.open_locked(&d.id).await;
+                    if let Some(d) = descs.iter().find(|d| !skip.contains(d.id.as_str())) {
+                        return self.open_locked(&rt, &d.id).await;
                     }
                 }
                 Err(e) => {
@@ -274,24 +452,30 @@ impl DeviceRegistry {
                 }
             }
         }
-        self.inner.runtime.handle().lock().await.release_claim().await;
-        self.inner.runtime.note_closed();
+        rt.handle().lock().await.release_claim().await;
+        rt.note_closed();
         Err(scan_err.unwrap_or(DeviceError::NotFound))
     }
 
-    /// Open the first built-in virtual unit — the `connect_virtual_device`
-    /// (demo mode) behavior.
+    /// Open the first available built-in virtual unit onto the DEFAULT slot
+    /// — the `connect_virtual_device` (demo mode) behavior. Same
+    /// skip-open-elsewhere rule as [`Self::open_first_physical`]: a virtual
+    /// unit added on another slot must not be stolen by the Demo button —
+    /// the next free virtual unit is used instead.
     pub async fn open_virtual(&self) -> Result<DeviceDescriptor, DeviceError> {
         // Same single gate acquisition as open_first_physical.
-        let _gate = self.inner.runtime.lifecycle_gate().lock().await;
+        let _open_gate = self.inner.open_gate.lock().await;
+        let rt = self.default_runtime();
+        let _gate = rt.lifecycle_gate().lock().await;
+        let skip = self.open_elsewhere(&rt);
         for source in &self.inner.sources {
             if source.kind() != SourceKind::Virtual {
                 continue;
             }
             match source.enumerate().await {
                 Ok(descs) => {
-                    if let Some(d) = descs.first() {
-                        return self.open_locked(&d.id).await;
+                    if let Some(d) = descs.iter().find(|d| !skip.contains(d.id.as_str())) {
+                        return self.open_locked(&rt, &d.id).await;
                     }
                 }
                 Err(e) => warn!("device source {} failed to enumerate: {}", source.id(), e),
@@ -323,27 +507,62 @@ impl DeviceRegistry {
         res
     }
 
-    /// The unit currently open, per the default runtime's bookkeeping.
+    /// The unit currently open, per the DEFAULT runtime's bookkeeping.
     pub fn current(&self) -> Option<OpenDevice> {
-        self.inner.runtime.current()
+        self.default_runtime().current()
     }
 
-    /// Record that the device closed OUTSIDE `close()` — unplug detected by
-    /// the USB monitor, bootloader detach during a flash. Generation-blind
-    /// (kept for the lot-B call sites); the generation-keyed form is
-    /// [`DeviceRuntime::note_closed_at`].
+    /// Record that the DEFAULT device closed OUTSIDE `close()` — unplug
+    /// detected by the USB monitor, bootloader detach during a flash.
+    /// Generation-blind (kept for the lot-B call sites); the
+    /// generation-keyed form is [`DeviceRuntime::note_closed_at`].
     pub fn note_closed(&self) {
-        self.inner.runtime.note_closed();
+        self.default_runtime().note_closed();
+    }
+
+    /// Tear down every allocated runtime CONCURRENTLY, each under its own
+    /// `budget` (issue #25 lot E): one wedged device must never starve its
+    /// siblings of their teardown window. Best-effort, like the runtimes'
+    /// own [`DeviceRuntime::shutdown`] — the process is leaving.
+    pub async fn shutdown_all(&self, budget: std::time::Duration) {
+        let tasks: Vec<_> = self
+            .runtimes()
+            .into_iter()
+            .enumerate()
+            .map(|(slot, rt)| {
+                tokio::spawn(async move {
+                    if tokio::time::timeout(budget, rt.shutdown()).await.is_err() {
+                        log::warn!("exit: device slot {slot}'s safe teardown exceeded its budget");
+                    }
+                })
+            })
+            .collect();
+        for t in tasks {
+            let _ = t.await;
+        }
     }
 
     /// Whether REAL hardware is present on any physical source — never
     /// satisfied by the virtual source (the demo hand-over predicate).
     pub async fn physical_present(&self) -> bool {
+        // Units already open on some slot don't count (lot E, adversarial
+        // review #8): the demo hand-over ACTION (`open_first_physical`)
+        // skips them, so the hand-over PREDICATE must too — otherwise a
+        // bench whose only QA40x is added on another slot would tear the
+        // demo down and then fail to connect anything.
+        let open: std::collections::HashSet<String> = self
+            .runtimes()
+            .iter()
+            .filter_map(|rt| rt.device_id().map(|id| id.as_str().to_string()))
+            .collect();
         for source in &self.inner.sources {
             if !source.is_physical() {
                 continue;
             }
-            if matches!(source.enumerate().await, Ok(descs) if !descs.is_empty()) {
+            if matches!(
+                source.enumerate().await,
+                Ok(descs) if descs.iter().any(|d| !open.contains(d.id.as_str()))
+            ) {
                 return true;
             }
         }
@@ -354,7 +573,7 @@ impl DeviceRegistry {
     /// virtual device counts (it lives in-process, not on the bus), else the
     /// bus is scanned — the pre-registry `is_present` semantics, unchanged.
     pub async fn any_present(&self) -> bool {
-        self.inner.runtime.handle().lock().await.is_present().await
+        self.default_runtime().handle().lock().await.is_present().await
     }
 }
 
@@ -778,6 +997,410 @@ mod tests {
         assert!(rt.note_closed_at(gen_b));
         assert!(rt.current().is_none());
         assert!(!rt.note_closed_at(gen_b), "nothing left to close");
+    }
+
+    /* ---- lot E: N runtime slots ----------------------------------------- */
+
+    #[tokio::test]
+    async fn open_additional_lands_on_a_fresh_slot_with_distinct_runtime_state() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A on slot 0");
+        reg.open_additional(&b).await.expect("open B on a fresh slot");
+
+        assert_eq!(reg.slot_of("usb/A"), Some(0));
+        assert_eq!(reg.slot_of("usb/B"), Some(1));
+        let rts = reg.runtimes();
+        assert_eq!(rts.len(), 2);
+        // Fully distinct per-device state — device object, mixer, stream
+        // control flags: nothing may be shared between two live units.
+        assert!(!Arc::ptr_eq(&rts[0].handle(), &rts[1].handle()));
+        assert!(!Arc::ptr_eq(&rts[0].mixer(), &rts[1].mixer()));
+        assert!(!Arc::ptr_eq(rts[0].sweep_cancel(), rts[1].sweep_cancel()));
+        assert!(!rts[0].same_as(&rts[1]));
+        // And slot 0 is still the untouched default runtime.
+        assert!(reg.default_runtime().same_as(&rts[0]));
+        assert_eq!(reg.current().expect("slot 0 keeps A").id, a);
+    }
+
+    #[tokio::test]
+    async fn open_additional_rejects_a_unit_already_open_anywhere() {
+        // Planner finding F2's command-level guard: re-opening an open unit
+        // onto a second runtime would steal its claim out from under the
+        // first — reject loudly, change nothing.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open(&a).await.expect("open A");
+
+        let err = reg.open_additional(&a).await.expect_err("A is already open");
+        assert_eq!(err.to_string(), "Device already open: usb/A");
+        assert_eq!(reg.runtimes().len(), 1, "no slot may have been allocated");
+        assert_eq!(reg.current().expect("A untouched").id, a);
+    }
+
+    #[tokio::test]
+    async fn a_supersede_stays_on_slot_zero_and_never_allocates() {
+        // `connect_device` semantics are frozen: picking another unit while
+        // one is open REPLACES it on the default slot — the additional-slot
+        // path is only ever entered through open_additional.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A");
+        reg.open(&b).await.expect("open B supersedes A");
+        assert_eq!(reg.runtimes().len(), 1);
+        assert_eq!(reg.slot_of("usb/B"), Some(0));
+        assert_eq!(reg.slot_of("usb/A"), None);
+    }
+
+    #[tokio::test]
+    async fn slots_are_stable_and_additional_opens_never_take_the_default_slot() {
+        // The E3 premise: slot indices never move under a trace id — a
+        // closed slot is REUSED by the next additional open, and slot 0 is
+        // never a candidate (an added unit landing there would silently
+        // become the default device REST/scripting drive, and be silently
+        // supersedable by the auto-connect — adversarial review #5).
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B", "C", "D"]))]);
+        let ids: Vec<_> = reg.enumerate().await.iter().map(|d| d.id.clone()).collect();
+        reg.open(&ids[0]).await.expect("A on slot 0");
+        reg.open_additional(&ids[1]).await.expect("B on slot 1");
+        reg.open_additional(&ids[2]).await.expect("C on slot 2");
+        assert_eq!(reg.slot_of("usb/C"), Some(2));
+
+        // Close B (slot 1): D reuses ITS slot, C keeps slot 2.
+        let rt_b = reg.runtime_for(Some("usb/B")).expect("B routes");
+        reg.close_runtime(&rt_b).await.expect("close slot 1");
+        reg.open_additional(&ids[3]).await.expect("D reuses the freed slot");
+        assert_eq!(reg.slot_of("usb/D"), Some(1), "reuse, not growth");
+        assert_eq!(reg.slot_of("usb/C"), Some(2), "C keeps its slot throughout");
+        assert_eq!(reg.runtimes().len(), 3);
+        // The reused slot is the SAME runtime object (never replaced).
+        assert!(rt_b.same_as(&reg.runtimes()[1]));
+
+        // Slot 0 freed: an additional open must STILL not take it.
+        reg.close().await.expect("close slot 0");
+        reg.open_additional(&ids[1]).await.expect("B re-added");
+        assert_eq!(reg.slot_of("usb/B"), Some(3), "never slot 0 — a fresh slot instead");
+        assert!(reg.default_runtime().current().is_none(), "slot 0 stays free for connect/demo");
+    }
+
+    #[tokio::test]
+    async fn the_slot_ceiling_rejects_further_additional_opens() {
+        // MAX_DEVICES bounds the SLOTS (default included): slot 0 + up to
+        // MAX_DEVICES-1 additional units.
+        let units: Vec<String> = (0..=MAX_DEVICES).map(|i| format!("U{i}")).collect();
+        let unit_refs: Vec<&str> = units.iter().map(String::as_str).collect();
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &unit_refs))]);
+        let descs = reg.enumerate().await;
+        reg.open(&descs[0].id).await.expect("the default unit on slot 0");
+        for d in descs.iter().skip(1).take(MAX_DEVICES - 1) {
+            reg.open_additional(&d.id).await.expect("fill a slot");
+        }
+        assert_eq!(reg.runtimes().len(), MAX_DEVICES);
+        let err = reg
+            .open_additional(&descs[MAX_DEVICES].id)
+            .await
+            .expect_err("the ceiling must hold");
+        assert!(matches!(err, DeviceError::NoFreeSlot));
+        assert_eq!(err.to_string(), "All device slots are in use");
+        assert_eq!(reg.runtimes().len(), MAX_DEVICES, "no runtime leaked past the ceiling");
+    }
+
+    #[tokio::test]
+    async fn a_picked_open_of_a_unit_open_on_another_slot_is_rejected_not_stolen() {
+        // Adversarial review MUST-FIX #2: `connect_device { deviceId }` is
+        // the fourth open path — picking a unit that is open on ANOTHER slot
+        // must reject (AlreadyOpen), never steal its claim; and because the
+        // steal would have cleared slot 0's bookkeeping BEFORE failing, the
+        // guard must fire before open_locked ever runs: slot 0's session
+        // survives byte-identically.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("A on slot 0");
+        reg.open_additional(&b).await.expect("B on slot 1");
+
+        let err = reg.open(&b).await.expect_err("picking B while it is open on slot 1");
+        assert_eq!(err.to_string(), "Device already open: usb/B");
+        assert_eq!(reg.current().expect("slot 0 untouched").id, a);
+        assert_eq!(reg.slot_of("usb/B"), Some(1), "B's claim survives");
+    }
+
+    #[tokio::test]
+    async fn open_first_physical_skips_units_open_on_another_slot() {
+        // Planner finding F2: with B open on slot 1 and B enumerating FIRST,
+        // the auto-connect must not steal B's claim onto slot 0 — it opens
+        // the next free unit instead.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["B", "A"]))]);
+        let b = reg.enumerate().await[0].id.clone();
+        // Land B on slot 1: occupy slot 0 first, then free it.
+        let a = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("occupy slot 0");
+        reg.open_additional(&b).await.expect("B on slot 1");
+        reg.close().await.expect("free slot 0");
+
+        let d = reg.open_first_physical().await.expect("auto-connect");
+        assert_eq!(d.id.as_str(), "usb/A", "the open unit B must be skipped");
+        assert_eq!(reg.slot_of("usb/B"), Some(1), "B's claim survives the auto-connect");
+        assert_eq!(reg.slot_of("usb/A"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn open_first_physical_with_only_an_already_open_unit_is_not_found() {
+        // EVERY enumerable unit is open on a non-default slot: the
+        // auto-connect must fail with NotFound (never steal), leaving the
+        // open unit's claim alone.
+        let src = Arc::new(FakeSource::new("usb", true, &["X", "B"]));
+        let reg = registry(vec![src.clone()]);
+        let x = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&x).await.expect("occupy slot 0");
+        reg.open_additional(&b).await.expect("B on slot 1");
+        reg.close().await.expect("free slot 0");
+        src.vanish("X");
+
+        let err = reg.open_first_physical().await.expect_err("only an already-open unit remains");
+        assert!(matches!(err, DeviceError::NotFound));
+        assert_eq!(reg.slot_of("usb/B"), Some(1), "B must survive the failed auto-connect");
+    }
+
+    #[tokio::test]
+    async fn open_virtual_skips_a_virtual_unit_open_on_another_slot_and_takes_the_next() {
+        // The demo button with virtual unit V1 already ADDED on another
+        // slot: it must not steal V1 — it opens V2.
+        let reg = registry(vec![
+            Arc::new(FakeSource::new("usb", true, &["A"])),
+            Arc::new(FakeSource::new("virtual", false, &["V1", "V2"])),
+        ]);
+        let a = reg.enumerate().await[0].id.clone();
+        let v1 = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("occupy slot 0");
+        reg.open_additional(&v1).await.expect("V1 added on slot 1");
+
+        let d = reg.open_virtual().await.expect("demo hand-over");
+        assert_eq!(d.id.as_str(), "virtual/V2", "V1 is taken — the demo must use V2");
+        assert_eq!(reg.slot_of("virtual/V1"), Some(1), "V1's claim survives");
+        assert_eq!(reg.slot_of("virtual/V2"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn runtime_for_routes_each_open_id_to_its_own_slot() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A");
+        reg.open_additional(&b).await.expect("open B");
+
+        let rt_a = reg.runtime_for(Some("usb/A")).expect("A routes");
+        let rt_b = reg.runtime_for(Some("usb/B")).expect("B routes");
+        assert!(rt_a.same_as(&reg.runtimes()[0]));
+        assert!(rt_b.same_as(&reg.runtimes()[1]));
+        assert!(!rt_a.same_as(&rt_b));
+        // None still means the default device, whatever else is open.
+        assert!(reg.runtime_for(None).expect("default").same_as(&rt_a));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_additional_opens_never_collide_on_one_slot() {
+        let src = Arc::new(FakeSource::slow(
+            "usb",
+            true,
+            &["A", "B"],
+            std::time::Duration::from_millis(50),
+        ));
+        let reg = registry(vec![src.clone()]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+
+        let (ra, rb) = tokio::join!(
+            { let r = reg.clone(); let a = a.clone(); async move { r.open_additional(&a).await } },
+            { let r = reg.clone(); let b = b.clone(); async move { r.open_additional(&b).await } },
+        );
+        ra.expect("open A");
+        rb.expect("open B");
+        let slots = [reg.slot_of("usb/A").expect("A open"), reg.slot_of("usb/B").expect("B open")];
+        assert_ne!(slots[0], slots[1], "one slot per unit");
+        assert!(!slots.contains(&0), "additional opens never take the default slot");
+        assert_eq!(reg.runtimes().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_marks_every_open_unit_with_its_slot() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B", "C"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A");
+        reg.open_additional(&b).await.expect("open B");
+
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["usb/A".to_string(), "usb/B".to_string()], "slot order");
+        let slot = |id: &str| list.devices.iter().find(|d| d.id == id).expect(id).slot;
+        assert_eq!(slot("usb/A"), Some(0));
+        assert_eq!(slot("usb/B"), Some(1));
+        assert_eq!(slot("usb/C"), None, "not open ⇒ no slot");
+    }
+
+    #[tokio::test]
+    async fn list_replaces_a_rekeyed_serial_twin_with_the_open_units_entry() {
+        // Lot-D review #2, closed by lot E: unit S is open under id "usb/S";
+        // a serial twin appears and the scan re-keys BOTH units to
+        // path-suffixed ids, so "usb/S" no longer enumerates. The entry at
+        // S's own BUS POSITION must fold into the open unit (stable id, no
+        // ghost pair); the twin at the other port lists normally.
+        use crate::device::testing::fake_descriptor_at;
+        let src = Arc::new(FakeSource::new("usb", true, &[]));
+        let source_id = crate::device::SourceId::new("usb");
+        src.set_descriptors(vec![fake_descriptor_at(&source_id, "S", true, &[1])]);
+        let reg = registry(vec![src.clone()]);
+        let s = reg.enumerate().await[0].id.clone();
+        reg.open(&s).await.expect("open S");
+
+        // The twin plugs in: the scan now offers both units re-keyed.
+        src.set_descriptors(vec![
+            fake_descriptor_at(&source_id, "S@path-tb-1", true, &[1]),
+            fake_descriptor_at(&source_id, "S@path-tb-2", true, &[2]),
+        ]);
+
+        let list = reg.list().await;
+        let ids: Vec<&str> = list.devices.iter().map(|d| d.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"usb/S@path-tb-1"),
+            "the open unit's re-keyed twin entry must fold into it, got {ids:?}"
+        );
+        assert_eq!(list.devices.len(), 2, "no ghost pair: the open unit + the actual twin");
+        let open_entry = list.devices.iter().find(|d| d.id == "usb/S").expect("open unit listed");
+        assert!(open_entry.open);
+        assert_eq!(open_entry.slot, Some(0));
+        assert_eq!(open_entry.firmware_version, Some(42), "the enriched descriptor is kept");
+        let twin = list
+            .devices
+            .iter()
+            .find(|d| d.id == "usb/S@path-tb-2")
+            .expect("the twin at the other port lists normally");
+        assert!(!twin.open);
+        assert_eq!(list.open, vec!["usb/S".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_never_hides_a_different_unit_swapped_onto_the_open_units_port() {
+        // Adversarial review MUST-FIX #1: the everyday one-cable bench swap.
+        // Unit S is open; the user unplugs it and plugs a DIFFERENT unit T
+        // into the same physical port before the monitor tick lands. T
+        // carries its own serial, so the port match alone must NOT fold it
+        // into S's stale open descriptor — T lists as itself (selectable),
+        // and S stays in the appended open tail exactly as before lot E.
+        use crate::device::testing::fake_descriptor_at;
+        let src = Arc::new(FakeSource::new("usb", true, &[]));
+        let source_id = crate::device::SourceId::new("usb");
+        src.set_descriptors(vec![fake_descriptor_at(&source_id, "S", true, &[1])]);
+        let reg = registry(vec![src.clone()]);
+        let s = reg.enumerate().await[0].id.clone();
+        reg.open(&s).await.expect("open S");
+
+        // The swap: T now sits at S's port.
+        src.set_descriptors(vec![fake_descriptor_at(&source_id, "T", true, &[1])]);
+
+        let list = reg.list().await;
+        let t = list.devices.iter().find(|d| d.id == "usb/T").expect("T must be listed");
+        assert!(!t.open, "T is a fresh unit, not the open one");
+        assert_eq!(t.slot, None);
+        let s_entry = list.devices.iter().find(|d| d.id == "usb/S").expect("S stays listed");
+        assert!(s_entry.open, "the open-but-gone unit rides the appended tail");
+        assert_eq!(list.open, vec!["usb/S".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn physical_present_ignores_units_already_open_on_a_slot() {
+        // Adversarial review #8: the demo hand-over PREDICATE must agree
+        // with the hand-over ACTION (open_first_physical skips open units) —
+        // a bench whose only QA40x is added on another slot must not tear
+        // the demo down for a unit the hand-over cannot open.
+        let reg = registry(vec![
+            Arc::new(FakeSource::new("usb", true, &["A"])),
+            Arc::new(FakeSource::new("virtual", false, &["V"])),
+        ]);
+        assert!(reg.physical_present().await, "A is free");
+        let a = reg.enumerate().await[0].id.clone();
+        reg.open_additional(&a).await.expect("A added on slot 1");
+        assert!(!reg.physical_present().await, "the only QA40x is open — nothing to hand over to");
+    }
+
+    #[tokio::test]
+    async fn list_keeps_an_open_virtual_unit_that_stopped_enumerating_without_port_substitution() {
+        // Lot E's port-substitution step (`usb_port(&desc.transport)`)
+        // returns `None` for `Transport::Virtual` — a virtual open unit that
+        // stopped enumerating must fall straight through to the OLD
+        // append-tail path, never attempt (or crash on) a port match. This
+        // pins the `let Some(open_port) = usb_port(&desc.transport) else {
+        // continue }` branch actually firing for a transport with no bus
+        // position, distinct from the USB "vanished" case which DOES have one.
+        let src = Arc::new(FakeSource::new("virtual", false, &["V"]));
+        let reg = registry(vec![src.clone()]);
+        let v = reg.enumerate().await[0].id.clone();
+        reg.open(&v).await.expect("open V");
+
+        src.vanish("V");
+        let list = reg.list().await;
+        assert_eq!(list.open, vec!["virtual/V".to_string()]);
+        let entry = list
+            .devices
+            .iter()
+            .find(|d| d.id == "virtual/V")
+            .expect("still listed via the append-tail path, not lost");
+        assert!(entry.open);
+        assert_eq!(entry.slot, Some(0));
+        assert_eq!(entry.firmware_version, Some(42), "the enriched descriptor survives");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_all_runs_the_slot_budgets_concurrently() {
+        // BOTH devices wedged (mutex held by a stuck capture): serial
+        // teardown would burn one full budget PER slot (~2×); the concurrent
+        // one stays within ~1× (asserted with a wide margin). Wedging only
+        // one slot would not discriminate — the healthy slot's teardown is
+        // instantaneous, so serial ≈ concurrent (adversarial review #6).
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A");
+        reg.open_additional(&b).await.expect("open B");
+
+        let rts = reg.runtimes();
+        let (h0, h1) = (rts[0].handle(), rts[1].handle());
+        let wedge0 = h0.lock().await;
+        let wedge1 = h1.lock().await;
+
+        let budget = std::time::Duration::from_millis(400);
+        let t0 = std::time::Instant::now();
+        reg.shutdown_all(budget).await;
+        let elapsed = t0.elapsed();
+        drop(wedge0);
+        drop(wedge1);
+
+        assert!(
+            elapsed < budget * 7 / 4,
+            "teardown must be concurrent, not serial: took {elapsed:?} for a {budget:?} budget"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_all_completes_the_healthy_slots_despite_a_wedged_sibling() {
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A");
+        reg.open_additional(&b).await.expect("open B");
+
+        // Wedge slot 0's device mutex only.
+        let handle0 = reg.runtimes()[0].handle();
+        let wedge = handle0.lock().await;
+
+        reg.shutdown_all(std::time::Duration::from_millis(400)).await;
+        drop(wedge);
+
+        assert_eq!(reg.slot_of("usb/B"), None, "the healthy slot's teardown completed");
+        assert_eq!(reg.slot_of("usb/A"), Some(0), "the wedged slot expired its budget, honestly");
     }
 
     #[tokio::test]

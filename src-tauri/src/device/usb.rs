@@ -144,6 +144,27 @@ pub async fn any_unit_present() -> bool {
     matches!(list_units().await, Ok(units) if !units.is_empty())
 }
 
+/// Whether `u` sits at exactly this bus position. The port is the scan-stable
+/// identity (unit KEYS are scan-assigned and a serial twin appearing re-keys
+/// both — the lot-D ghost), so per-unit presence matches on it, never on the
+/// key. Pure — the policy is testable without a bus.
+pub fn matches_port(u: &UsbUnit, bus_id: &str, port_chain: &[u8]) -> bool {
+    u.bus_id == bus_id && u.port_chain == port_chain
+}
+
+/// Whether a QA40x is at this exact bus position (issue #25 lot E): the
+/// per-unit presence probe — with N units open, unplugging one must be
+/// detected as THAT unit's loss, never masked by its siblings still being on
+/// the bus. Scan failure reads as absent, same as [`any_unit_present`].
+/// Deliberate consequence: a unit replugged into a DIFFERENT port reads as
+/// lost — correct, since its claim died with the old port.
+pub async fn unit_present_at(bus_id: &str, port_chain: &[u8]) -> bool {
+    matches!(
+        list_units().await,
+        Ok(units) if units.iter().any(|u| matches_port(u, bus_id, port_chain))
+    )
+}
+
 /// The first QA40x on the bus, as pre-registry `connect()` picked it.
 pub async fn first_device_info() -> Result<nusb::DeviceInfo, DeviceError> {
     scan()
@@ -327,6 +348,23 @@ mod tests {
         // A third unit with a UNIQUE serial keeps its plain key.
         let units = vec![unit(Some("AB12_CD34"), 1), unit(Some("AB12_CD34"), 2), unit(Some("EE00_0001"), 3)];
         assert_eq!(keys_for(&units)[2], "EE00_0001");
+    }
+
+    #[test]
+    fn matches_port_requires_the_exact_bus_position() {
+        let u = keyed(Some("AB12_CD34"), 1); // bus "20", chain [2, 1]
+        assert!(matches_port(&u, "20", &[2, 1]));
+        assert!(!matches_port(&u, "21", &[2, 1]), "a different bus is a different position");
+        assert!(!matches_port(&u, "20", &[2, 2]), "a different port is a different position");
+        assert!(!matches_port(&u, "20", &[2]), "a chain prefix is not the position");
+    }
+
+    #[tokio::test]
+    async fn unit_present_at_an_impossible_position_is_absent_not_an_error() {
+        // Bus ids are OS-assigned numeric-ish strings; this one cannot exist,
+        // so the probe must read absent on ANY machine (with or without a
+        // QA40x plugged) — the monitor tests rely on that hermeticity.
+        assert!(!unit_present_at("test-no-such-bus", &[42, 7]).await);
     }
 
     #[test]

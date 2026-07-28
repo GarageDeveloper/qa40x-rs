@@ -201,6 +201,12 @@ impl DeviceRuntime {
         }
     }
 
+    /// Whether `other` is the SAME runtime (shared inner state) — slot
+    /// identity for the registry's slot vector (issue #25 lot E).
+    pub fn same_as(&self, other: &DeviceRuntime) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// The one device object of this runtime — the same `Arc` on every call.
     pub fn handle(&self) -> DeviceHandle {
         self.inner.handle.clone()
@@ -266,6 +272,17 @@ impl DeviceRuntime {
     /// The current open generation (advances on every successful open).
     pub fn generation(&self) -> OpenGeneration {
         OpenGeneration(self.inner.lifecycle.lock().expect("lifecycle lock").generation)
+    }
+
+    /// ATOMIC snapshot of (current open unit, its generation) — one lock
+    /// acquisition. The liveness monitor derives its probe, its generation
+    /// token AND the id it will report from this single snapshot: reading
+    /// them separately let a concurrent open interleave, pairing unit A's
+    /// probe with unit B's generation and id — a false loss report against
+    /// a healthy device (adversarial review, MUST-FIX #3).
+    pub fn open_snapshot(&self) -> Option<(OpenDevice, OpenGeneration)> {
+        let st = self.inner.lifecycle.lock().expect("lifecycle lock");
+        st.current.clone().map(|cur| (cur, OpenGeneration(st.generation)))
     }
 
     /// Record a successful open: bumps the generation, replaces `current`,
@@ -382,18 +399,22 @@ impl DeviceRuntime {
 
     /* ---- liveness monitor ---------------------------------------------- */
 
-    /// Claim the liveness-monitor slot for `gen`. `false` when a monitor is
-    /// already watching that same generation (the caller must not spawn a
-    /// second one — the old duplicate-toast bug); a claim for a NEWER
-    /// generation displaces the previous one, whose monitor exits quietly on
-    /// its next tick.
+    /// Claim the liveness-monitor slot for `gen`. `false` when a monitor
+    /// already watches that same generation (the caller must not spawn a
+    /// second one — the old duplicate-toast bug) or a NEWER one (a stale
+    /// spawner that lost the race to a fresh open must not displace the
+    /// live monitor — adversarial review, MUST-FIX #3); a claim for a newer
+    /// generation displaces the previous one, whose monitor exits quietly
+    /// on its next tick.
     pub fn monitor_claim(&self, gen: OpenGeneration) -> bool {
         let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
-        if st.monitor_generation == Some(gen.0) {
-            return false;
+        match st.monitor_generation {
+            Some(existing) if existing >= gen.0 => false,
+            _ => {
+                st.monitor_generation = Some(gen.0);
+                true
+            }
         }
-        st.monitor_generation = Some(gen.0);
-        true
     }
 
     /// Release the monitor slot IF still owned by `gen` (a displaced
@@ -449,10 +470,53 @@ pub struct DeviceLost {
 /// Cadence of the liveness monitor's physical-presence poll.
 const MONITOR_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How the liveness monitor decides its unit is still there (issue #25
+/// lot E). Derived from the open unit's transport at spawn: a USB unit is
+/// present iff a QA40x sits at ITS bus position — per-unit, so with N units
+/// open, unplugging one is detected as that unit's loss and never masked by
+/// a sibling still being on the bus (the pre-lot-E "any QA40x on the bus"
+/// predicate was structurally blind to this). A pure OS enumeration — the
+/// probe NEVER takes the device mutex, so a 22 s capture no longer delays
+/// loss detection by its own length.
+pub(crate) enum PresenceProbe {
+    /// A QA40x at this exact bus position.
+    Port { bus_id: String, port_chain: Vec<u8> },
+    /// The in-process simulator never unplugs: always present. (Defensive —
+    /// the connect commands don't spawn a monitor for virtual units.)
+    Virtual,
+    /// Test seam: presence pinned to a flag the test flips (the "unplug").
+    #[cfg(test)]
+    Pinned(Arc<AtomicBool>),
+}
+
+impl PresenceProbe {
+    fn for_transport(t: &crate::device::Transport) -> Self {
+        match t {
+            crate::device::Transport::Usb { bus_id, port_chain, .. } => Self::Port {
+                bus_id: bus_id.clone(),
+                port_chain: port_chain.clone(),
+            },
+            crate::device::Transport::Virtual => Self::Virtual,
+        }
+    }
+
+    async fn present(&self) -> bool {
+        match self {
+            Self::Port { bus_id, port_chain } => {
+                super::usb::unit_present_at(bus_id, port_chain).await
+            }
+            Self::Virtual => true,
+            #[cfg(test)]
+            Self::Pinned(flag) => flag.load(Ordering::SeqCst),
+        }
+    }
+}
+
 /// Watch the runtime's CURRENT open for physical disappearance (USB unplug):
-/// every 2 s, take the device mutex and probe the bus; on loss, clear the
-/// bookkeeping and call `on_lost` — but only if this monitor's generation is
-/// still the live one, so exactly ONE report per loss, never a stale one.
+/// every 2 s, probe the unit's bus position (no device mutex — see
+/// [`PresenceProbe`]); on loss, clear the bookkeeping and call `on_lost` —
+/// but only if this monitor's generation is still the live one, so exactly
+/// ONE report per loss, never a stale one.
 ///
 /// Claims the monitor slot itself: a no-op when a monitor already watches
 /// this generation. No Tauri dependency — the caller provides the event
@@ -468,12 +532,46 @@ pub(crate) fn spawn_liveness_monitor_with_tick(
     tick: std::time::Duration,
     on_lost: impl FnOnce(DeviceLost) + Send + 'static,
 ) {
-    let gen = rt.generation();
+    // ONE atomic snapshot: the probe, the generation token and the reported
+    // id must all describe the SAME open (MUST-FIX #3 — reading them
+    // separately let a concurrent open pair unit A's probe with unit B's
+    // generation and id). Nothing open at spawn means nothing to monitor
+    // (connect commands spawn the monitor right after a successful open;
+    // anything else is a stale caller).
+    let Some((cur, gen)) = rt.open_snapshot() else { return };
+    let probe = PresenceProbe::for_transport(&cur.descriptor.transport);
+    spawn_monitor_at(rt, gen, cur.id, tick, probe, on_lost);
+}
+
+/// The monitor body with an explicit [`PresenceProbe`] — the seam that lets
+/// per-unit loss semantics (issue #25 lot E: one unit's unplug, its sibling
+/// untouched) be tested without a USB bus.
+#[cfg(test)]
+pub(crate) fn spawn_liveness_monitor_with_probe(
+    rt: DeviceRuntime,
+    tick: std::time::Duration,
+    probe: PresenceProbe,
+    on_lost: impl FnOnce(DeviceLost) + Send + 'static,
+) {
+    let Some((cur, gen)) = rt.open_snapshot() else { return };
+    spawn_monitor_at(rt, gen, cur.id, tick, probe, on_lost);
+}
+
+fn spawn_monitor_at(
+    rt: DeviceRuntime,
+    gen: OpenGeneration,
+    id: DeviceId,
+    tick: std::time::Duration,
+    probe: PresenceProbe,
+    on_lost: impl FnOnce(DeviceLost) + Send + 'static,
+) {
     if !rt.monitor_claim(gen) {
-        // A monitor is already watching this (re)connection.
+        // A monitor is already watching this (re)connection — or a newer
+        // one: a spawner whose snapshot was superseded before it could
+        // claim must not displace the live monitor.
         return;
     }
-    let device_id = rt.device_id().map(|id| id.as_str().to_string());
+    let device_id = Some(id.as_str().to_string());
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tick).await;
@@ -482,15 +580,13 @@ pub(crate) fn spawn_liveness_monitor_with_tick(
                 // Superseded by a newer open — its own monitor took over.
                 break;
             }
-            log::debug!("usb-monitor: tick — acquiring device lock");
-            let handle = rt.handle();
-            let guard = handle.lock().await;
-            log::debug!("usb-monitor: lock acquired — checking physical presence");
-            let still_connected = guard.check_physical_connection().await;
-            drop(guard);
-            log::debug!("usb-monitor: check done → {still_connected}");
-
-            if !still_connected {
+            if rt.current().is_none() {
+                // Closed through disconnect_device / a failed open — whoever
+                // cleared the bookkeeping owns the user notification (the
+                // note_closed_at token contract).
+                break;
+            }
+            if !probe.present().await {
                 // The device closed outside disconnect_device — keep the
                 // bookkeeping honest before telling the frontend. A stale
                 // race (disconnect_device or a newer open landed first)
@@ -499,6 +595,37 @@ pub(crate) fn spawn_liveness_monitor_with_tick(
                 if rt.note_closed_at(gen) {
                     log::info!("Device disconnected - emitting event");
                     on_lost(DeviceLost { device_id });
+                    // Release the dead claim (interface/device handles) so
+                    // the device object reads honestly disconnected. Only
+                    // with the lifecycle gate free AND the generation still
+                    // ours: an in-flight or later open resets the device
+                    // state itself (release_claim first, teardown on close),
+                    // so a busy gate means whoever holds it will leave the
+                    // state consistent — skipping is safe, and never
+                    // retrying is deliberate. Lock order: gate → device
+                    // mutex, as everywhere; the device await is BOUNDED so a
+                    // wedged capture can't pin the gate (and with it every
+                    // open) for its whole length — same 2 s cap as
+                    // `shutdown()`'s gate wait.
+                    if let Ok(_gate) = rt.lifecycle_gate().try_lock() {
+                        if rt.generation() == gen {
+                            let handle = rt.handle();
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                handle.lock(),
+                            )
+                            .await
+                            {
+                                Ok(dev) => {
+                                    dev.mark_disconnected().await;
+                                    log::debug!("usb-monitor: dead claim released");
+                                }
+                                Err(_) => log::warn!(
+                                    "usb-monitor: device busy after 2 s — leaving the dead claim to the next open"
+                                ),
+                            };
+                        }
+                    }
                 }
                 break;
             }
@@ -574,6 +701,12 @@ mod tests {
         // The owning monitor's release frees the slot for a fresh claim.
         rt.monitor_release(gen2);
         assert!(rt.monitor_claim(gen2));
+
+        // A claim for an OLDER generation than the live one is refused
+        // (adversarial review MUST-FIX #3): a spawner whose snapshot was
+        // superseded before it could claim must not displace the live
+        // monitor — the newer open already has (or will spawn) its own.
+        assert!(!rt.monitor_claim(gen1), "a stale spawner must not displace the live monitor");
     }
 
     fn opened_fake(rt: &DeviceRuntime, unit: &str) -> (DeviceId, OpenGeneration) {
@@ -641,6 +774,137 @@ mod tests {
             .await
             .expect("the monitor must exit, not keep polling a dead device");
         assert!(end.is_none(), "an already-bookkept loss must not be re-reported");
+    }
+
+    /// A user disconnect (`close()` → `note_closed`) while the monitor is
+    /// between ticks: the monitor must exit QUIETLY — whoever cleared the
+    /// bookkeeping owns the user notification (the token contract), and the
+    /// probe result must not even be consulted for a runtime that is closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_monitor_exits_quietly_when_the_runtime_was_closed_under_it() {
+        let rt = DeviceRuntime::new();
+        opened_fake(&rt, "AB12");
+
+        let present = Arc::new(AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeviceLost>();
+        spawn_liveness_monitor_with_probe(
+            rt.clone(),
+            std::time::Duration::from_millis(10),
+            PresenceProbe::Pinned(present.clone()),
+            move |lost| {
+                let _ = tx.send(lost);
+            },
+        );
+        // The close lands while the unit is still "present" on the bus — the
+        // normal disconnect_device case.
+        rt.note_closed();
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the monitor must exit once the runtime is closed");
+        assert!(end.is_none(), "a user close must never be re-reported as a loss");
+    }
+
+    /// The lot-E acceptance property at the runtime level (planner F1): with
+    /// TWO runtimes watched by their own monitors, unplugging unit A is
+    /// reported as A's loss exactly once, while B's monitor stays silent and
+    /// B's bookkeeping survives untouched. (The pre-lot-E "any QA40x on the
+    /// bus" predicate was structurally blind to this — B's presence masked
+    /// A's loss.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_units_unplug_is_reported_for_that_unit_only() {
+        let rt_a = DeviceRuntime::new();
+        let rt_b = DeviceRuntime::new();
+        let (id_b, _) = {
+            opened_fake(&rt_a, "AAAA");
+            opened_fake(&rt_b, "BBBB")
+        };
+
+        let present_a = Arc::new(AtomicBool::new(true));
+        let present_b = Arc::new(AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeviceLost>();
+        for (rt, present) in [(rt_a.clone(), present_a.clone()), (rt_b.clone(), present_b.clone())] {
+            let tx = tx.clone();
+            spawn_liveness_monitor_with_probe(
+                rt,
+                std::time::Duration::from_millis(10),
+                PresenceProbe::Pinned(present),
+                move |lost| {
+                    let _ = tx.send(lost);
+                },
+            );
+        }
+        drop(tx);
+
+        // Unplug A only.
+        present_a.store(false, Ordering::SeqCst);
+
+        let lost = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("A's loss must be reported within budget")
+            .expect("channel open — B's monitor still holds a sender");
+        assert_eq!(lost.device_id.as_deref(), Some("usb/AAAA"));
+        assert!(rt_a.current().is_none(), "A's bookkeeping is cleared");
+        assert_eq!(
+            rt_b.current().expect("B must survive A's unplug untouched").id,
+            id_b
+        );
+        // No second report while B stays present.
+        let quiet = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(quiet.is_err(), "B's monitor must stay silent");
+    }
+
+    /// On a real loss the monitor also releases the dead claim: the device
+    /// object must read disconnected afterwards (and a virtual import must be
+    /// released), so nothing keeps driving a unit that is gone. The cleanup
+    /// runs AFTER the event — poll for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loss_releases_the_dead_claim_after_reporting() {
+        use crate::qa40x::transport::demo_sim_options;
+        use vqa40x_core::Simulator;
+
+        let rt = DeviceRuntime::new();
+        // Attach a real (virtual) session so there is a claim to release.
+        let sim = Simulator::new(demo_sim_options());
+        {
+            let handle = rt.handle();
+            let dev = handle.lock().await;
+            dev.connect_virtual_sim(sim.clone(), crate::qa40x::Model::Qa403)
+                .await
+                .expect("attach the virtual session");
+        }
+        opened_fake(&rt, "AB12");
+
+        let present = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeviceLost>();
+        spawn_liveness_monitor_with_probe(
+            rt.clone(),
+            std::time::Duration::from_millis(10),
+            PresenceProbe::Pinned(present),
+            move |lost| {
+                let _ = tx.send(lost);
+            },
+        );
+        rx.recv().await.expect("the loss is reported first");
+
+        // The claim release follows; poll within a budget.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let connected = { rt.handle().lock().await.is_connected().await };
+            if !connected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the dead claim must be released after the loss report"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            sim.try_import(),
+            "the virtual import must have been released by the cleanup"
+        );
+        sim.release_import();
     }
 
     #[test]

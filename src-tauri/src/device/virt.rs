@@ -86,9 +86,16 @@ pub struct VirtualDeviceSource {
 }
 
 impl VirtualDeviceSource {
-    /// The app's built-in source: one demo QA403 (lot E appends a second).
+    /// The app's built-in source: the demo QA403 plus a second virtual unit
+    /// (issue #25 lot E) so a multi-device bench is exercisable without two
+    /// QA40x on the bus. Unit 0 stays THE demo device (`open_virtual` picks
+    /// the first free one, so the demo path is unchanged while unit 0 is
+    /// free); both simulators stay lazy until opened.
     pub fn builtin() -> Self {
-        Self::with_units(vec![VirtualUnit::new(demo_unit_options(0))])
+        Self::with_units(vec![
+            VirtualUnit::new(demo_unit_options(0)),
+            VirtualUnit::new(demo_unit_options(1)),
+        ])
     }
 
     pub fn with_units(units: Vec<VirtualUnit>) -> Self {
@@ -222,14 +229,20 @@ mod tests {
     async fn enumeration_does_not_instantiate_the_simulator() {
         let src = VirtualDeviceSource::builtin();
         let descs = src.enumerate().await.expect("virtual enumerate is infallible");
-        assert_eq!(descs.len(), 1);
+        // Lot E: two built-in units, the demo device FIRST (open_virtual
+        // picks the first free one — the demo path must land on unit 0).
+        assert_eq!(descs.len(), 2);
         let d = &descs[0];
         assert_eq!(d.id.as_str(), format!("virtual/{}", demo_unit_options(0).serial));
-        assert!(d.identity.is_virtual);
-        assert_eq!(d.identity.model, Model::Qa403);
-        assert!(d.capabilities.sample_rates_hz.contains(&384_000));
-        assert!(!d.capabilities.supports_flash);
+        assert_eq!(descs[1].id.as_str(), format!("virtual/{}", demo_unit_options(1).serial));
+        for d in &descs {
+            assert!(d.identity.is_virtual);
+            assert_eq!(d.identity.model, Model::Qa403);
+            assert!(d.capabilities.sample_rates_hz.contains(&384_000));
+            assert!(!d.capabilities.supports_flash);
+        }
         // The laziness invariant: enumerate() must never boot a simulator.
         assert!(!src.units()[0].sim_instantiated().await);
+        assert!(!src.units()[1].sim_instantiated().await);
     }
 }

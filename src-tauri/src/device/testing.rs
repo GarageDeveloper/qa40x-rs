@@ -74,9 +74,33 @@ impl FakeSource {
             .expect("descriptors lock")
             .retain(|d| d.id.unit_key() != unit_key);
     }
+
+    /// Replace the enumeration wholesale — for scenarios a real bus produces
+    /// (a serial twin appearing re-keys BOTH units at once, lot-D review #2).
+    pub fn set_descriptors(&self, descs: Vec<DeviceDescriptor>) {
+        *self.descriptors.lock().expect("descriptors lock") = descs;
+    }
 }
 
 pub fn fake_descriptor(source: &SourceId, unit_key: &str, physical: bool) -> DeviceDescriptor {
+    // Each fake unit gets its OWN bus position (one unit per port, like a
+    // real bus) so the registry's port-based substitution can never conflate
+    // two fake units — the key's bytes ARE the chain, collision-free by
+    // construction (a byte-sum hash could collide, e.g. "AB" vs "BA", and
+    // silently make a port-matching test lie).
+    let mut chain = vec![42u8];
+    chain.extend(unit_key.bytes());
+    fake_descriptor_at(source, unit_key, physical, &chain)
+}
+
+/// [`fake_descriptor`] at an explicit bus position — for the serial-twin
+/// re-key scenarios where the position IS the scenario.
+pub fn fake_descriptor_at(
+    source: &SourceId,
+    unit_key: &str,
+    physical: bool,
+    port_chain: &[u8],
+) -> DeviceDescriptor {
     DeviceDescriptor {
         id: DeviceId::new(source, unit_key),
         source: source.clone(),
@@ -90,7 +114,16 @@ pub fn fake_descriptor(source: &SourceId, unit_key: &str, physical: bool) -> Dev
         },
         capabilities: DeviceCapabilities::for_model(Model::Qa403, !physical),
         transport: if physical {
-            Transport::Usb { vid: 0x16C0, pid: 0x4E39, bus_id: "20".into(), port_chain: vec![1] }
+            // A bus id that cannot exist on any machine (OS bus ids are
+            // numeric-ish): the liveness monitor's per-port probe must read
+            // ABSENT for a fake unit even with a real QA40x plugged in —
+            // otherwise the monitor tests would flake on a dev bench.
+            Transport::Usb {
+                vid: 0x16C0,
+                pid: 0x4E39,
+                bus_id: "test-no-such-bus".into(),
+                port_chain: port_chain.to_vec(),
+            }
         } else {
             Transport::Virtual
         },

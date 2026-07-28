@@ -103,6 +103,7 @@ interface DeviceEntryWire {
     is_virtual: boolean;
   };
   open: boolean;
+  slot: number | null;
 }
 
 interface DeviceListWire {
@@ -390,6 +391,9 @@ export class FakeDevice {
         is_virtual: virtual,
       },
       open,
+      // Registry rule: an open unit carries its runtime slot; the fake is
+      // single-open (lot E4 makes this per-unit), so slot 0.
+      slot: open ? 0 : null,
     };
   }
 
