@@ -700,9 +700,12 @@ export class FakeUnit {
     ch.onmessage({
       type: "frame",
       seq: this.streamSeq,
-      // Issue #25 lot C: every frame carries its device identity — the fake
-      // exercises the same contract as the real registry-stamped payload.
-      device_id: "virtual/E2E-FAKE-0001",
+      // Issue #25 lot C: every frame carries its device identity — the
+      // registry stamps the payload with the OPEN unit's id, and so does
+      // each fake unit (lot E4 — the old fixed `virtual/E2E-FAKE-0001`
+      // stamp predates per-unit stream state and tripped the F5 mismatch
+      // warning on every run).
+      device_id: this.openId,
       captured: { left_channel: cap.left, right_channel: cap.right, sample_rate: sr },
       stimulus: tone ? { left, right } : null,
       spectra,

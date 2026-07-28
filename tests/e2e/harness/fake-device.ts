@@ -125,25 +125,76 @@ export class FakeDevice {
   copiedImages: { width: number; height: number; byteLength: number }[] = [];
   private storage = new Map<string, unknown[]>(); // key: kind (projects, …)
 
-  /** Slot 0's unit — every per-device surface delegates here. */
-  private unit: FakeUnit;
+  /** Open units by runtime slot (lot E4) — slot 0 always exists (the
+   * default runtime, the target of every arg-less command); the
+   * connect_additional_device arm fills further slots. */
+  private units = new Map<number, FakeUnit>();
+  /** Physical unit ids pulled off the bus by unplugUnit(); cleared by
+   * setPresent(true) (a bus-wide replug). */
+  private unpluggedIds = new Set<string>();
+  /** How many built-in virtual units enumerate. The REAL registry always
+   * offers two, but the fake defaults to ONE: devices.pw.ts pins the
+   * single-virtual option list — multi-device specs opt in via
+   * setVirtualUnits(). */
+  private virtualUnitCount = 1;
 
   constructor(provider: FrameProvider = syntheticLoopbackProvider()) {
-    this.unit = new FakeUnit(provider);
+    this.units.set(0, new FakeUnit(provider));
   }
 
-  /** Swap the capture provider (e.g. for recorded fixtures) mid-session. */
+  /** The default-runtime unit (slot 0) — mirrors registry.rs's
+   * `runtime_for(None)`. */
+  private get unit(): FakeUnit {
+    return this.units.get(0) as FakeUnit;
+  }
+
+  /** Route a command to the addressed unit: no id ⇒ slot 0; an id some
+   * open unit holds ⇒ that unit; anything else is rejected exactly like
+   * the registry (`Unknown device: <id>`) — never a silent fallback. */
+  private unitFor(deviceId: string | undefined): FakeUnit {
+    if (deviceId === undefined) return this.unit;
+    for (const u of this.units.values()) {
+      if (u.connected && u.openId === deviceId) return u;
+    }
+    throw new Error(`Unknown device: ${deviceId}`);
+  }
+
+  /** Open units, sorted by slot — the enumeration/report order. */
+  private openUnits(): [number, FakeUnit][] {
+    return [...this.units]
+      .filter(([, u]) => u.connected && u.openId !== null)
+      .sort(([a], [b]) => a - b);
+  }
+
+  /** Swap slot 0's capture provider (e.g. for recorded fixtures). */
   setProvider(p: FrameProvider): void {
     this.unit.setProvider(p);
   }
 
-  /** Simulate an unplug/replug from a test. */
+  /** Simulate a bus-wide unplug/replug from a test. Slot 0 keeps its
+   * historical contract byte-for-byte: it loses whatever it has open
+   * (virtual included) with the payload-less event. Higher slots lose
+   * their PHYSICAL units only (a bus-off cannot detach an in-process
+   * virtual unit), each with its id in the payload — the real per-unit
+   * liveness monitor's shape. */
   setPresent(present: boolean): void {
     this.present = present;
-    if (!present && this.unit.connected) {
-      this.unit.connected = false;
-      this.unit.openId = null;
-      this.emitter("device-disconnected");
+    if (present) {
+      this.unpluggedIds.clear();
+      return;
+    }
+    for (const [slot, u] of [...this.units].sort(([a], [b]) => a - b)) {
+      if (!u.connected) continue;
+      if (slot === 0) {
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected");
+      } else if (u.openId !== null && u.openId.startsWith("usb/")) {
+        const lost = u.openId;
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected", { device_id: lost });
+      }
     }
   }
 
@@ -152,16 +203,61 @@ export class FakeDevice {
     this.unitCount = n;
   }
 
+  /** How many built-in virtual units enumerate (default 1 — see
+   * `virtualUnitCount`). The real-app shape is 2. */
+  setVirtualUnits(n: number): void {
+    this.virtualUnitCount = n;
+  }
+
+  /** Unplug ONE physical unit (lot E4): it leaves the bus and its open
+   * slot, and the `device-disconnected` event names it — the per-unit
+   * liveness monitor's contract. A running stream is NOT stopped here: the
+   * loop's next tick errors out on the dead unit, like hardware. */
+  unplugUnit(id: string): void {
+    this.unpluggedIds.add(id);
+    for (const u of this.units.values()) {
+      if (u.connected && u.openId === id) {
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected", { device_id: id });
+      }
+    }
+  }
+
+  /** Slots with an open unit, ascending — multi-device spec assertions. */
+  openSlots(): number[] {
+    return this.openUnits().map(([slot]) => slot);
+  }
+
+  /** The stream config `slot`'s unit last adopted (null: none / no unit). */
+  streamConfigOf(slot: number): StreamConfigWire | null {
+    return this.units.get(slot)?.streamConfig ?? null;
+  }
+
+  /** Frames `slot`'s unit has pushed on its current stream. */
+  frameCountOf(slot: number): number {
+    return this.units.get(slot)?.streamSeq ?? 0;
+  }
+
   /* -- the enumeration model (mirrors DeviceRegistry::list) ------------- */
 
   private physicalIds(): string[] {
     if (!this.present) return [];
-    return Array.from({ length: this.unitCount }, (_, i) => `usb/E2E-FAKE-000${i + 1}`);
+    return Array.from({ length: this.unitCount }, (_, i) => `usb/E2E-FAKE-000${i + 1}`)
+      .filter((id) => !this.unpluggedIds.has(id));
   }
 
   private static readonly VIRTUAL_ID = "virtual/E2E-VIRT-0001";
 
-  private deviceEntry(id: string, open: boolean): DeviceEntryWire {
+  private virtualIds(): string[] {
+    return Array.from(
+      { length: this.virtualUnitCount },
+      (_, i) => `virtual/E2E-VIRT-000${i + 1}`
+    );
+  }
+
+  private deviceEntry(id: string, slot: number | null): DeviceEntryWire {
+    const open = slot !== null;
     const virtual = id.startsWith("virtual/");
     const serial = id.split("/")[1];
     // Real register-map tables (caps.rs pins them): the virtual unit is the
@@ -195,38 +291,50 @@ export class FakeDevice {
         is_virtual: virtual,
       },
       open,
-      // Registry rule: an open unit carries its runtime slot; the fake is
-      // single-open (lot E4 makes this per-unit), so slot 0.
-      slot: open ? 0 : null,
+      // Registry rule: an open unit carries its runtime slot (per-unit
+      // since lot E4).
+      slot,
     };
   }
 
   private deviceList(): DeviceListWire {
-    const ids = [...this.physicalIds(), FakeDevice.VIRTUAL_ID];
-    const open = this.unit.connected && this.unit.openId !== null ? [this.unit.openId] : [];
-    // An open unit that stopped enumerating stays listed (registry rule).
-    if (open.length && !ids.includes(open[0])) ids.push(open[0]);
+    const ids = [...this.physicalIds(), ...this.virtualIds()];
+    const slotById = new Map<string, number>();
+    const open: string[] = [];
+    for (const [slot, u] of this.openUnits()) {
+      slotById.set(u.openId as string, slot);
+      open.push(u.openId as string);
+      // An open unit that stopped enumerating stays listed (registry rule).
+      if (!ids.includes(u.openId as string)) ids.push(u.openId as string);
+    }
     return {
-      devices: ids.map((id) => this.deviceEntry(id, open.includes(id))),
+      devices: ids.map((id) => this.deviceEntry(id, slotById.get(id) ?? null)),
       open,
     };
   }
 
-  /** Arm the program gate: the next measurement-program command (e.g. a THD
-   * sweep) stays in flight until releasePrograms(). Lets a test assert what
-   * the UI looks like WHILE a program owns the device. */
+  /** Arm the program gate on every unit: the next measurement-program
+   * command (e.g. a THD sweep) stays in flight until releasePrograms().
+   * Lets a test assert what the UI looks like WHILE a program owns a
+   * device. */
   holdPrograms(): void {
-    this.unit.holdPrograms();
+    for (const u of this.units.values()) u.holdPrograms();
   }
 
   /** Release a held program command (no-op when none is armed). */
   releasePrograms(): void {
-    this.unit.releasePrograms();
+    for (const u of this.units.values()) u.releasePrograms();
   }
 
   /* eslint-disable-next-line complexity -- a command table, one arm each */
   handle(cmd: string, a: Args): unknown {
-    const u = this.unit;
+    // The connect-family arms resolve their own target below (their
+    // deviceId names a unit to OPEN, not an open unit to route to); every
+    // other command routes by its optional deviceId (issue #25 lots C/E4).
+    const u =
+      cmd === "connect_device" || cmd === "connect_additional_device"
+        ? this.unit
+        : this.unitFor(a.deviceId as string | undefined);
     switch (cmd) {
       /* -- presence / connection -- */
       case "is_device_present":
@@ -267,6 +375,37 @@ export class FakeDevice {
         u.virtualDevice = true;
         u.openId = FakeDevice.VIRTUAL_ID;
         return "Connected to the virtual QA40x (demo mode, e2e fake)";
+      case "connect_additional_device": {
+        const wanted = a.deviceId as string;
+        // Mirror registry::open_additional — never a supersede: a unit
+        // already open on ANY slot is rejected (planner finding F2).
+        for (const held of this.units.values()) {
+          if (held.connected && held.openId === wanted) {
+            throw new Error(`Failed to connect: Device already open: ${wanted}`);
+          }
+        }
+        if (!this.deviceList().devices.some((d) => d.id === wanted)) {
+          throw new Error(`Failed to connect: Not found (fake): ${wanted}`);
+        }
+        // First free NON-DEFAULT slot (a disconnected unit's slot is
+        // reused with a FRESH unit — a fresh runtime open), else a new
+        // slot, capped like registry::MAX_DEVICES.
+        let slot = 1;
+        while (this.units.get(slot)?.connected) slot++;
+        if (slot >= 8) {
+          throw new Error("Failed to connect: All device slots are in use");
+        }
+        const fresh = new FakeUnit(syntheticLoopbackProvider());
+        fresh.connected = true;
+        fresh.config.input_gain = 42; // connect forces the safe input range
+        fresh.virtualDevice = wanted.startsWith("virtual/");
+        fresh.openId = wanted;
+        this.units.set(slot, fresh);
+        // The answer carries id + slot (the step-3 `AddedDevice` shape) so
+        // the frontend adopts the id from the connect answer itself —
+        // bookkeeping item 1: the unroutable window is zero.
+        return { device_id: wanted, slot };
+      }
       case "list_devices":
         return this.deviceList();
       case "disconnect_device":
