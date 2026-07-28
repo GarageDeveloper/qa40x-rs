@@ -12,6 +12,7 @@ import { fakeEntry } from "../actions/devices.fixtures";
 import { deriveDevices } from "../actions/devices";
 import type { DeviceEntry } from "../../gen";
 import {
+  deviceLabel,
   inputRangesDbv,
   outputRangesDbv,
   physicalAvailable,
@@ -65,6 +66,32 @@ describe("range/rate menus from backend capabilities", () => {
     expect(inputRangesDbv(s)).toEqual([]);
     expect(outputRangesDbv(s)).toEqual([]);
     expect(sampleRatesHz(s)).toEqual([]);
+  });
+});
+
+describe("deviceLabel — the alias read-through (issue #25 lot E2, Raphaël decision 3)", () => {
+  it("with no alias: byte-identical to the historical picker literal", () => {
+    const s = initialState();
+    const entry = fakeEntry("usb/A", { model: "QA402" });
+    expect(deviceLabel(s, entry)).toBe(
+      `${entry.model} · ${entry.serial}${entry.is_virtual ? " (virtual)" : ""}`
+    );
+    expect(deviceLabel(s, entry)).toBe("QA402 · A"); // fakeEntry's serial = id.split("/")[1]
+  });
+
+  it("a virtual unit's literal still carries the ' (virtual)' suffix with no alias", () => {
+    const s = initialState();
+    const entry = fakeEntry("virtual/V", { virtual: true });
+    expect(deviceLabel(s, entry)).toBe("QA403 · V (virtual)");
+  });
+
+  it("with an alias set: returns the alias instead of the identity literal", () => {
+    const entry = fakeEntry("usb/A");
+    const s: AppState = {
+      ...initialState(),
+      devices: { ...initialState().devices, aliases: { "usb/A": "My Bench" } },
+    };
+    expect(deviceLabel(s, entry)).toBe("My Bench");
   });
 });
 

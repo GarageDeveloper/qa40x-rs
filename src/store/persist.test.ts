@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import v4Blob from "../../tests/e2e/fixtures/workspace-v4.json";
 import { Store } from "./store";
 import type { AppState, SweepProgram } from "./state";
-import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, initialState } from "./state";
+import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, initialSession, initialState } from "./state";
 import {
   isQuotaExceeded,
   migrate,
@@ -75,6 +75,34 @@ describe("v5 document", () => {
     const devicesBefore = dest.get().devices;
     expect(applyWorkspaceDoc(dest, stubIpc, doc!)).toBe(true);
     expect(dest.get().devices).toBe(devicesBefore);
+  });
+
+  it("a bench with sessions + aliases populated still carries no 'devices'/'sessions'/'aliases'/'device'/'run' key in the document (issue #25 lot E2: the shape flip did not change the doc format)", () => {
+    const store = freshStore();
+    store.update("test/seed-sessions-and-aliases", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...initialSession(1), deviceId: "usb/B" },
+        },
+        aliases: { "usb/A": "Bench A", "usb/B": "Bench B" },
+      },
+    }));
+
+    const doc = snapshotWorkspace(store.get()) as unknown as Record<string, unknown>;
+    for (const key of ["devices", "sessions", "aliases", "device", "run"]) {
+      expect(key in doc, key).toBe(false);
+    }
+    // And the round trip through JSON + migrate carries none of them either.
+    const migrated = migrate(JSON.parse(JSON.stringify(doc))) as unknown as Record<
+      string,
+      unknown
+    >;
+    for (const key of ["devices", "sessions", "aliases", "device", "run"]) {
+      expect(key in migrated, key).toBe(false);
+    }
   });
 
   it("normalizes transients: nothing plays or runs after a load", () => {

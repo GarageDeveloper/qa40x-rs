@@ -4,14 +4,31 @@
  * The P3 rule (an untouched picker must NOT turn auto-connect into
  * auto-demo) lives with the connect action's own tests.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The alias-provenance pin (below) exercises the real startRun() →
+// startStream() → `new Channel()` path — mocked the same way
+// stream.test.ts/programs.test.ts do it, so no real Tauri IPC runtime is
+// required.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: unknown;
+    constructor(cb?: unknown) {
+      this.onmessage = cb;
+    }
+  },
+}));
+
 import { Store } from "../store";
-import { initialState } from "../state";
+import type { AppState, DevicesState } from "../state";
+import { initialSession, initialState, SLOT0 } from "../state";
 import type { DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { fakeEntry, fakeList as list } from "./devices.fixtures";
-import { deriveDevices, pickDevice, refreshDevices } from "./devices";
-import { autoConnectTick, connect } from "./device";
+import { deriveDevices, pickDevice, refreshDevices, setDeviceAlias } from "./devices";
+import { autoConnectTick, connect, deviceLost, setInputRange } from "./device";
+import { startRun } from "./stream";
 
 const empty = () => initialState().devices;
 
@@ -99,6 +116,71 @@ describe("deriveDevices", () => {
     expect(d.available).toEqual([]);
     expect(d.byId["usb/A"].open).toBe(true);
     expect(d.primary).toBeNull();
+  });
+});
+
+describe("derivePrimary — slot-awareness (issue #25 lot E1 review #9): the FOCUSED slot's open unit wins", () => {
+  // Slot 1 enumerates FIRST in every case below — proving the result comes
+  // from `focus`/slot, never from backend enumeration order.
+  const twoOpenUnits = list(
+    fakeEntry("usb/B", { open: true, slot: 1 }),
+    fakeEntry("usb/A", { open: true, slot: 0 })
+  );
+
+  it("focus slot-0 → the slot-0 unit wins", () => {
+    const d = deriveDevices({ ...empty(), focus: SLOT0 }, twoOpenUnits);
+    expect(d.primary).toBe("usb/A");
+  });
+
+  it("focus 'slot-1' → the slot-1 unit wins", () => {
+    const d = deriveDevices({ ...empty(), focus: "slot-1" }, twoOpenUnits);
+    expect(d.primary).toBe("usb/B");
+  });
+
+  it("focus on a slot with nothing open → the LOWEST open slot wins (P1b), not enumeration order", () => {
+    const d = deriveDevices({ ...empty(), focus: "slot-2" }, twoOpenUnits);
+    expect(d.primary).toBe("usb/A"); // slot 0 < slot 1
+  });
+});
+
+describe("deriveDevices — session adoption (issue #25 lot E2)", () => {
+  it("adopts entry.id into the session whose slot matches — and ONLY that one", () => {
+    const prev: DevicesState = {
+      ...empty(),
+      sessions: { [SLOT0]: initialSession(0), "slot-1": initialSession(1) },
+    };
+    const d = deriveDevices(prev, list(fakeEntry("usb/B", { open: true, slot: 1 })));
+    expect(d.sessions["slot-1"].deviceId).toBe("usb/B");
+    // The slot-0 session's deviceId is untouched by an entry at a DIFFERENT slot.
+    expect(d.sessions[SLOT0].deviceId).toBeNull();
+  });
+
+  it("an answer with nothing open at slot 0 clears deviceId but leaves device.status alone", () => {
+    const prev: DevicesState = {
+      ...empty(),
+      sessions: {
+        [SLOT0]: {
+          ...initialSession(0),
+          deviceId: "usb/A",
+          device: { ...initialSession(0).device, status: "connected" },
+        },
+      },
+    };
+    // A transiently stale scan reporting nothing open must NOT invent a
+    // disconnect — only disconnect()/deviceLost()/a failed connect() may.
+    const d = deriveDevices(prev, { devices: [], open: [] });
+    expect(d.sessions[SLOT0].deviceId).toBeNull();
+    expect(d.sessions[SLOT0].device.status).toBe("connected");
+  });
+
+  it("an alias survives its unit going unavailable and returning, even onto a DIFFERENT slot (keyed by id, not slot)", () => {
+    let d: DevicesState = { ...empty(), aliases: { "usb/A": "Bench A" } };
+    d = deriveDevices(d, list(fakeEntry("usb/A", { open: true, slot: 0 })));
+    expect(d.aliases["usb/A"]).toBe("Bench A");
+    d = deriveDevices(d, { devices: [], open: [] }); // unplugged
+    expect(d.aliases["usb/A"]).toBe("Bench A");
+    d = deriveDevices(d, list(fakeEntry("usb/A", { open: true, slot: 1 }))); // replugged, different slot
+    expect(d.aliases["usb/A"]).toBe("Bench A");
   });
 });
 
@@ -260,5 +342,156 @@ describe("pickDevice", () => {
     expect(store.get().devices.pick).toBe("usb/does-not-exist");
     // Falls through P2's availability guard straight to the first physical.
     expect(store.get().devices.primary).toBe("usb/A");
+  });
+});
+
+describe("setDeviceAlias (issue #25 lot E2, Raphaël decision 3)", () => {
+  it("trims surrounding whitespace", () => {
+    const store = new Store(initialState(), { freeze: true });
+    setDeviceAlias(store, "usb/A", "  My Analyzer  ");
+    expect(store.get().devices.aliases["usb/A"]).toBe("My Analyzer");
+  });
+
+  it("clears the alias on empty or whitespace-only input", () => {
+    const store = new Store(initialState(), { freeze: true });
+    setDeviceAlias(store, "usb/A", "Bench 1");
+    expect(store.get().devices.aliases["usb/A"]).toBe("Bench 1");
+    setDeviceAlias(store, "usb/A", "   ");
+    expect("usb/A" in store.get().devices.aliases).toBe(false);
+    setDeviceAlias(store, "usb/A", "Bench 2");
+    setDeviceAlias(store, "usb/A", "");
+    expect("usb/A" in store.get().devices.aliases).toBe(false);
+  });
+
+  it("clamps at 64 characters", () => {
+    const store = new Store(initialState(), { freeze: true });
+    setDeviceAlias(store, "usb/A", "x".repeat(100));
+    expect(store.get().devices.aliases["usb/A"]).toBe("x".repeat(64));
+  });
+
+  it("caps at 64 entries, evicting the LEAST-recently-named unit", () => {
+    const store = new Store(initialState(), { freeze: true });
+    for (let i = 0; i < 64; i++) setDeviceAlias(store, `usb/${i}`, `Bench ${i}`);
+    expect(Object.keys(store.get().devices.aliases)).toHaveLength(64);
+
+    // The 65th insertion evicts the OLDEST-named unit (usb/0), no other.
+    setDeviceAlias(store, "usb/64", "Bench 64");
+    const aliases = store.get().devices.aliases;
+    expect(Object.keys(aliases)).toHaveLength(64);
+    expect("usb/0" in aliases).toBe(false);
+    expect(aliases["usb/1"]).toBe("Bench 1");
+    expect(aliases["usb/64"]).toBe("Bench 64");
+  });
+
+  it("re-naming an existing id moves it to the newest position, protecting it from the NEXT eviction", () => {
+    const store = new Store(initialState(), { freeze: true });
+    for (let i = 0; i < 64; i++) setDeviceAlias(store, `usb/${i}`, `Bench ${i}`);
+    setDeviceAlias(store, "usb/0", "Bench 0 renamed"); // touched again — no longer the oldest
+    setDeviceAlias(store, "usb/64", "Bench 64");
+    const aliases = store.get().devices.aliases;
+    expect(aliases["usb/0"]).toBe("Bench 0 renamed"); // survived the eviction
+    expect("usb/1" in aliases).toBe(false); // usb/1 is now the oldest, evicted instead
+  });
+});
+
+describe("aliases are app-side only — never ride the wire (issue #25 lot E2)", () => {
+  it("no ipc call carries the alias string, across connect + setInputRange + startRun", async () => {
+    const calls: [string, unknown][] = [];
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        switch (method) {
+          case "list_devices":
+            return Promise.resolve(list(fakeEntry("usb/A", { open: true })) as never);
+          case "get_device_info":
+            return Promise.resolve({
+              model: "QA402",
+              serial: "usb-A-serial",
+              firmware_version: 60,
+              product: "QA402 Audio Analyzer",
+              sample_rates: [48000],
+              supports_flash: false,
+              capabilities: {} as never,
+              is_virtual: false,
+            } as never);
+          case "get_device_config":
+            return Promise.resolve({ input_gain: 18, output_gain: 8, sample_rate: 48000 } as never);
+          case "get_input_dbv_offset":
+          case "get_output_dbv_offset":
+            return Promise.resolve({ offset_db: 0, calibrated: true } as never);
+          default:
+            return Promise.resolve(null as never);
+        }
+      },
+    };
+
+    const store = new Store(initialState(), { freeze: true });
+    const alias = "My Very Own Analyzer";
+    setDeviceAlias(store, "usb/A", alias);
+    expect(store.get().devices.aliases["usb/A"]).toBe(alias);
+
+    await connect(store, ipc, { deviceId: "usb/A" });
+    await setInputRange(store, ipc, 18);
+    await startRun(store, ipc);
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [method, args] of calls) {
+      expect(JSON.stringify(args), method).not.toContain(alias);
+    }
+  });
+});
+
+describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
+  function twoAdoptedSessionsStore(): Store<AppState> {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/two-sessions", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            deviceId: "usb/A",
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+            run: { ...initialSession(1).run, streaming: true },
+          },
+        },
+      },
+    }));
+    return store;
+  }
+
+  it("deviceLost(store, 'usb/B') tears down ONLY the session that adopted usb/B — slot-0 (usb/A) stays streaming", () => {
+    const store = twoAdoptedSessionsStore();
+    deviceLost(store, "usb/B");
+    const s = store.get();
+    expect(s.devices.sessions["slot-1"].device.status).toBe("disconnected");
+    expect(s.devices.sessions["slot-1"].run.streaming).toBe(false);
+    expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
+  });
+
+  it("deviceLost(store, null) tears down slot 0 only (the payload-less monitor event)", () => {
+    const store = twoAdoptedSessionsStore();
+    deviceLost(store, null);
+    const s = store.get();
+    expect(s.devices.sessions[SLOT0].device.status).toBe("disconnected");
+    expect(s.devices.sessions[SLOT0].run.streaming).toBe(false);
+    expect(s.devices.sessions["slot-1"].device.status).toBe("connected");
+    expect(s.devices.sessions["slot-1"].run.streaming).toBe(true);
+  });
+
+  it("an id NO session adopted falls back to slot 0 (documented pre-E2 parity)", () => {
+    const store = twoAdoptedSessionsStore();
+    deviceLost(store, "usb/never-adopted");
+    const s = store.get();
+    expect(s.devices.sessions[SLOT0].device.status).toBe("disconnected");
+    expect(s.devices.sessions["slot-1"].device.status).toBe("connected"); // usb/B untouched
   });
 });
