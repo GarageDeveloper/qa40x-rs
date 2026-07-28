@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import v4Blob from "../../tests/e2e/fixtures/workspace-v4.json";
 import { Store } from "./store";
 import type { AppState, SweepProgram, TraceMeta } from "./state";
+import type { Domain } from "../core/model";
 import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS, hwTraceMetas, initialSession, initialState } from "./state";
 import {
   isQuotaExceeded,
@@ -694,6 +695,46 @@ describe("v5 in-version hook: capture provenance (issue #40)", () => {
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, migrated!)).toBe(true);
     expect(snapshotWorkspace(dest.get())).toEqual(migrated);
+  });
+
+  it("a slot ≥ 1 ENDPOINT keeps its capture snapshot in the doc — the dormant group's identity for the one-click revive (lot E4) — while slot-0 endpoints and transforms zero theirs", () => {
+    const store = freshStore();
+    store.update("test/e4-provenance", (s) => {
+      const slot1 = hwTraceMetas(1);
+      const fx: TraceMeta = {
+        id: "fx-1",
+        label: "fx",
+        color: "#9a6ee2",
+        source: { kind: "transform", input: "hw-in-left", steps: [] },
+        domains: ["fd"],
+        seq: 3,
+        offsetDb: 1,
+        capture: { ...capture, derived: true },
+      };
+      return {
+        ...s,
+        traces: {
+          order: [...s.traces.order, ...slot1.map((t) => t.id), fx.id],
+          byId: {
+            ...s.traces.byId,
+            ["hw-in-left"]: { ...s.traces.byId["hw-in-left"], capture },
+            ...Object.fromEntries(slot1.map((t) => [t.id, { ...t, capture, domains: ["td"] as Domain[] }])),
+            [fx.id]: fx,
+          },
+        },
+      };
+    });
+    const doc = snapshotWorkspace(store.get());
+    // Slot-1 endpoints: identity KEPT, data zeroed like everyone else.
+    expect(doc.traces.byId["hw-in-left@1"].capture).toEqual(capture);
+    expect(doc.traces.byId["hw-in-left@1"].domains).toEqual([]);
+    // Slot 0 and derived traces: zeroed (the lot-A rule unchanged).
+    expect(doc.traces.byId["hw-in-left"].capture).toBeNull();
+    expect(doc.traces.byId["fx-1"].capture).toBeNull();
+    // And it survives the load: the dormant rows land with their identity.
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, JSON.parse(JSON.stringify(doc)))).toBe(true);
+    expect(dest.get().traces.byId["hw-in-left@1"].capture).toEqual(capture);
   });
 
   it("a frozen ❄ trace's capture snapshot survives the save/reload round trip", () => {
