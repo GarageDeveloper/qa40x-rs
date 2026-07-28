@@ -6,6 +6,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { clearAllFrames } from "../../data/frames";
 import { initialState, HW_TRACE_IDS, type AppState } from "../state";
+import { focusedDevice } from "./session";
 import { tileTriggerSourceId, tileWindowSamples, triggerPreSamples, triggerRequest } from "./trigger";
 
 function tile(s: AppState, id = "tile-1") {
@@ -51,7 +52,7 @@ describe("tileWindowSamples", () => {
 
   it("converts ms at the device sample rate, clamped to fftSize", () => {
     const s = initialState();
-    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    focusedDevice(s).config ={ input_gain: 0, output_gain: 0, sample_rate: 48000 };
     s.acquisition.fftSize = 32768;
     tile(s).timeWindowMs = 10; // 480 samples @ 48 kHz
     expect(tileWindowSamples(s, tile(s))).toBe(480);
@@ -112,7 +113,7 @@ describe("triggerPreSamples / triggerRequest", () => {
 
   it("two tiles on the same endpoint: pre_samples is the WIDEST ask", () => {
     const s = initialState();
-    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    focusedDevice(s).config ={ input_gain: 0, output_gain: 0, sample_rate: 48000 };
     s.layout.pattern = "1x2";
     const [t1, t2] = s.layout.order.map((id) => s.layout.tiles[id]);
     t1.kind = "scope";

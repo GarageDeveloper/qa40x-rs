@@ -7,10 +7,15 @@ import type { Ipc } from "../../ipc/ipc";
 import type { DeviceList } from "../../gen";
 import type { Store } from "../store";
 import type { AppState, DevicesState } from "../state";
+import { slotOfSessionKey } from "../state";
 
 /**
  * The primary derivation (the unit the single-device UI describes):
- *   P1  an open unit wins;
+ *   P1a the open unit at the FOCUSED session's slot wins — the chrome must
+ *       describe the unit the transport acts on, never whichever unit
+ *       happens to enumerate first (issue #25 lot E1 review #9);
+ *   P1b else the LOWEST open slot (slot 0 = the target of unrouted
+ *       commands, so the chrome and the wire stay in agreement);
  *   P2  else the user's pick, while it is still available;
  *       else the first available PHYSICAL unit (a plugged-in QA40x must win
  *       over the built-in virtual — otherwise an empty bench would surface
@@ -18,8 +23,15 @@ import type { AppState, DevicesState } from "../state";
  *       else the first available unit; else null.
  */
 function derivePrimary(d: Omit<DevicesState, "primary">): string | null {
-  const open = d.available.find((id) => d.byId[id]?.open);
-  if (open) return open;
+  const open = d.available.filter((id) => d.byId[id]?.open);
+  if (open.length > 0) {
+    const focusSlot = slotOfSessionKey(d.focus);
+    const atFocus = open.find((id) => d.byId[id]?.slot === focusSlot);
+    if (atFocus !== undefined) return atFocus;
+    return [...open].sort(
+      (a, b) => (d.byId[a]?.slot ?? Infinity) - (d.byId[b]?.slot ?? Infinity)
+    )[0];
+  }
   if (d.pick !== null && d.available.includes(d.pick)) return d.pick;
   const physical = d.available.find((id) => !d.byId[id]?.is_virtual);
   return physical ?? d.available[0] ?? null;
@@ -29,6 +41,13 @@ function derivePrimary(d: Omit<DevicesState, "primary">): string | null {
  * Fold one enumeration answer into the slice (pure — the vitest target).
  * `order` is sticky: a unit keeps its slot across a vanish/reappear;
  * `available` reflects only THIS answer; entries refresh verbatim.
+ *
+ * Sessions adopt their unit's REGISTRY ID here (lot E2 — the first
+ * frontend consumer of `DeviceEntry.slot`/`open`): the open entry whose
+ * slot matches becomes the session's `deviceId`; an answer with nothing
+ * open at that slot clears the id but NEVER touches `device.status` —
+ * only disconnect()/deviceLost()/a failed connect() move status, and a
+ * transiently stale scan must not invent a disconnect.
  */
 export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesState {
   const byId = { ...prev.byId };
@@ -40,7 +59,23 @@ export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesStat
   for (const id of available) {
     if (!order.includes(id)) order.push(id);
   }
-  const next = { order, byId, available, pick: prev.pick, enumerating: false };
+  let sessions = prev.sessions;
+  for (const sess of Object.values(prev.sessions)) {
+    const entry = list.devices.find((d) => d.open && d.slot === sess.slot);
+    const id = entry?.id ?? null;
+    if (sess.deviceId !== id) {
+      sessions = { ...sessions, [sess.key]: { ...sess, deviceId: id } };
+    }
+  }
+  const next = {
+    order,
+    byId,
+    available,
+    pick: prev.pick,
+    enumerating: false,
+    sessions,
+    focus: prev.focus,
+  };
   return { ...next, primary: derivePrimary(next) };
 }
 

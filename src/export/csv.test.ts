@@ -7,6 +7,8 @@ import {
   type TraceMeta,
 } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
+import { focusedDevice } from "../store/selectors/session";
+import { withDevice } from "../store/actions/sessions.fixtures";
 import {
   benchProvenance,
   clipScopeWindow,
@@ -44,24 +46,22 @@ function meta(over: Partial<TraceMeta> = {}): TraceMeta {
 }
 
 function stateWithDevice(): AppState {
-  const s = initialState();
+  const s = withDevice(initialState(), {
+    info: {
+      model: "QA403",
+      firmware_version: 61,
+      serial: "AB12_CD34",
+      product: "QA403 Audio Analyzer",
+      sample_rates: [48000],
+      supports_flash: false,
+      capabilities: {} as never,
+      is_virtual: false,
+    },
+    config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+    offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
+  });
   return {
     ...s,
-    device: {
-      ...s.device,
-      info: {
-        model: "QA403",
-        firmware_version: 61,
-        serial: "AB12_CD34",
-        product: "QA403 Audio Analyzer",
-        sample_rates: [48000],
-        supports_flash: false,
-        capabilities: s.device.info?.capabilities ?? ({} as never),
-        is_virtual: false,
-      },
-      config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
-      offsets: { input_l: 32.1, input_r: 32.2, output_l: 8.1, output_r: 8.2, calibrated: true },
-    },
     acquisition: {
       ...s.acquisition,
       fftSize: 32768,
@@ -153,7 +153,7 @@ describe("benchProvenance", () => {
     const s = stateWithDevice();
     const lines = provenanceComments(
       benchProvenance(
-        { ...s, device: { ...s.device, config: null, offsets: null } },
+        withDevice(s, { config: null, offsets: null }),
         "0.3.0",
         "2026-07-27T10:00:00.000Z"
       )
@@ -237,10 +237,9 @@ describe("traceProvenance (issue #40: capture snapshot preferred over the live b
     // frozen trace's export must carry ITS bench, not just the current one
     // (issue #40's founding example).
     const s = stateWithDevice();
-    const moved: AppState = {
-      ...s,
-      device: { ...s.device, config: { ...s.device.config!, sample_rate: 96000 } },
-    };
+    const moved: AppState = withDevice(s, {
+      config: { ...focusedDevice(s).config!, sample_rate: 96000 },
+    });
     const lines = asLines(moved, liveMatchingCapture({ capturedAt: at }));
     expect(lines).toContain("# sample_rate_hz=96000");
     expect(lines).toContain("# capture_sample_rate_hz=48000");
@@ -248,10 +247,9 @@ describe("traceProvenance (issue #40: capture snapshot preferred over the live b
 
   it("a live snapshot is ALSO emitted once the bench has moved under it (no pinned instant needed)", () => {
     const s = stateWithDevice();
-    const moved: AppState = {
-      ...s,
-      device: { ...s.device, config: { ...s.device.config!, input_gain: 0 } },
-    };
+    const moved: AppState = withDevice(s, {
+      config: { ...focusedDevice(s).config!, input_gain: 0 },
+    });
     const lines = asLines(moved, liveMatchingCapture());
     expect(lines).toContain("# capture_input_range_dbv=42");
     expect(lines).toContain("# input_range_dbv=0");

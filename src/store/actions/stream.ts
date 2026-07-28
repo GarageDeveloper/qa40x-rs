@@ -10,15 +10,23 @@ import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
 import { putTriggerSnapshot } from "../../data/triggered";
 import type { Store } from "../store";
-import type { AppState, CaptureProvenance, RunState, SourceMeta, TraceMeta } from "../state";
+import type {
+  AppState,
+  CaptureProvenance,
+  RunState,
+  SessionKey,
+  SourceMeta,
+  TraceMeta,
+} from "../state";
 import { captureBenchSignature, HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import {
   focusedDevice,
-  focusedRun,
-  updateFocusedDevice,
-  updateFocusedRun,
+  session,
+  sessionArgs,
+  updateDevice,
+  updateRun,
 } from "../selectors/session";
 import { triggerRequest } from "../selectors/trigger";
 import { toast } from "./ui";
@@ -163,11 +171,21 @@ export function buildStreamConfig(s: AppState): StreamConfig {
  * state, so the one in-flight frame captured under a JUST-changed setting
  * carries the new stamp — same one-frame window the offsets model closed
  * frame-side; acceptable for provenance, not worth a wire field yet.
+ *
+ * Memoized PER SESSION (lot E2): two devices capturing concurrently are two
+ * different benches — session A's frozen object must never be served to
+ * session B's traces. Still content-addressed within a session.
  */
-let lastCaptureSig: string | null = null;
-let lastCapture: CaptureProvenance | null = null;
-export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): CaptureProvenance {
-  const device = focusedDevice(s);
+const lastCaptureBySession = new Map<
+  SessionKey,
+  { sig: string; cap: CaptureProvenance }
+>();
+export function frameCaptureProvenance(
+  s: AppState,
+  key: SessionKey,
+  frame: DecodedFrame
+): CaptureProvenance {
+  const device = session(s, key)?.device ?? focusedDevice(s);
   const info = device.info;
   const next: CaptureProvenance = {
     device: info
@@ -188,16 +206,17 @@ export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): Captur
     capturedAt: null,
   };
   const sig = captureBenchSignature(next);
-  if (lastCapture && sig === lastCaptureSig) return lastCapture;
-  lastCaptureSig = sig;
+  const memo = lastCaptureBySession.get(key);
+  if (memo && sig === memo.sig) return memo.cap;
   // Children frozen too: the store's dev-mode deepFreeze stops at an
   // already-frozen object, so a shallow freeze here would leave
   // `capture.device`/`capture.averaging` mutable behind the guard.
   Object.freeze(next.device);
   Object.freeze(next.averaging);
   Object.freeze(next.offsets);
-  lastCapture = Object.freeze(next);
-  return lastCapture;
+  const cap = Object.freeze(next);
+  lastCaptureBySession.set(key, { sig, cap });
+  return cap;
 }
 
 /** Monotonic ingest stamp. NOT the wire seq: a restarted backend loop
@@ -207,19 +226,55 @@ export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): Captur
  * local counter is the correct freshness order. */
 let ingestSeq = 0;
 
+/** F5 (issue #25 lot E2): a frame whose stamp disagrees with its session's
+ * adopted id is a DEVELOPER signal, never a drop and never a toast — the
+ * e2e fake stamps `virtual/E2E-FAKE-0001`, an id it never enumerates, so
+ * binding on the stamp would drop every frame of every e2e run. Warned at
+ * most once per (session, stamp, adopted) triple: at 25 fps an unthrottled
+ * console.warn floods the dev console and every e2e trace. */
+const warnedFrameMismatches = new Set<string>();
+function warnFrameDeviceMismatch(
+  key: SessionKey,
+  frameId: string,
+  sessionId: string
+): void {
+  const sig = `${key}|${frameId}|${sessionId}`;
+  if (warnedFrameMismatches.has(sig)) return;
+  warnedFrameMismatches.add(sig);
+  console.warn(
+    `[qa40x] frame stamped ${frameId} arrived on session ${key} holding ` +
+      `${sessionId} — ingested anyway (the channel, not the stamp, is the ` +
+      `binding); investigate the routing if this is not the e2e fake`
+  );
+}
+
 /**
- * Ingest one pushed frame: write the frames cache FIRST, then bump seqs and
- * mirror the run/mix/offsets state in ONE store update. Charts pull the
- * arrays from the cache inside their select callbacks. Exported for tests
- * only — production callers go through `startRun`'s `onFrame`.
+ * Ingest one pushed frame into `key`'s session: write the frames cache
+ * FIRST, then bump seqs and mirror the run/mix/offsets state in ONE store
+ * update. Charts pull the arrays from the cache inside their select
+ * callbacks. The binding is the CHANNEL's own session key, captured at
+ * `startRun` time — `frame.deviceId` is only asserted (F5 above), never
+ * routed on. Exported for tests only — production callers go through
+ * `startRun`'s `onFrame`.
  */
-export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
+export function ingestFrame(
+  store: Store<AppState>,
+  key: SessionKey,
+  frame: DecodedFrame
+): void {
+  const sess = session(store.get(), key);
+  // A torn-down session's late frame: nothing to ingest into (the keyed
+  // store writes below would no-op, but the cache writes would not).
+  if (!sess) return;
+  if (frame.deviceId && sess.deviceId && frame.deviceId !== sess.deviceId) {
+    warnFrameDeviceMismatch(key, frame.deviceId, sess.deviceId);
+  }
   const seq = ++ingestSeq;
   const off = frame.offsets;
   // One snapshot for the whole frame (issue #40), computed BEFORE the cache
   // writes so the trigger latch below can bake it — the update callback
   // reuses it (same state, cache-first rule intact).
-  const capture = frameCaptureProvenance(store.get(), frame);
+  const capture = frameCaptureProvenance(store.get(), key, frame);
   // Each endpoint buffers its OWN converter's offset — ADC for inputs, DAC
   // for outputs (the #48/#50/#51/#58/#60 class: four values, never one).
   const written: Array<{ id: string; offsetDb: number; hasTd: boolean; hasFd: boolean }> = [];
@@ -341,8 +396,8 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
       byId[w.id] = { ...t, seq, offsetDb: w.offsetDb, domains, capture };
     }
     const withTraces = { ...s, traces: { ...s.traces, byId } };
-    return updateFocusedDevice(
-      updateFocusedRun(withTraces, (r) => ({
+    return updateDevice(
+      updateRun(withTraces, key, (r) => ({
         ...r,
         // Transport state belongs to start/stop and the Stopped event — a
         // draining frame arriving after an (optimistic) stop must not flip
@@ -365,6 +420,7 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
             )
           : r.trigArmPending,
       })),
+      key,
       (d) => ({
         ...d,
         // The frame is the truth for offsets AND the fitted output range —
@@ -378,15 +434,27 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
   });
 }
 
-/** The in-flight stop, so a start issued right after a stop is SEQUENCED
- * behind it (Tauri commands run concurrently — without this, the backend
- * could serve the start first and the late stop would kill the new loop). */
-let stopInFlight: Promise<void> | null = null;
+/** The in-flight stop PER SESSION, so a start issued right after a stop is
+ * SEQUENCED behind it (Tauri commands run concurrently — without this, the
+ * backend could serve the start first and the late stop would kill the new
+ * loop) — while session B's start is never parked behind session A's stop. */
+const stopInFlight = new Map<SessionKey, Promise<void>>();
 
-/** Stream generation: bumped per start, so a superseded channel's late
- * Stopped/Error (backend take-over stops the OLD loop) can never flip the
- * transport of the CURRENT one. */
-let streamGen = 0;
+/** Stream generation PER SESSION: bumped per start, so a superseded
+ * channel's late Stopped/Error (backend take-over stops the OLD loop) can
+ * never flip the transport of the CURRENT one — nor another session's. */
+const streamGen = new Map<SessionKey, number>();
+
+/** TESTS ONLY: clear the per-session module maps between suites. The
+ * capture memo is content-addressed so cross-test reuse is safe by
+ * construction (a pinned property), but the gen/stop maps hold real
+ * promises/counters a previous test's session may have left behind. */
+export function __resetSessionGlobals(): void {
+  stopInFlight.clear();
+  streamGen.clear();
+  lastCaptureBySession.clear();
+  warnedFrameMismatches.clear();
+}
 
 export async function startRun(
   store: Store<AppState>,
@@ -401,14 +469,21 @@ export async function startRun(
      * are user INTENT there and stay untouched.
      */
     playAllIfIdle?: boolean;
+    /** The session to start (default: the focused one — every UI transport
+     * is focus-bound per decision 2; E4's group headers pass explicit keys). */
+    sessionKey?: SessionKey;
   } = {}
 ): Promise<void> {
-  if (stopInFlight) await stopInFlight; // user intent order: stop, THEN start
+  const key = opts.sessionKey ?? store.get().devices.focus;
+  const pendingStop = stopInFlight.get(key);
+  if (pendingStop) await pendingStop; // user intent order: stop, THEN start
   let s = store.get();
-  if (focusedRun(s).streaming || focusedDevice(s).status !== "connected") return;
+  const sess = session(s, key);
+  if (!sess) return;
+  if (sess.run.streaming || sess.device.status !== "connected") return;
   // A measurement program owns the device exclusively (M4): its completion
   // resumes the stream itself; nothing else may start one meanwhile.
-  if (focusedRun(s).programLock !== null) return;
+  if (sess.run.programLock !== null) return;
   if (
     opts.playAllIfIdle &&
     s.sources.order.length > 0 &&
@@ -428,70 +503,111 @@ export async function startRun(
     }));
     s = store.get();
   }
-  if (focusedRun(s).outputOnly || focusedRun(s).generatorRunning) {
+  if (sess.run.outputOnly || sess.run.generatorRunning) {
     // Run is an explicit ask for capture: it takes the DAC back (stream_start
     // stops the gap-free generator backend-side) and ends the session mode —
     // a lingering "output only" flag would silently rebuild the generator on
     // the next source edit and kill this very stream.
     store.update("stream/leave-output-only", (st) =>
-      updateFocusedRun(st, (r) => ({ ...r, outputOnly: false, generatorRunning: false }))
+      updateRun(st, key, (r) => ({ ...r, outputOnly: false, generatorRunning: false }))
     );
   }
-  const gen = ++streamGen;
+  const gen = (streamGen.get(key) ?? 0) + 1;
+  streamGen.set(key, gen);
   try {
-    await startStream(ipc, buildStreamConfig(s), {
-      onFrame: (frame) => {
-        if (gen === streamGen) ingestFrame(store, frame);
+    // The channel IS the device-scoped object: `onFrame` closes over `key`,
+    // so every message of this loop lands in this session — the frame's own
+    // deviceId stamp is only asserted (F5, ingestFrame).
+    await startStream(
+      ipc,
+      buildStreamConfig(s),
+      {
+        onFrame: (frame) => {
+          if (gen === streamGen.get(key)) ingestFrame(store, key, frame);
+        },
+        onError: (message) => {
+          if (gen === streamGen.get(key)) toast(store, "error", `Stream: ${message}`);
+        },
+        onStopped: () => {
+          if (gen !== streamGen.get(key)) return; // a superseded loop's goodbye
+          store.update("stream/stopped", (st) =>
+            updateRun(st, key, (r) => ({ ...r, streaming: false }))
+          );
+        },
       },
-      onError: (message) => {
-        if (gen === streamGen) toast(store, "error", `Stream: ${message}`);
-      },
-      onStopped: () => {
-        if (gen !== streamGen) return; // a superseded loop's goodbye
-        store.update("stream/stopped", (st) =>
-          updateFocusedRun(st, (r) => ({ ...r, streaming: false }))
-        );
-      },
-    });
+      sessionArgs(s, key)
+    );
     store.update("stream/started", (st) =>
-      updateFocusedRun(st, (r) => ({ ...r, streaming: true }))
+      updateRun(st, key, (r) => ({ ...r, streaming: true }))
     );
   } catch (e) {
     toast(store, "error", `Run failed: ${e}`);
   }
 }
 
-export function stopRun(store: Store<AppState>, ipc: Ipc): Promise<void> {
-  if (stopInFlight) return stopInFlight; // one stop in flight is enough
+export function stopRun(
+  store: Store<AppState>,
+  ipc: Ipc,
+  sessionKey?: SessionKey
+): Promise<void> {
+  const key = sessionKey ?? store.get().devices.focus;
+  const pending = stopInFlight.get(key);
+  if (pending) return pending; // one stop in flight per session is enough
   // Optimistic: the transport reflects the user's intent IMMEDIATELY (the
   // backend drains its last frame for up to a second — the M3 "had to press
   // Stop twice" report). `stopping` disables the transport button until the
   // backend acknowledged; a programmatic start (play) queues behind it.
   store.update("stream/stop-requested", (s) =>
-    updateFocusedRun(s, (r) => ({ ...r, streaming: false, stopping: true }))
+    updateRun(s, key, (r) => ({ ...r, streaming: false, stopping: true }))
   );
-  stopInFlight = (async () => {
+  const stop = (async () => {
     try {
-      await ipc.call("stream_stop", {});
+      await ipc.call("stream_stop", sessionArgs(store.get(), key));
     } catch (e) {
-      toast(store, "error", `Stop failed: ${e}`);
+      // F8 (issue #25 lot E2): a stop racing a disconnect on a ROUTED
+      // session rejects with the registry's `Unknown device: <id>` — the
+      // unit is gone, so the stop's goal is already met; toasting an error
+      // over a plain unplug would gaslight the user. Substring match, not
+      // equality: command wrappers prefix their own context (the E1
+      // bookkeeping's warning about pinning bare registry strings).
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.toLowerCase().includes("unknown device")) {
+        toast(store, "error", `Stop failed: ${e}`);
+      }
     } finally {
-      stopInFlight = null;
+      stopInFlight.delete(key);
       store.update("stream/stop-acknowledged", (s) =>
-        updateFocusedRun(s, (r) => ({ ...r, stopping: false }))
+        updateRun(s, key, (r) => ({ ...r, stopping: false }))
       );
     }
   })();
-  return stopInFlight;
+  stopInFlight.set(key, stop);
+  return stop;
 }
 
 /**
  * Push the current config to a running stream (no-op otherwise). Actions
  * that change acquisition / sources / trace visibility call this LAST.
  */
-export function syncStream(store: Store<AppState>, ipc: Ipc): void {
-  if (!focusedRun(store.get()).streaming) return;
+export function syncStream(
+  store: Store<AppState>,
+  ipc: Ipc,
+  sessionKey?: SessionKey
+): void {
+  const s = store.get();
+  const key = sessionKey ?? s.devices.focus;
+  if (!session(s, key)?.run.streaming) return;
   void ipc
-    .call("stream_update", { config: buildStreamConfig(store.get()) })
-    .catch((e) => toast(store, "error", `Stream update: ${e}`));
+    .call("stream_update", {
+      config: buildStreamConfig(store.get()),
+      ...sessionArgs(s, key),
+    })
+    .catch((e) => {
+      // Same F8 rationale as stopRun: the loop this update targets died
+      // with its device — nothing to sync, nothing to report.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.toLowerCase().includes("unknown device")) {
+        toast(store, "error", `Stream update: ${e}`);
+      }
+    });
 }

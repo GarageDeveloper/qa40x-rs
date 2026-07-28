@@ -12,6 +12,7 @@ import { clearTriggerSnapshots, putTriggerSnapshot } from "../../data/triggered"
 import { initialState, type AppState, type TileConfig } from "../state";
 import { DEFAULT_SWEEP_PARAMS, HW_TRACE_IDS } from "../state";
 import { DBU_OVER_DBV_DB } from "../../core/units";
+import { focusedDevice, focusedRun } from "./session";
 import {
   displayOffsetDb,
   displayScale,
@@ -260,7 +261,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     const s = stateWith([HW_TRACE_IDS.inputL], {
       [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
     });
-    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    focusedDevice(s).config ={ input_gain: 0, output_gain: 0, sample_rate: 48000 };
     s.acquisition.fftSize = 1000;
     tile(s).kind = "scope";
     tile(s).tdUnit = "v";
@@ -305,7 +306,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("aligned: series start at index − pre, and frac is passed through", () => {
     seedSnapshot();
     const s = stateWithTrigger();
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 500, frac: 0.3 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "triggered", index: 500, frac: 0.3 };
     const vm = scopeVM(s, tile(s));
     // pre = round(0.5 * 480) = 240; start = 500 - 240 = 260.
     const k = Math.pow(10, 20 / 20); // the SNAPSHOT's baked offset (20), not the live 20.81
@@ -340,7 +341,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     };
     seedSnapshot({ capture: latched });
     const s = stateWithTrigger();
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 500, frac: 0.3 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "waiting", index: 500, frac: 0.3 };
     const vm = scopeVM(s, tile(s));
     expect(vm.trigger!.capture).toBe(latched); // the latched object, by identity
   });
@@ -348,7 +349,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("clamps pre to the trigger index so the slice never starts before sample 0 (review #4/#7)", () => {
     seedSnapshot({ index: 100 });
     const s = stateWithTrigger();
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 100, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "triggered", index: 100, frac: 0 };
     const vm = scopeVM(s, tile(s));
     // pre would be round(0.5*480) = 240, > index (100) ⇒ clamped to 100 ⇒
     // start = 0, end = min(0+480,1000) = 480, count = 480.
@@ -362,7 +363,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     seedSnapshot({ index: 900 });
     const s = stateWithTrigger();
     tile(s).triggerPositionPct = 10; // pre = round(0.1*480) = 48
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 900, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "triggered", index: 900, frac: 0 };
     const vm = scopeVM(s, tile(s));
     // start = 900 - 48 = 852; end = min(852+480, 1000) = 1000; count = 148.
     expect(vm.series[0].samples.length).toBe(148);
@@ -374,7 +375,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     seedSnapshot(); // 1000-sample ramp, baked while fftSize was 1000
     const s = stateWithTrigger("normal");
     s.acquisition.fftSize = 2048; // the user changed FFT size while NORMAL held a picture
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 999, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "waiting", index: 999, frac: 0 };
     const vm = scopeVM(s, tile(s));
     expect(vm.trigger).toBeNull();
     expect(Array.from(vm.series[0].samples)).toEqual([
@@ -386,7 +387,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("levelDisplay converts the endpoint's level-volts via the SNAPSHOT offset, in v/mv/%FS", () => {
     seedSnapshot();
     const s = stateWithTrigger();
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "auto", index: 500, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "auto", index: 500, frac: 0 };
     // Snapshot offset baked at 20 dB ⇒ 10x volts-per-FS.
     tile(s).tdUnit = "v";
     expect(scopeVM(s, tile(s)).trigger!.levelDisplay).toBeCloseTo(0.5, 9);
@@ -399,7 +400,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("sourceOffsetDb exposes the SNAPSHOT-baked offset, not the live trace offset (review #5)", () => {
     seedSnapshot(); // baked offsetDb 20, distinct from the live 20.81
     const s = stateWithTrigger();
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "auto", index: 500, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "auto", index: 500, frac: 0 };
     const vm = scopeVM(s, tile(s));
     expect(vm.trigger!.sourceOffsetDb).toBe(20);
     expect(vm.trigger!.sourceOffsetDb).not.toBe(s.traces.byId[HW_TRACE_IDS.inputL].offsetDb);
@@ -408,7 +409,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("held (waiting/stopped): trigger.held is true and the picture is the snapshot's", () => {
     seedSnapshot();
     const s = stateWithTrigger("normal");
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "waiting", index: 999, frac: 0 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "waiting", index: 999, frac: 0 };
     const vm = scopeVM(s, tile(s));
     expect(vm.trigger!.held).toBe(true);
     expect(vm.trigger!.state).toBe("waiting");
@@ -422,7 +423,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
   it("a later live range/offset change does NOT rescale a held picture", () => {
     seedSnapshot();
     const s = stateWithTrigger("normal");
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "stopped", index: 500, frac: 0.3 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "stopped", index: 500, frac: 0.3 };
     const before = scopeVM(s, tile(s)).series[0].samples[0];
 
     // A live range step moves the trace's OWN (store) offset — the snapshot
@@ -455,7 +456,7 @@ describe("scopeVM trigger alignment (Lot A, issue #26)", () => {
     // Explicit — the "mem-1" member has its own td frame too, which would
     // otherwise win the "auto" chip-source fallback (drawn order).
     tile(s).triggerSource = HW_TRACE_IDS.inputL;
-    s.run.triggers[HW_TRACE_IDS.inputL] = { state: "triggered", index: 500, frac: 0.3 };
+    focusedRun(s).triggers[HW_TRACE_IDS.inputL] ={ state: "triggered", index: 500, frac: 0.3 };
     const vm = scopeVM(s, tile(s));
     const mem = vm.series.find((sv) => sv.id === "mem-1")!;
     expect(Array.from(mem.samples)).toEqual([0.1, -0.1]); // offsetDb 0 ⇒ identity, unsliced
@@ -498,7 +499,7 @@ describe("triggerSourceOffsetDb (review #5)", () => {
     const s = stateWith([HW_TRACE_IDS.inputL], {
       [HW_TRACE_IDS.inputL]: { offsetDb: 20.81, seq: 1 },
     });
-    s.device.config = { input_gain: 0, output_gain: 0, sample_rate: 48000 };
+    focusedDevice(s).config ={ input_gain: 0, output_gain: 0, sample_rate: 48000 };
     s.acquisition.fftSize = 1000;
     tile(s).kind = "scope";
     tile(s).timeWindowMs = 10;

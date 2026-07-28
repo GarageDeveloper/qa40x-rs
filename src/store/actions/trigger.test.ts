@@ -11,6 +11,8 @@ import { Store } from "../store";
 import { HW_TRACE_IDS, initialState } from "../state";
 import type { AppState } from "../state";
 import type { Ipc } from "../../ipc/ipc";
+import { focusedRun } from "../selectors/session";
+import { withRun } from "./sessions.fixtures";
 import {
   armSingle,
   setTriggerHystV,
@@ -20,7 +22,7 @@ import {
 
 function makeStreamingStore(): { store: Store<AppState>; ipc: Ipc; calls: unknown[] } {
   const store = new Store(initialState(), { freeze: true });
-  store.update("test/stream-on", (s) => ({ ...s, run: { ...s.run, streaming: true } }));
+  store.update("test/stream-on", (s) => withRun(s, { streaming: true }));
   const calls: unknown[] = [];
   const ipc: Ipc = {
     call: (method: string, args?: unknown) => {
@@ -101,16 +103,13 @@ describe("setTriggerMode (review #8)", () => {
   it("arming raises trigArmPending so the highlight covers the in-flight-frame gap", () => {
     const { store, ipc } = makeStreamingStore();
     setTriggerMode(store, ipc, HW_TRACE_IDS.inputL, "single");
-    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+    expect(focusedRun(store.get()).trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
 
     // Clear it by hand (the ingestFrame side is pinned in stream.test.ts),
     // then a plain Arm click must raise it again.
-    store.update("test/settle", (s) => ({
-      ...s,
-      run: { ...s.run, trigArmPending: {} },
-    }));
+    store.update("test/settle", (s) => withRun(s, { trigArmPending: {} }));
     armSingle(store, ipc, HW_TRACE_IDS.inputL);
-    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+    expect(focusedRun(store.get()).trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
   });
 
   it("switching between non-single modes never touches armEpoch", () => {

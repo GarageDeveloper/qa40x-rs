@@ -624,10 +624,57 @@ export interface LayoutState {
   focus: string | null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Per-device sessions (issue #25 lot E2).                              */
+/* ------------------------------------------------------------------ */
+
 /**
- * The enumerated-units slice (issue #25 lot D). Wire entries are stored
- * VERBATIM (no frontend mapping layer to drift); `AppState.device` remains
- * the OPEN device's live state until lot E folds it into `byId`.
+ * A session key is the backend runtime SLOT, stringified. Keyed by slot,
+ * NOT by device id: `connect()` writes `status: "connecting"` before any id
+ * is known (the legacy arg-less `connect_device` path — pinned by
+ * devices.pw.ts's `connectDeviceIds() === [null]`), and the per-session
+ * module maps (streamGen, stopInFlight, the capture memo) need a key that
+ * never changes under them. The slot is knowable a priori: slot 0 belongs
+ * to the connect/demo flows (registry.rs: open/open_first_physical/
+ * open_virtual all target it); added units live on slots ≥ 1 (E1 contract).
+ * E3 persists the slot for the same reason — a doc carried to another
+ * bench must not be bench-bound.
+ */
+export type SessionKey = string;
+
+/** The default runtime's session — the connect/demo flows' slot. */
+export const SLOT0: SessionKey = "slot-0";
+
+export function sessionKeyForSlot(slot: number): SessionKey {
+  return `slot-${slot}`;
+}
+
+export function slotOfSessionKey(key: SessionKey): number {
+  return Number(key.slice("slot-".length));
+}
+
+/** One open (or opening) device's live state: the lot-D root-level
+ * `AppState.device` + `AppState.run` pair, folded per slot (lot E2).
+ * `device` and `run` stay SUB-OBJECTS, never flattened into the session:
+ * panels select them with `shallowEq` reference identity — a run-only
+ * update must not re-fire a `s => focusedDevice(s)` selection. */
+export interface DeviceSession {
+  key: SessionKey;
+  slot: number;
+  /** The registry id of the unit this session has open, adopted from
+   * `list_devices` (`entry.open && entry.slot === slot`). Null until the
+   * first enumeration lands after the open, and again once it reports the
+   * slot empty. NEVER guessed from `device.info`: DeviceMeta carries a
+   * serial, not a registry id. */
+  deviceId: string | null;
+  device: DeviceState;
+  run: RunState;
+}
+
+/**
+ * The enumerated-units slice (issue #25 lot D) + the per-device sessions
+ * (lot E2). Wire entries are stored VERBATIM (no frontend mapping layer to
+ * drift).
  *
  * Never persisted: `WorkspaceDoc` enumerates its slices explicitly and this
  * one stays out by design — a persisted device list would resurrect phantom
@@ -655,13 +702,18 @@ export interface DevicesState {
   primary: string | null;
   /** An enumeration is in flight (the bar keeps showing the last list). */
   enumerating: boolean;
+  /** Per-slot sessions (lot E2). Always holds SLOT0 — created at boot,
+   * never removed (the connect/demo flows reuse it). Added units get their
+   * sessions in lot E4. */
+  sessions: Record<SessionKey, DeviceSession>;
+  /** The session the single-device chrome describes and Run/Space act on
+   * (Raphaël decision 2, 2026-07-28). Always a key present in `sessions`. */
+  focus: SessionKey;
 }
 
 export interface AppState {
-  device: DeviceState;
   devices: DevicesState;
   acquisition: AcquisitionState;
-  run: RunState;
   traces: TracesState;
   sources: SourcesState;
   programs: ProgramsState;
@@ -830,17 +882,51 @@ export function initialSources(): SourcesState {
   return { order: [sine.id], byId: { [sine.id]: sine } };
 }
 
+/** A fresh disconnected device state (one per session). */
+export function initialDeviceState(): DeviceState {
+  return {
+    status: "disconnected",
+    present: false,
+    userDisconnected: false,
+    info: null,
+    config: null,
+    telemetry: null,
+    offsets: null,
+  };
+}
+
+/** A fresh idle run state (one per session). */
+export function initialRunState(): RunState {
+  return {
+    streaming: false,
+    stopping: false,
+    stats: { fps: 0, frameMs: 0, frames: 0 },
+    sigmaPeakDbv: null,
+    clip: { input: "none", output: false },
+    fittedOutputRangeDbv: null,
+    slotErrors: [],
+    outputOnly: false,
+    generatorRunning: false,
+    programLock: null,
+    triggers: {},
+    trigArmPending: {},
+  };
+}
+
+/** A fresh session for `slot` (used by initialState for slot 0; lot E4
+ * mints further ones when a unit opens on a higher slot). */
+export function initialSession(slot: number): DeviceSession {
+  return {
+    key: sessionKeyForSlot(slot),
+    slot,
+    deviceId: null,
+    device: initialDeviceState(),
+    run: initialRunState(),
+  };
+}
+
 export function initialState(): AppState {
   return {
-    device: {
-      status: "disconnected",
-      present: false,
-      userDisconnected: false,
-      info: null,
-      config: null,
-      telemetry: null,
-      offsets: null,
-    },
     devices: {
       order: [],
       byId: {},
@@ -848,6 +934,8 @@ export function initialState(): AppState {
       pick: null,
       primary: null,
       enumerating: false,
+      sessions: { [SLOT0]: initialSession(0) },
+      focus: SLOT0,
     },
     acquisition: {
       fftSize: 32768,
@@ -855,20 +943,6 @@ export function initialState(): AppState {
       window: "hann",
       peakHold: false,
       coherentGen: true,
-    },
-    run: {
-      streaming: false,
-      stopping: false,
-      stats: { fps: 0, frameMs: 0, frames: 0 },
-      sigmaPeakDbv: null,
-      clip: { input: "none", output: false },
-      fittedOutputRangeDbv: null,
-      slotErrors: [],
-      outputOnly: false,
-      generatorRunning: false,
-      programLock: null,
-      triggers: {},
-      trigArmPending: {},
     },
     traces: initialTraces(),
     sources: initialSources(),

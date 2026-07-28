@@ -8,6 +8,7 @@ import { initialState } from "./store/state";
 import { tauriIpc } from "./ipc/ipc";
 import { scopeVM, spectrumVM, sweepVM } from "./store/selectors/chartvm";
 import { visibleTiles } from "./store/selectors/layout";
+import { debugState } from "./store/selectors/session";
 import { createWorkspaceStore } from "./store/wsstore";
 import { mountApp } from "./app";
 import { setRestToken } from "./store/actions/rest";
@@ -20,7 +21,10 @@ const wsStore = createWorkspaceStore();
 // asserts what the user sees, never a chart internal. `spectrumVM()` with
 // no argument keeps the M1 shape: the first displayed spectrum tile.
 (window as unknown as { qa40xV2Debug: unknown }).qa40xV2Debug = {
-  state: () => store.get(),
+  // `debugState`, not the raw tree: the E2 sessions fold moved device/run
+  // into devices.sessions — the projection keeps `state().run.*` (the four
+  // e2e adapter accessors) and console muscle memory working.
+  state: () => debugState(store.get()),
   spectrumVM: (tileId?: string) => {
     const s = store.get();
     const tile = tileId

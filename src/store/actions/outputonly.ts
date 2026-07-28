@@ -13,7 +13,7 @@
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
-import type { AppState } from "../state";
+import type { AppState, SessionKey } from "../state";
 import {
   focusedDevice,
   focusedRun,
@@ -22,7 +22,12 @@ import {
 import { slotsFromSources, startRun } from "./stream";
 import { toast } from "./ui";
 
-let chain: Promise<void> = Promise.resolve();
+/** Rebuild chains PER SESSION (issue #25 lot E2): several changes landing
+ * in the same tick must not leave a DAC looping a stale mix — and session
+ * B's rebuild must not queue behind session A's. Output-only remains a
+ * focused-session mode in E2 (sources drive the focused device, decision
+ * 1); the map removes the device-global either way. */
+const chains = new Map<SessionKey, Promise<void>>();
 
 function anyPlaying(s: AppState): boolean {
   return s.sources.order.some((id) => s.sources.byId[id]?.playing);
@@ -42,9 +47,11 @@ export function setOutputOnly(store: Store<AppState>, ipc: Ipc, on: boolean): vo
 /** Re-sync the DAC loop with the current state (queued; see module docs).
  * Source actions call this instead of `syncStream` while the mode is on. */
 export function syncOutputOnly(store: Store<AppState>, ipc: Ipc): void {
-  chain = chain
+  const key = store.get().devices.focus;
+  const chain = (chains.get(key) ?? Promise.resolve())
     .then(() => sync(store, ipc))
     .catch((e) => toast(store, "error", `Output-only: ${e}`));
+  chains.set(key, chain);
 }
 
 async function sync(store: Store<AppState>, ipc: Ipc): Promise<void> {

@@ -136,11 +136,14 @@ export interface StreamHandlers {
 /**
  * Start the backend stream: builds the push channel, dispatches decoded
  * messages to the handlers. Resolves when the backend accepted the start.
+ * `scope.deviceId` routes the start to a non-default runtime (issue #25
+ * lot E2 — absent/empty for slot 0, which stays arg-less by contract).
  */
 export async function startStream(
   ipc: Ipc,
   config: StreamConfig,
-  handlers: StreamHandlers
+  handlers: StreamHandlers,
+  scope: { deviceId?: string } = {}
 ): Promise<void> {
   const onFrame = new TauriChannel<StreamMsg>((msg) => {
     switch (msg.type) {
@@ -155,5 +158,5 @@ export async function startStream(
         break;
     }
   });
-  await ipc.call("stream_start", { config, onFrame });
+  await ipc.call("stream_start", { config, onFrame, ...scope });
 }

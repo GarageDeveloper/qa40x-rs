@@ -5,13 +5,17 @@
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
-import type { AppState, LevelOffsetsDb, RunState } from "../state";
+import type { AppState, LevelOffsetsDb, RunState, SessionKey } from "../state";
+import { SLOT0 } from "../state";
 import { autoConnectDeviceId } from "../selectors/devices";
 import {
   focusedDevice,
   focusedRun,
+  session,
+  sessionArgs,
+  updateDevice,
   updateFocusedDevice,
-  updateFocusedRun,
+  updateRun,
 } from "../selectors/session";
 import { refreshDevices } from "./devices";
 import { syncStream } from "./stream";
@@ -54,8 +58,13 @@ export async function connect(
   ipc: Ipc,
   opts: { silent?: boolean; deviceId?: string } = {}
 ): Promise<void> {
+  // The connect/demo flows OWN slot 0 (the E1 contract: open/
+  // open_first_physical/open_virtual all target the default runtime) —
+  // keyed on SLOT0, not the focus, so a future focus on slot ≥ 1 can never
+  // reroute the legacy connect path. `connect_additional_device` (E4) gets
+  // its own action.
   store.update("device/connecting", (s) =>
-    updateFocusedDevice(s, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
+    updateDevice(s, SLOT0, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
   );
   try {
     // Rule P3 (issue #25 lot D) lives at the CALL SITES: `deviceId` is
@@ -68,7 +77,7 @@ export async function connect(
     await ipc.call("connect_device", args);
     const info = await ipc.call("get_device_info", args);
     store.update("device/connected", (s) =>
-      updateFocusedDevice(s, (d) => ({ ...d, status: "connected", present: true, info }))
+      updateDevice(s, SLOT0, (d) => ({ ...d, status: "connected", present: true, info }))
     );
     // An explicit pick can open the VIRTUAL unit through this path too
     // (review #4): seed the demo hand-over baseline exactly like
@@ -76,16 +85,16 @@ export async function connect(
     // hardware as a plug-in edge and tear the chosen session down in 2 s.
     if (info?.is_virtual) {
       try {
-        demoHwPresent = await ipc.call("is_hardware_present", {});
+        demoHwPresent.set(SLOT0, await ipc.call("is_hardware_present", {}));
       } catch {
-        demoHwPresent = null; // unknown — the tick records a baseline first
+        demoHwPresent.set(SLOT0, null); // unknown — the tick records a baseline first
       }
     }
     await refreshConfig(store, ipc);
     toast(store, "success", `Connected to ${info?.model ?? "device"}`);
   } catch (e) {
     store.update("device/connect-failed", (s) =>
-      updateFocusedDevice(s, (d) => ({ ...d, status: "disconnected" }))
+      updateDevice(s, SLOT0, (d) => ({ ...d, status: "disconnected" }))
     );
     // Auto-connect retries every few seconds — only a MANUAL attempt may
     // toast, or a flaky cable turns into an error firehose.
@@ -97,14 +106,16 @@ export async function connect(
 }
 
 /**
- * Hardware presence seen by the LAST demo-session poll. Baseline for the
- * edge detection in {@link autoConnectTick}: a demo session hands over to
- * real hardware on an absent→present TRANSITION (the user plugs a unit in
- * mid-demo), never on mere presence — clicking Demo with a unit already
- * connected to the bus is an explicit choice that must stick.
- * `null` = no baseline yet (first poll after a demo connect only records).
+ * Hardware presence seen by the LAST demo-session poll, PER SESSION (issue
+ * #25: no device-global module state — though demo remains a slot-0 flow
+ * in practice). Baseline for the edge detection in {@link autoConnectTick}:
+ * a demo session hands over to real hardware on an absent→present
+ * TRANSITION (the user plugs a unit in mid-demo), never on mere presence —
+ * clicking Demo with a unit already connected to the bus is an explicit
+ * choice that must stick. Absent/`null` = no baseline yet (first poll
+ * after a demo connect only records).
  */
-let demoHwPresent: boolean | null = null;
+const demoHwPresent = new Map<SessionKey, boolean | null>();
 
 /**
  * Demo mode: connect to the embedded virtual QA40x. No hardware, no
@@ -116,28 +127,28 @@ export async function connectVirtual(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  demoHwPresent = null;
+  demoHwPresent.set(SLOT0, null);
   store.update("device/connecting", (s) =>
-    updateFocusedDevice(s, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
+    updateDevice(s, SLOT0, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
   );
   try {
     await ipc.call("connect_virtual_device", {});
     const info = await ipc.call("get_device_info", {});
     store.update("device/connected", (s) =>
-      updateFocusedDevice(s, (d) => ({ ...d, status: "connected", present: true, info }))
+      updateDevice(s, SLOT0, (d) => ({ ...d, status: "connected", present: true, info }))
     );
     // Seed the hand-over baseline NOW: hardware plugged in from here on is a
     // transition; hardware already on the bus was an explicit non-choice.
     try {
-      demoHwPresent = await ipc.call("is_hardware_present", {});
+      demoHwPresent.set(SLOT0, await ipc.call("is_hardware_present", {}));
     } catch {
-      demoHwPresent = null; // unknown — the tick records a baseline first
+      demoHwPresent.set(SLOT0, null); // unknown — the tick records a baseline first
     }
     await refreshConfig(store, ipc);
     toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
   } catch (e) {
     store.update("device/connect-failed", (s) =>
-      updateFocusedDevice(s, (d) => ({ ...d, status: "disconnected" }))
+      updateDevice(s, SLOT0, (d) => ({ ...d, status: "disconnected" }))
     );
     toast(store, "error", `Demo mode failed: ${e}`);
   }
@@ -153,7 +164,11 @@ export async function autoConnectTick(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  const { status, userDisconnected, info } = focusedDevice(store.get());
+  // The tick manages SLOT 0 only, like the connect flows it drives: added
+  // units (slots ≥ 1, lot E4) are opened explicitly and never auto-anything.
+  const slot0 = session(store.get(), SLOT0);
+  if (!slot0) return;
+  const { status, userDisconnected, info } = slot0.device;
 
   // Demo session: hand over to real hardware the moment a unit is PLUGGED
   // IN (absent→present edge — see demoHwPresent for why not mere presence).
@@ -162,8 +177,8 @@ export async function autoConnectTick(
   if (status === "connected" && info?.is_virtual) {
     try {
       const hw = await ipc.call("is_hardware_present", {});
-      const wasAbsent = demoHwPresent === false;
-      demoHwPresent = hw;
+      const wasAbsent = demoHwPresent.get(SLOT0) === false;
+      demoHwPresent.set(SLOT0, hw);
       if (hw && wasAbsent) {
         toast(store, "info", "QA40x plugged in — leaving demo mode");
         await disconnect(store, ipc);
@@ -179,9 +194,9 @@ export async function autoConnectTick(
   try {
     const present = await ipc.call("is_device_present", {});
     store.update("device/present", (s) =>
-      focusedDevice(s).present === present
+      session(s, SLOT0)?.device.present === present
         ? s
-        : updateFocusedDevice(s, (d) => ({ ...d, present }))
+        : updateDevice(s, SLOT0, (d) => ({ ...d, present }))
     );
     // Rule P4: honor an explicit PHYSICAL pick (else the picker and the
     // tick would fight — the user picks unit B, the tick opens unit A). A
@@ -199,16 +214,19 @@ export async function autoConnectTick(
 
 export async function disconnect(
   store: Store<AppState>,
-  ipc: Ipc
+  ipc: Ipc,
+  sessionKey: SessionKey = SLOT0
 ): Promise<void> {
   try {
     // The backend stops the stream loop / generator BEFORE closing the
     // device (a clean Stopped reaches the channel — no capture error).
-    await ipc.call("disconnect_device", {});
+    // Arg-less for slot 0 by the sessionArgs contract (the top-bar
+    // Disconnect); E4's group headers pass their own session key.
+    await ipc.call("disconnect_device", sessionArgs(store.get(), sessionKey));
   } finally {
     store.update("device/disconnected", (s) =>
-      updateFocusedRun(
-        updateFocusedDevice(s, (d) => ({
+      updateRun(
+        updateDevice(s, sessionKey, (d) => ({
           ...d,
           status: "disconnected",
           // Manual disconnect: hold off auto-reconnect until a manual connect.
@@ -218,6 +236,7 @@ export async function disconnect(
           telemetry: null,
           offsets: null,
         })),
+        sessionKey,
         runStoppedByDisconnect
       )
     );
@@ -241,15 +260,28 @@ function runStoppedByDisconnect(r: RunState): RunState {
  * monitor also fires after a MANUAL disconnect (it only sees "no longer
  * connected"), and any duplicate event must not re-toast or churn state.
  *
- * `_deviceId` names the lost unit (issue #25 lot C). Deliberately unused
- * while the UI holds a single device; lot E filters on it so unit A's loss
- * never tears down unit B's session.
+ * `deviceId` names the lost unit (issue #25 lot C); the loss is ROUTED to
+ * the session holding that id (lot E2) so unit A's loss never tears down
+ * unit B's session. Fallback to slot 0 covers the payload-less event
+ * (older backend, the e2e fake) AND an id no session has adopted yet (the
+ * post-connect enumeration hasn't landed) — the pre-E2 behavior for the
+ * only session that can be open then; E4 revisits when several are.
  */
-export function deviceLost(store: Store<AppState>, _deviceId: string | null = null): void {
-  if (focusedDevice(store.get()).status === "disconnected") return;
+export function deviceLost(store: Store<AppState>, deviceId: string | null = null): void {
+  const s0 = store.get();
+  const key =
+    (deviceId !== null
+      ? Object.values(s0.devices.sessions).find((x) => x.deviceId === deviceId)?.key
+      : undefined) ?? SLOT0;
+  // Idempotence: already disconnected (or no such session at all) — a
+  // duplicate monitor event must not re-toast or churn state. A session
+  // still "connecting" DOES tear down (pre-E2 behavior kept: the monitor
+  // can outrace a doomed connect's own failure path).
+  const status = session(s0, key)?.device.status;
+  if (status === undefined || status === "disconnected") return;
   store.update("device/lost", (s) =>
-    updateFocusedRun(
-      updateFocusedDevice(s, (d) => ({
+    updateRun(
+      updateDevice(s, key, (d) => ({
         ...d,
         status: "disconnected",
         present: false,
@@ -258,6 +290,7 @@ export function deviceLost(store: Store<AppState>, _deviceId: string | null = nu
         telemetry: null,
         offsets: null,
       })),
+      key,
       runStoppedByDisconnect
     )
   );
