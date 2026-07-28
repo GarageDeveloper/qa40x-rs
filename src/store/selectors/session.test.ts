@@ -10,15 +10,18 @@
  */
 import { describe, expect, it } from "vitest";
 import type { AppState, DeviceSession } from "../state";
-import { initialSession, initialState, SLOT0 } from "../state";
+import { HW_TRACE_IDS, initialSession, initialState, SLOT0 } from "../state";
 import {
   anyBusy,
   anyProgramLock,
   debugState,
+  deviceForTrace,
   focusedDevice,
   focusedRun,
   isRoutable,
+  runForTrace,
   sessionArgs,
+  sessionKeyForTrace,
   updateDevice,
   updateRun,
   updateSession,
@@ -170,5 +173,38 @@ describe("anyBusy — the bench-global enumeration gate (E2 review #9: pinned so
       device: { ...initialSession(1).device, status: "connecting" },
     });
     expect(anyBusy(connecting)).toBe(true);
+  });
+});
+
+describe("sessionKeyForTrace/runForTrace/deviceForTrace — a trace's OWNING session (issue #25 lot E3)", () => {
+  it("a hw id resolves to its slot's session key — @1 to slot-1, the verbatim id to slot-0", () => {
+    const s = initialState();
+    expect(sessionKeyForTrace(s, HW_TRACE_IDS.inputL)).toBe(SLOT0);
+    expect(sessionKeyForTrace(s, "hw-in-left@1")).toBe("slot-1");
+    expect(sessionKeyForTrace(s, "hw-out-right@4")).toBe("slot-4");
+  });
+
+  it("a non-hw id (memory/transform/program/unknown) resolves to the FOCUSED session, whatever the focus", () => {
+    let s = withSlot1(initialState());
+    s.devices.focus = "slot-1";
+    for (const id of ["mem-1", "xform-2", "prog-3", "some-unknown-id"]) {
+      expect(sessionKeyForTrace(s, id), id).toBe("slot-1");
+    }
+  });
+
+  it("runForTrace/deviceForTrace on a LIVE slot-1 session return that session's OWN sub-objects — never the focused one's", () => {
+    const s = withSlot1(initialState(), {
+      run: { ...initialSession(1).run, streaming: true },
+    });
+    expect(runForTrace(s, "hw-in-left@1")).toBe(s.devices.sessions["slot-1"].run);
+    expect(runForTrace(s, "hw-in-left@1")).not.toBe(focusedRun(s));
+    expect(deviceForTrace(s, "hw-in-left@1")).toBe(s.devices.sessions["slot-1"].device);
+  });
+
+  it("runForTrace/deviceForTrace on an ABSENT slot-1 session fall back to the focused session, never throw (a dormant doc-loaded trace)", () => {
+    const s = initialState(); // no slot-1 session minted
+    expect(() => runForTrace(s, "hw-in-left@1")).not.toThrow();
+    expect(runForTrace(s, "hw-in-left@1")).toBe(focusedRun(s));
+    expect(deviceForTrace(s, "hw-in-left@1")).toBe(focusedDevice(s));
   });
 });

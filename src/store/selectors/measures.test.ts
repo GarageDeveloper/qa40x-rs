@@ -86,3 +86,33 @@ describe("measureRequest", () => {
     });
   });
 });
+
+describe("measureRequest(s, slot) — per-slot projection (issue #25 lot E3)", () => {
+  beforeEach(() => clearAllFrames());
+
+  it("slot 1 requests through @1 ids; slot 0's own request is unaffected", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    tile(s).traces = ["hw-in-left@1"];
+    tile(s).measures = ["freq", "rms"];
+    expect(measureRequest(s, 1)).toEqual({
+      input_l: true,
+      input_r: false,
+      output_l: false,
+      output_r: false,
+    });
+    expect(measureRequest(s, 0)).toEqual({
+      input_l: false,
+      input_r: false,
+      output_l: false,
+      output_r: false,
+    });
+  });
+
+  it("measureRequest(s, 0) is byte-identical to the historic arg-less call", () => {
+    const s = initialState();
+    s.layout.pattern = "1";
+    tile(s).measures = ["freq", "rms"]; // tile-1's default member is Input L
+    expect(measureRequest(s, 0)).toEqual(measureRequest(s));
+  });
+});
