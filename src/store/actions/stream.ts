@@ -18,7 +18,7 @@ import type {
   SourceMeta,
   TraceMeta,
 } from "../state";
-import { captureBenchSignature, HW_TRACE_IDS } from "../state";
+import { captureBenchSignature, HW_TRACE_IDS, hwTraceIds } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import {
@@ -289,6 +289,11 @@ export function ingestFrame(
   if (frame.deviceId && sess.deviceId && frame.deviceId !== sess.deviceId) {
     warnFrameDeviceMismatch(key, frame.deviceId, sess.deviceId);
   }
+  // THIS session's endpoint traces (issue #25 lot E3): the frames cache,
+  // the trigger-snapshot cache and traces.byId all key on these ids, so
+  // two sessions streaming concurrently land on disjoint traces — slot 0
+  // keeps hw-in-left & co verbatim.
+  const ids = hwTraceIds(sess.slot);
   const seq = ++ingestSeq;
   const off = frame.offsets;
   // One snapshot for the whole frame (issue #40), computed BEFORE the cache
@@ -321,7 +326,7 @@ export function ingestFrame(
     }
   };
   put(
-    HW_TRACE_IDS.inputL,
+    ids.inputL,
     off.input_l,
     frame.input.l,
     frame.fd.inputL,
@@ -330,7 +335,7 @@ export function ingestFrame(
     frame.measures.inputL
   );
   put(
-    HW_TRACE_IDS.inputR,
+    ids.inputR,
     off.input_r,
     frame.input.r,
     frame.fd.inputR,
@@ -339,7 +344,7 @@ export function ingestFrame(
     frame.measures.inputR
   );
   put(
-    HW_TRACE_IDS.outputL,
+    ids.outputL,
     off.output_l,
     frame.output?.l,
     frame.fd.outputL,
@@ -348,7 +353,7 @@ export function ingestFrame(
     frame.measures.outputL
   );
   put(
-    HW_TRACE_IDS.outputR,
+    ids.outputR,
     off.output_r,
     frame.output?.r,
     frame.fd.outputR,
@@ -363,25 +368,25 @@ export function ingestFrame(
   // keyed by the endpoint that latched it. `waiting`/`stopped` write nothing
   // (the previous snapshot, if any, keeps holding NORMAL/SINGLE's picture).
   const snapSamples: Record<string, Float64Array> = {
-    [HW_TRACE_IDS.inputL]: frame.input.l.samples,
-    [HW_TRACE_IDS.inputR]: frame.input.r.samples,
+    [ids.inputL]: frame.input.l.samples,
+    [ids.inputR]: frame.input.r.samples,
   };
   if (frame.output) {
-    snapSamples[HW_TRACE_IDS.outputL] = frame.output.l.samples;
-    snapSamples[HW_TRACE_IDS.outputR] = frame.output.r.samples;
+    snapSamples[ids.outputL] = frame.output.l.samples;
+    snapSamples[ids.outputR] = frame.output.r.samples;
   }
   const snapOffsets: Record<string, number | null> = {
-    [HW_TRACE_IDS.inputL]: off.input_l,
-    [HW_TRACE_IDS.inputR]: off.input_r,
-    [HW_TRACE_IDS.outputL]: off.output_l,
-    [HW_TRACE_IDS.outputR]: off.output_r,
+    [ids.inputL]: off.input_l,
+    [ids.inputR]: off.input_r,
+    [ids.outputL]: off.output_l,
+    [ids.outputR]: off.output_r,
   };
   const runTriggers: RunState["triggers"] = {};
   const endpoints: [string, DecodedFrame["trigger"]["inputL"]][] = [
-    [HW_TRACE_IDS.inputL, frame.trigger.inputL],
-    [HW_TRACE_IDS.inputR, frame.trigger.inputR],
-    [HW_TRACE_IDS.outputL, frame.trigger.outputL],
-    [HW_TRACE_IDS.outputR, frame.trigger.outputR],
+    [ids.inputL, frame.trigger.inputL],
+    [ids.inputR, frame.trigger.inputR],
+    [ids.outputL, frame.trigger.outputL],
+    [ids.outputR, frame.trigger.outputR],
   ];
   // A `stopped` report may come from the in-flight frame captured under the
   // PRE-re-arm config — any other state proves the current config's scan
