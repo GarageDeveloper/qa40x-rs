@@ -126,3 +126,84 @@
 .traces__wt:hover {
   color: var(--ink-1);
 }
+
+/* -- device groups (issue #25 lot E4) -------------------------------- */
+
+.traces__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* "+ device" head select: same quiet-select idiom as ＋wt, wider face. */
+.traces__adddev {
+  width: 5em;
+}
+
+.traces__groups,
+.traces__tail,
+.traces__group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.traces__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.traces__group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+}
+
+.traces__group-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.traces__group-alias {
+  width: 5.5em;
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--ink-2);
+}
+
+.traces__group-ctls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 2px;
+}
+
+.traces__group-ctl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.traces__group-ctl-label {
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.traces__group-sel {
+  font-size: 11px;
+  min-width: 0;
+  flex: 1;
+}
