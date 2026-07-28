@@ -878,9 +878,11 @@ export class AppV2 {
     { id: string; label: string; badges: { tag: string; dim: boolean; tip: string }[] }[]
   > {
     return this.drv.eval(
+      // `.traces__row`, not direct children (lot E4): the rows nest under
+      // per-device group wrappers; row identity is the row class itself.
       () =>
         Array.from(
-          document.querySelectorAll('[data-testid="traces-list"] > *')
+          document.querySelectorAll('[data-testid="traces-list"] .traces__row')
         ).map((row) => ({
           id: (row as HTMLElement).dataset.key ?? "",
           label: row.querySelector(".traces__label")?.textContent ?? "",
