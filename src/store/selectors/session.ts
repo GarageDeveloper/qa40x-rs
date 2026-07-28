@@ -13,16 +13,19 @@
  *    bench and the idle-refresh gate must not enumerate while ANY session
  *    is busy, not just the focused one.
  */
+import type { TraceId } from "../../core/model";
 import type {
   AppState,
   DeviceSession,
   DeviceState,
   RunState,
 } from "../state";
-// Values from the LEAF module (never from state.ts): state.ts imports
+// Values from the LEAF modules only (never from state.ts): state.ts imports
 // focusedDevice from here at runtime, and a value import back into it
-// would recreate the cycle review #8 removed.
-import { SLOT0 } from "../sessionkey";
+// would recreate the cycle review #8 removed. hwtraces.ts is a leaf too
+// (lot E3): no runtime imports of its own.
+import { hwSlotOfTraceId } from "../hwtraces";
+import { SLOT0, sessionKeyForSlot } from "../sessionkey";
 import type { SessionKey } from "../sessionkey";
 
 /** The session for `key`, or null — never a phantom: writes to an absent
@@ -61,6 +64,30 @@ export function focusedRun(s: AppState): RunState {
  * first post-open enumeration adopts it). */
 export function focusedDeviceId(s: AppState): string | null {
   return focusedSession(s).deviceId;
+}
+
+/**
+ * The session that OWNS a trace (lot E3): a hw endpoint id carries its
+ * slot (`hw-in-left` → slot 0, `hw-in-left@1` → slot 1); any other id
+ * (memory / transform / program / unknown) resolves to the FOCUSED session
+ * — those traces are bench artifacts, not device endpoints. Reads through
+ * `runForTrace`/`deviceForTrace` fall back to the focused session when the
+ * owning slot has no live session (a dormant doc-loaded trace): legible,
+ * never a TypeError.
+ */
+export function sessionKeyForTrace(s: AppState, id: TraceId): SessionKey {
+  const slot = hwSlotOfTraceId(id);
+  return slot === null ? s.devices.focus : sessionKeyForSlot(slot);
+}
+
+/** The run state of the session owning `id` (see sessionKeyForTrace). */
+export function runForTrace(s: AppState, id: TraceId): RunState {
+  return session(s, sessionKeyForTrace(s, id))?.run ?? focusedRun(s);
+}
+
+/** The device state of the session owning `id`. */
+export function deviceForTrace(s: AppState, id: TraceId): DeviceState {
+  return session(s, sessionKeyForTrace(s, id))?.device ?? focusedDevice(s);
 }
 
 /** Immutable write to one session. Returns `s` UNCHANGED (same reference)

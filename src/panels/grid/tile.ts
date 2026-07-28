@@ -32,7 +32,7 @@ import {
   setTriggerMode,
 } from "../../store/actions/trigger";
 import { shownTraces } from "../../store/selectors/layout";
-import { focusedDevice, focusedRun } from "../../store/selectors/session";
+import { focusedDevice, focusedRun, runForTrace } from "../../store/selectors/session";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
 import { programProgressText } from "../../store/actions/programs";
@@ -937,7 +937,10 @@ export function createTile(
       // `vm.trigger` is null (e.g. no snapshot latched yet).
       const trigSourceId = tileTriggerSourceId(s, tile);
       const trigSettings = trigSourceId ? (s.triggers[trigSourceId] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
-      const trigState = trigSourceId ? focusedRun(s).triggers[trigSourceId]?.state : undefined;
+      // The endpoint's OWNING session (lot E3): the chip must track the
+      // run that actually scans this endpoint, not the focused one.
+      const trigRun = trigSourceId ? runForTrace(s, trigSourceId) : null;
+      const trigState = trigRun && trigSourceId ? trigRun.triggers[trigSourceId]?.state : undefined;
       trigChip.textContent = triggerChipText(trigSettings.mode, trigSettings.edge, trigState);
       armBtn.toggleAttribute("disabled", trigSettings.mode !== "single");
       // Armed = SINGLE still waiting for its shot: state `waiting` (or none
@@ -948,7 +951,7 @@ export function createTile(
       armBtn.classList.toggle(
         "btn--primary",
         trigSettings.mode === "single" &&
-          ((trigSourceId !== null && focusedRun(s).trigArmPending[trigSourceId] === true) ||
+          ((trigSourceId !== null && trigRun?.trigArmPending[trigSourceId] === true) ||
             (trigState !== "triggered" && trigState !== "stopped"))
       );
 

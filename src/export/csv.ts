@@ -24,7 +24,7 @@
  * -∞ dB) become empty cells.
  */
 import type { AppState, CaptureProvenance, TraceMeta } from "../store/state";
-import { captureBenchSignature, liveCaptureProvenance } from "../store/state";
+import { captureBenchSignature, hwSlotOfTraceId, liveCaptureProvenance } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
 import { focusedDevice } from "../store/selectors/session";
 import type { DecodedSweep } from "../data/frames";
@@ -256,11 +256,16 @@ export function traceProvenance(
  * referenced trace ids to their labels while they still exist. */
 export function traceSourceLine(s: AppState, meta: TraceMeta): string {
   const src = meta.source;
+  // Slot ≥ 1 endpoints name their device (lot E3) — two "Input L" rows in
+  // one export must be tellable apart; slot 0 keeps its historic string
+  // verbatim. The capture_* header lines carry the model/serial.
+  const slot = hwSlotOfTraceId(meta.id) ?? 0;
+  const dev = slot === 0 ? "" : ` (device #${slot + 1})`;
   switch (src.kind) {
     case "hw_input":
-      return `hardware input ${src.channel === "left" ? "L" : "R"}`;
+      return `hardware input ${src.channel === "left" ? "L" : "R"}${dev}`;
     case "hw_output":
-      return `hardware output ${src.channel === "left" ? "L" : "R"}`;
+      return `hardware output ${src.channel === "left" ? "L" : "R"}${dev}`;
     case "memory": {
       const from = s.traces.byId[src.frozenFrom]?.label ?? src.frozenFrom;
       return `frozen copy of ${from}${src.ratio ? " (ratio)" : ""}`;
