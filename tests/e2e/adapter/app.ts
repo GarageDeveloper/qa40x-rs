@@ -150,6 +150,168 @@ export class AppV2 {
     return this.drv.text('[data-testid="device-identity"]');
   }
 
+  /* -- multi-device (issue #25 lot E4) --------------------------------- */
+
+  /** How many built-in virtual units the fake enumerates (default 1). */
+  async setVirtualUnits(n: number): Promise<void> {
+    await this.drv.eval(
+      (v: number) => window.__qa40xE2E.device.setVirtualUnits(v),
+      n
+    );
+  }
+
+  /** Unplug ONE physical unit — per-unit loss, id in the event payload. */
+  async unplugUnit(id: string): Promise<void> {
+    await this.drv.eval(
+      (v: string) => window.__qa40xE2E.device.unplugUnit(v),
+      id
+    );
+  }
+
+  /** Fake-side truth: slots with an open unit, ascending. */
+  async openSlots(): Promise<number[]> {
+    return this.drv.eval(() => window.__qa40xE2E.device.openSlots(), undefined as void);
+  }
+
+  /** Fake-side truth: the stream config `slot`'s unit last adopted. */
+  async unitStreamSlotCount(slot: number): Promise<number | null> {
+    return this.drv.eval(
+      (v: number) => {
+        const cfg = window.__qa40xE2E.device.streamConfigOf(v);
+        return cfg === null ? null : cfg.slots.length;
+      },
+      slot
+    );
+  }
+
+  /** Fake-side truth: frames `slot`'s unit pushed on its current stream. */
+  async unitFrameCount(slot: number): Promise<number> {
+    return this.drv.eval(
+      (v: number) => window.__qa40xE2E.device.frameCountOf(v),
+      slot
+    );
+  }
+
+  /** Every session's transport scalars + the focus (debug-hook probe). */
+  async sessions(): Promise<{
+    focus: string;
+    byKey: Record<
+      string,
+      {
+        slot: number;
+        deviceId: string | null;
+        status: string;
+        streaming: boolean;
+        frames: number;
+      }
+    >;
+  }> {
+    return this.drv.eval(() => {
+      const dbg = (
+        window as unknown as {
+          qa40xV2Debug: { sessions(): never };
+        }
+      ).qa40xV2Debug;
+      return dbg.sessions();
+    }, undefined as void);
+  }
+
+  /** Add an enumerated unit from the Traces-panel "+ device" select. */
+  async addDeviceFromPanel(id: string): Promise<void> {
+    await this.setSelect("traces-add-device", id);
+  }
+
+  /** The "+ device" select's option values (excluding the placeholder). */
+  async addableOptions(): Promise<string[]> {
+    return this.drv.eval(
+      () =>
+        Array.from(
+          document.querySelectorAll('[data-testid="traces-add-device"] option')
+        )
+          .map((o) => (o as HTMLOptionElement).value)
+          .filter((v) => v !== ""),
+      undefined as void
+    );
+  }
+
+  /** Group titles by slot, as rendered ("<label>" or "<label> — not connected"). */
+  async groupTitle(slot: number): Promise<string | null> {
+    return this.drv.text(`[data-testid="group-title-${slot}"]`);
+  }
+
+  /** Number of device groups the panel renders. */
+  async groupCount(): Promise<number> {
+    return this.drv.eval(
+      () => document.querySelectorAll(".traces__group").length,
+      undefined as void
+    );
+  }
+
+  /** Click a group header's Run/Stop. */
+  async groupRun(slot: number): Promise<void> {
+    await this.drv.click(`[data-testid="group-run-${slot}"]`);
+  }
+
+  async groupRunDisabled(slot: number): Promise<boolean> {
+    return this.drv.eval(
+      (v: number) =>
+        (
+          document.querySelector(
+            `[data-testid="group-run-${v}"]`
+          ) as HTMLButtonElement | null
+        )?.disabled === true,
+      slot
+    );
+  }
+
+  /** Click a group header's Remove ✕. */
+  async groupRemove(slot: number): Promise<void> {
+    await this.drv.click(`[data-testid="group-remove-${slot}"]`);
+  }
+
+  /** Type an alias into a group header's editor (commits via change). */
+  async setGroupAlias(slot: number, alias: string): Promise<void> {
+    await this.drv.eval(
+      (a: { slot: number; alias: string }) => {
+        const input = document.querySelector(
+          `[data-testid="group-alias-${a.slot}"]`
+        ) as HTMLInputElement;
+        input.value = a.alias;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      { slot, alias }
+    );
+  }
+
+  /** The toolbar device-select's mode: "pick" (lot D) or "focus" (E4). */
+  async focusMode(): Promise<string | null> {
+    return this.drv.eval(
+      () =>
+        (
+          document.querySelector(
+            '[data-testid="device-select"]'
+          ) as HTMLElement | null
+        )?.dataset.mode ?? null,
+      undefined as void
+    );
+  }
+
+  /** Focus a session from the toolbar selector (focus mode only). */
+  async pickFocus(key: string): Promise<void> {
+    await this.setSelect("device-select", key);
+  }
+
+  /** The device-select's option LABELS (alias-aware in focus mode). */
+  async deviceOptionLabels(): Promise<string[]> {
+    return this.drv.eval(
+      () =>
+        Array.from(
+          document.querySelectorAll('[data-testid="device-select"] option')
+        ).map((o) => o.textContent ?? ""),
+      undefined as void
+    );
+  }
+
   async telemetry(): Promise<string | null> {
     return this.drv.text('[data-testid="device-telemetry"]');
   }
