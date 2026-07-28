@@ -5,8 +5,14 @@
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
-import type { AppState, LevelOffsetsDb } from "../state";
+import type { AppState, LevelOffsetsDb, RunState } from "../state";
 import { autoConnectDeviceId } from "../selectors/devices";
+import {
+  focusedDevice,
+  focusedRun,
+  updateFocusedDevice,
+  updateFocusedRun,
+} from "../selectors/session";
 import { refreshDevices } from "./devices";
 import { syncStream } from "./stream";
 import { toast } from "./ui";
@@ -38,10 +44,9 @@ async function refreshConfig(store: Store<AppState>, ipc: Ipc): Promise<void> {
     ipc.call("get_device_config", {}),
     readOffsets(ipc),
   ]);
-  store.update("device/config", (s) => ({
-    ...s,
-    device: { ...s.device, config, offsets },
-  }));
+  store.update("device/config", (s) =>
+    updateFocusedDevice(s, (d) => ({ ...d, config, offsets }))
+  );
 }
 
 export async function connect(
@@ -49,10 +54,9 @@ export async function connect(
   ipc: Ipc,
   opts: { silent?: boolean; deviceId?: string } = {}
 ): Promise<void> {
-  store.update("device/connecting", (s) => ({
-    ...s,
-    device: { ...s.device, status: "connecting", userDisconnected: false },
-  }));
+  store.update("device/connecting", (s) =>
+    updateFocusedDevice(s, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
+  );
   try {
     // Rule P3 (issue #25 lot D) lives at the CALL SITES: `deviceId` is
     // passed only when the user explicitly picked a unit (see
@@ -63,10 +67,9 @@ export async function connect(
     const args = opts.deviceId !== undefined ? { deviceId: opts.deviceId } : {};
     await ipc.call("connect_device", args);
     const info = await ipc.call("get_device_info", args);
-    store.update("device/connected", (s) => ({
-      ...s,
-      device: { ...s.device, status: "connected", present: true, info },
-    }));
+    store.update("device/connected", (s) =>
+      updateFocusedDevice(s, (d) => ({ ...d, status: "connected", present: true, info }))
+    );
     // An explicit pick can open the VIRTUAL unit through this path too
     // (review #4): seed the demo hand-over baseline exactly like
     // connectVirtual, or a stale `false` baseline would read the existing
@@ -81,10 +84,9 @@ export async function connect(
     await refreshConfig(store, ipc);
     toast(store, "success", `Connected to ${info?.model ?? "device"}`);
   } catch (e) {
-    store.update("device/connect-failed", (s) => ({
-      ...s,
-      device: { ...s.device, status: "disconnected" },
-    }));
+    store.update("device/connect-failed", (s) =>
+      updateFocusedDevice(s, (d) => ({ ...d, status: "disconnected" }))
+    );
     // Auto-connect retries every few seconds — only a MANUAL attempt may
     // toast, or a flaky cable turns into an error firehose.
     if (!opts.silent) toast(store, "error", `Connect failed: ${e}`);
@@ -115,17 +117,15 @@ export async function connectVirtual(
   ipc: Ipc
 ): Promise<void> {
   demoHwPresent = null;
-  store.update("device/connecting", (s) => ({
-    ...s,
-    device: { ...s.device, status: "connecting", userDisconnected: false },
-  }));
+  store.update("device/connecting", (s) =>
+    updateFocusedDevice(s, (d) => ({ ...d, status: "connecting", userDisconnected: false }))
+  );
   try {
     await ipc.call("connect_virtual_device", {});
     const info = await ipc.call("get_device_info", {});
-    store.update("device/connected", (s) => ({
-      ...s,
-      device: { ...s.device, status: "connected", present: true, info },
-    }));
+    store.update("device/connected", (s) =>
+      updateFocusedDevice(s, (d) => ({ ...d, status: "connected", present: true, info }))
+    );
     // Seed the hand-over baseline NOW: hardware plugged in from here on is a
     // transition; hardware already on the bus was an explicit non-choice.
     try {
@@ -136,10 +136,9 @@ export async function connectVirtual(
     await refreshConfig(store, ipc);
     toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
   } catch (e) {
-    store.update("device/connect-failed", (s) => ({
-      ...s,
-      device: { ...s.device, status: "disconnected" },
-    }));
+    store.update("device/connect-failed", (s) =>
+      updateFocusedDevice(s, (d) => ({ ...d, status: "disconnected" }))
+    );
     toast(store, "error", `Demo mode failed: ${e}`);
   }
   void refreshDevices(store, ipc);
@@ -154,7 +153,7 @@ export async function autoConnectTick(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  const { status, userDisconnected, info } = store.get().device;
+  const { status, userDisconnected, info } = focusedDevice(store.get());
 
   // Demo session: hand over to real hardware the moment a unit is PLUGGED
   // IN (absent→present edge — see demoHwPresent for why not mere presence).
@@ -180,9 +179,9 @@ export async function autoConnectTick(
   try {
     const present = await ipc.call("is_device_present", {});
     store.update("device/present", (s) =>
-      s.device.present === present
+      focusedDevice(s).present === present
         ? s
-        : { ...s, device: { ...s.device, present } }
+        : updateFocusedDevice(s, (d) => ({ ...d, present }))
     );
     // Rule P4: honor an explicit PHYSICAL pick (else the picker and the
     // tick would fight — the user picks unit B, the tick opens unit A). A
@@ -207,29 +206,30 @@ export async function disconnect(
     // device (a clean Stopped reaches the channel — no capture error).
     await ipc.call("disconnect_device", {});
   } finally {
-    store.update("device/disconnected", (s) => ({
-      ...s,
-      device: {
-        ...s.device,
-        status: "disconnected",
-        // Manual disconnect: hold off auto-reconnect until a manual connect.
-        userDisconnected: true,
-        info: null,
-        config: null,
-        telemetry: null,
-        offsets: null,
-      },
-      run: runStoppedByDisconnect(s),
-    }));
+    store.update("device/disconnected", (s) =>
+      updateFocusedRun(
+        updateFocusedDevice(s, (d) => ({
+          ...d,
+          status: "disconnected",
+          // Manual disconnect: hold off auto-reconnect until a manual connect.
+          userDisconnected: true,
+          info: null,
+          config: null,
+          telemetry: null,
+          offsets: null,
+        })),
+        runStoppedByDisconnect
+      )
+    );
   }
   void refreshDevices(store, ipc);
 }
 
 /** Run-state mirror of a disconnect: nothing drives the DAC anymore, and
  * the output-only session must not silently rebuild on the next edit. */
-function runStoppedByDisconnect(s: AppState): AppState["run"] {
+function runStoppedByDisconnect(r: RunState): RunState {
   return {
-    ...s.run,
+    ...r,
     streaming: false,
     generatorRunning: false,
     outputOnly: false,
@@ -246,20 +246,21 @@ function runStoppedByDisconnect(s: AppState): AppState["run"] {
  * never tears down unit B's session.
  */
 export function deviceLost(store: Store<AppState>, _deviceId: string | null = null): void {
-  if (store.get().device.status === "disconnected") return;
-  store.update("device/lost", (s) => ({
-    ...s,
-    device: {
-      ...s.device,
-      status: "disconnected",
-      present: false,
-      info: null,
-      config: null,
-      telemetry: null,
-      offsets: null,
-    },
-    run: runStoppedByDisconnect(s),
-  }));
+  if (focusedDevice(store.get()).status === "disconnected") return;
+  store.update("device/lost", (s) =>
+    updateFocusedRun(
+      updateFocusedDevice(s, (d) => ({
+        ...d,
+        status: "disconnected",
+        present: false,
+        info: null,
+        config: null,
+        telemetry: null,
+        offsets: null,
+      })),
+      runStoppedByDisconnect
+    )
+  );
   // Info, not error: an unplug is a state change (LED, greyed controls and
   // the status bar already carry it), and info toasts auto-dismiss —
   // error toasts stay until closed by hand.
@@ -314,7 +315,9 @@ export async function refreshTelemetry(
   store: Store<AppState>,
   ipc: Ipc
 ): Promise<void> {
-  const { device, run } = store.get();
+  const s = store.get();
+  const device = focusedDevice(s);
+  const run = focusedRun(s);
   if (device.status !== "connected") return;
   try {
     // Idle: fire the ~1 s keepalive — it pings the link register (keeps the
@@ -326,10 +329,9 @@ export async function refreshTelemetry(
       ? await ipc.call("last_telemetry", {})
       : await ipc.call("keepalive", {});
     if (telemetry) {
-      store.update("device/telemetry", (s) => ({
-        ...s,
-        device: { ...s.device, telemetry },
-      }));
+      store.update("device/telemetry", (st) =>
+        updateFocusedDevice(st, (d) => ({ ...d, telemetry }))
+      );
     }
   } catch {
     // Telemetry is best-effort; a failed poll must not toast-spam.

@@ -20,6 +20,7 @@ import type {
   SourceMeta,
   SourceRoute,
 } from "../state";
+import { focusedDevice, focusedRun } from "../selectors/session";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 
@@ -85,7 +86,7 @@ function defaultSource(kind: SourceKind, id: string, label: string): SourceMeta 
 
 /** Sync whichever loop owns the DAC after a source mutation. */
 function syncActive(store: Store<AppState>, ipc: Ipc): void {
-  if (store.get().run.outputOnly) syncOutputOnly(store, ipc);
+  if (focusedRun(store.get()).outputOnly) syncOutputOnly(store, ipc);
   else syncStream(store, ipc);
 }
 
@@ -216,19 +217,19 @@ export function setSourcePlaying(
 ): void {
   // A running measurement program owns the device: the UI greys the
   // transports with the reason, and the action refuses as backstop.
-  if (store.get().run.programLock !== null) return;
+  if (focusedRun(store.get()).programLock !== null) return;
   patch(store, playing ? "sources/play" : "sources/pause", id, (src) => ({
     ...src,
     playing,
   }));
   const s = store.get();
-  if (s.run.outputOnly) {
+  if (focusedRun(s).outputOnly) {
     syncOutputOnly(store, ipc);
     return;
   }
   // Play auto-starts the stream (see module docs); otherwise the running
   // loop just follows the new membership.
-  if (playing && !s.run.streaming && s.device.status === "connected") {
+  if (playing && !focusedRun(s).streaming && focusedDevice(s).status === "connected") {
     void startRun(store, ipc);
   } else {
     syncStream(store, ipc);

@@ -10,10 +10,16 @@ import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
 import { putTriggerSnapshot } from "../../data/triggered";
 import type { Store } from "../store";
-import type { AppState, CaptureProvenance, SourceMeta, TraceMeta } from "../state";
+import type { AppState, CaptureProvenance, RunState, SourceMeta, TraceMeta } from "../state";
 import { captureBenchSignature, HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
+import {
+  focusedDevice,
+  focusedRun,
+  updateFocusedDevice,
+  updateFocusedRun,
+} from "../selectors/session";
 import { triggerRequest } from "../selectors/trigger";
 import { toast } from "./ui";
 
@@ -99,7 +105,7 @@ export function slotFromSource(
  * toggle is off (issue #14 — "Round to eliminate leakage" in the official
  * app). The sources panel shows this value next to the ask when it differs. */
 export function playedFrequencyHz(s: AppState, hz: number): number {
-  const sampleRate = s.device.config?.sample_rate ?? 48000;
+  const sampleRate = focusedDevice(s).config?.sample_rate ?? 48000;
   const clamped = Math.min(Math.max(hz, 1), (sampleRate / 2) * 0.98);
   return s.acquisition.coherentGen
     ? snapToBin(clamped, s.acquisition.fftSize, sampleRate)
@@ -161,7 +167,8 @@ export function buildStreamConfig(s: AppState): StreamConfig {
 let lastCaptureSig: string | null = null;
 let lastCapture: CaptureProvenance | null = null;
 export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): CaptureProvenance {
-  const info = s.device.info;
+  const device = focusedDevice(s);
+  const info = device.info;
   const next: CaptureProvenance = {
     device: info
       ? {
@@ -172,7 +179,7 @@ export function frameCaptureProvenance(s: AppState, frame: DecodedFrame): Captur
         }
       : null,
     sampleRateHz: frame.sampleRate,
-    inputRangeDbv: s.device.config?.input_gain ?? null,
+    inputRangeDbv: device.config?.input_gain ?? null,
     outputRangeDbv: frame.mix.fitted_output_range_dbv,
     offsets: frame.offsets,
     fftSize: s.acquisition.fftSize,
@@ -294,7 +301,7 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
     [HW_TRACE_IDS.outputL]: off.output_l,
     [HW_TRACE_IDS.outputR]: off.output_r,
   };
-  const runTriggers: AppState["run"]["triggers"] = {};
+  const runTriggers: RunState["triggers"] = {};
   const endpoints: [string, DecodedFrame["trigger"]["inputL"]][] = [
     [HW_TRACE_IDS.inputL, frame.trigger.inputL],
     [HW_TRACE_IDS.inputR, frame.trigger.inputR],
@@ -333,11 +340,10 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
       if (w.hasFd) domains.push("fd");
       byId[w.id] = { ...t, seq, offsetDb: w.offsetDb, domains, capture };
     }
-    return {
-      ...s,
-      traces: { ...s.traces, byId },
-      run: {
-        ...s.run,
+    const withTraces = { ...s, traces: { ...s.traces, byId } };
+    return updateFocusedDevice(
+      updateFocusedRun(withTraces, (r) => ({
+        ...r,
         // Transport state belongs to start/stop and the Stopped event — a
         // draining frame arriving after an (optimistic) stop must not flip
         // the button back to "Stop".
@@ -355,20 +361,20 @@ export function ingestFrame(store: Store<AppState>, frame: DecodedFrame): void {
         triggers: runTriggers,
         trigArmPending: armSettled.length
           ? Object.fromEntries(
-              Object.entries(s.run.trigArmPending).filter(([k]) => !armSettled.includes(k))
+              Object.entries(r.trigArmPending).filter(([k]) => !armSettled.includes(k))
             )
-          : s.run.trigArmPending,
-      },
-      device: {
-        ...s.device,
+          : r.trigArmPending,
+      })),
+      (d) => ({
+        ...d,
         // The frame is the truth for offsets AND the fitted output range —
         // the loop may have moved reg 6 since the last config read.
         offsets: frame.offsets,
-        config: s.device.config
-          ? { ...s.device.config, output_gain: frame.mix.fitted_output_range_dbv }
-          : s.device.config,
-      },
-    };
+        config: d.config
+          ? { ...d.config, output_gain: frame.mix.fitted_output_range_dbv }
+          : d.config,
+      })
+    );
   });
 }
 
@@ -399,10 +405,10 @@ export async function startRun(
 ): Promise<void> {
   if (stopInFlight) await stopInFlight; // user intent order: stop, THEN start
   let s = store.get();
-  if (s.run.streaming || s.device.status !== "connected") return;
+  if (focusedRun(s).streaming || focusedDevice(s).status !== "connected") return;
   // A measurement program owns the device exclusively (M4): its completion
   // resumes the stream itself; nothing else may start one meanwhile.
-  if (s.run.programLock !== null) return;
+  if (focusedRun(s).programLock !== null) return;
   if (
     opts.playAllIfIdle &&
     s.sources.order.length > 0 &&
@@ -422,15 +428,14 @@ export async function startRun(
     }));
     s = store.get();
   }
-  if (s.run.outputOnly || s.run.generatorRunning) {
+  if (focusedRun(s).outputOnly || focusedRun(s).generatorRunning) {
     // Run is an explicit ask for capture: it takes the DAC back (stream_start
     // stops the gap-free generator backend-side) and ends the session mode —
     // a lingering "output only" flag would silently rebuild the generator on
     // the next source edit and kill this very stream.
-    store.update("stream/leave-output-only", (st) => ({
-      ...st,
-      run: { ...st.run, outputOnly: false, generatorRunning: false },
-    }));
+    store.update("stream/leave-output-only", (st) =>
+      updateFocusedRun(st, (r) => ({ ...r, outputOnly: false, generatorRunning: false }))
+    );
   }
   const gen = ++streamGen;
   try {
@@ -443,16 +448,14 @@ export async function startRun(
       },
       onStopped: () => {
         if (gen !== streamGen) return; // a superseded loop's goodbye
-        store.update("stream/stopped", (st) => ({
-          ...st,
-          run: { ...st.run, streaming: false },
-        }));
+        store.update("stream/stopped", (st) =>
+          updateFocusedRun(st, (r) => ({ ...r, streaming: false }))
+        );
       },
     });
-    store.update("stream/started", (st) => ({
-      ...st,
-      run: { ...st.run, streaming: true },
-    }));
+    store.update("stream/started", (st) =>
+      updateFocusedRun(st, (r) => ({ ...r, streaming: true }))
+    );
   } catch (e) {
     toast(store, "error", `Run failed: ${e}`);
   }
@@ -464,10 +467,9 @@ export function stopRun(store: Store<AppState>, ipc: Ipc): Promise<void> {
   // backend drains its last frame for up to a second — the M3 "had to press
   // Stop twice" report). `stopping` disables the transport button until the
   // backend acknowledged; a programmatic start (play) queues behind it.
-  store.update("stream/stop-requested", (s) => ({
-    ...s,
-    run: { ...s.run, streaming: false, stopping: true },
-  }));
+  store.update("stream/stop-requested", (s) =>
+    updateFocusedRun(s, (r) => ({ ...r, streaming: false, stopping: true }))
+  );
   stopInFlight = (async () => {
     try {
       await ipc.call("stream_stop", {});
@@ -475,10 +477,9 @@ export function stopRun(store: Store<AppState>, ipc: Ipc): Promise<void> {
       toast(store, "error", `Stop failed: ${e}`);
     } finally {
       stopInFlight = null;
-      store.update("stream/stop-acknowledged", (s) => ({
-        ...s,
-        run: { ...s.run, stopping: false },
-      }));
+      store.update("stream/stop-acknowledged", (s) =>
+        updateFocusedRun(s, (r) => ({ ...r, stopping: false }))
+      );
     }
   })();
   return stopInFlight;
@@ -489,7 +490,7 @@ export function stopRun(store: Store<AppState>, ipc: Ipc): Promise<void> {
  * that change acquisition / sources / trace visibility call this LAST.
  */
 export function syncStream(store: Store<AppState>, ipc: Ipc): void {
-  if (!store.get().run.streaming) return;
+  if (!focusedRun(store.get()).streaming) return;
   void ipc
     .call("stream_update", { config: buildStreamConfig(store.get()) })
     .catch((e) => toast(store, "error", `Stream update: ${e}`));

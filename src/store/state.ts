@@ -22,6 +22,9 @@ import type {
   UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
+// Runtime-safe circular pair: selectors/session.ts imports ONLY types from
+// this module, so its import edge is erased at compile time.
+import { focusedDevice } from "./selectors/session";
 
 /**
  * Per-converter, per-channel dBFS→dBV display offsets. Four values, never
@@ -237,7 +240,8 @@ export function captureBenchSignature(c: CaptureProvenance): string {
  * frame's own sampleRate/offsets). The export compares a trace's snapshot
  * against this to decide whether the bench has moved since capture. */
 export function liveCaptureProvenance(s: AppState): CaptureProvenance {
-  const info = s.device.info;
+  const device = focusedDevice(s);
+  const info = device.info;
   return {
     device: info
       ? {
@@ -247,10 +251,10 @@ export function liveCaptureProvenance(s: AppState): CaptureProvenance {
           isVirtual: info.is_virtual,
         }
       : null,
-    sampleRateHz: s.device.config?.sample_rate ?? null,
-    inputRangeDbv: s.device.config?.input_gain ?? null,
-    outputRangeDbv: s.device.config?.output_gain ?? null,
-    offsets: s.device.offsets,
+    sampleRateHz: device.config?.sample_rate ?? null,
+    inputRangeDbv: device.config?.input_gain ?? null,
+    outputRangeDbv: device.config?.output_gain ?? null,
+    offsets: device.offsets,
     fftSize: s.acquisition.fftSize,
     window: s.acquisition.window,
     averaging: { ...s.acquisition.averaging },

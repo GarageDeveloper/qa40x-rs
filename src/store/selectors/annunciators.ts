@@ -7,6 +7,7 @@
  * derivation was an early mistake; keep it a pure function of the range.
  */
 import type { AppState } from "../state";
+import { focusedDevice, focusedRun } from "./session";
 
 export const ATTEN_THRESHOLD_DBV = 24;
 
@@ -27,7 +28,8 @@ export function attenEngaged(inputRangeDbv: number): boolean {
 }
 
 export function annunciators(s: AppState): Annunciator[] {
-  const cfg = s.device.config;
+  const cfg = focusedDevice(s).config;
+  const run = focusedRun(s);
   const inputDbv = cfg?.input_gain ?? null;
   const badges: Annunciator[] = [
     {
@@ -41,11 +43,11 @@ export function annunciators(s: AppState): Annunciator[] {
       // of full scale, latched so transients stay visible), "none" = unlit.
       key: "clip",
       label: "CLIP",
-      lit: s.run.clip.input !== "none",
-      alarm: s.run.clip.input === "clip",
-      warn: s.run.clip.input === "near",
+      lit: run.clip.input !== "none",
+      alarm: run.clip.input === "clip",
+      warn: run.clip.input === "near",
     },
-    { key: "outclip", label: "OUT CLIP", lit: s.run.clip.output, alarm: true },
+    { key: "outclip", label: "OUT CLIP", lit: run.clip.output, alarm: true },
     {
       key: "avg",
       label:

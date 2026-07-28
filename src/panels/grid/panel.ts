@@ -14,6 +14,7 @@ import { startRun, stopRun } from "../../store/actions/stream";
 import { programLockReason } from "../../store/actions/programs";
 import { moveTile, setPattern } from "../../store/actions/layout";
 import { visibleTiles } from "../../store/selectors/layout";
+import { focusedDevice, focusedRun } from "../../store/selectors/session";
 import {
   resetAveraging,
   resetMeasureStats,
@@ -45,7 +46,7 @@ export function mountGridPanel(
     {
       "data-testid": "btn-run",
       onclick: () => {
-        if (store.get().run.streaming) void stopRun(store, ipc);
+        if (focusedRun(store.get()).streaming) void stopRun(store, ipc);
         else void startRun(store, ipc, { playAllIfIdle: true });
       },
     },
@@ -166,11 +167,11 @@ export function mountGridPanel(
   let lastFrameAt = performance.now();
   store.select(
     (s) => ({
-      streaming: s.run.streaming,
-      stopping: s.run.stopping,
-      fps: s.run.stats.fps,
-      frames: s.run.stats.frames,
-      connected: s.device.status === "connected",
+      streaming: focusedRun(s).streaming,
+      stopping: focusedRun(s).stopping,
+      fps: focusedRun(s).stats.fps,
+      frames: focusedRun(s).stats.frames,
+      connected: focusedDevice(s).status === "connected",
       lock: programLockReason(s),
     }),
     ({ streaming, stopping, fps, connected, lock }) => {
@@ -193,11 +194,11 @@ export function mountGridPanel(
   // moves for seconds), show an estimated progress of the current frame.
   setInterval(() => {
     const s = store.get();
-    if (!s.run.streaming) return;
+    if (!focusedRun(s).streaming) return;
     const pct = acquisitionProgress(
       performance.now() - lastFrameAt,
       s.acquisition.fftSize,
-      s.device.config?.sample_rate ?? 48000
+      focusedDevice(s).config?.sample_rate ?? 48000
     );
     if (pct !== null) fpsNode.textContent = `acquiring… ${pct}%`;
   }, 250);
@@ -240,14 +241,14 @@ export function mountGridPanel(
           return t ? [id, t.label, t.color, t.seq, t.offsetDb] : id;
         }),
         // The chip/marker text (tile.ts's `feed()`) reads mode/edge from
-        // `s.triggers` and live state from `s.run.triggers` even while the
-        // stream is stopped — without these in the key, a trigger config
+        // `s.triggers` and live state from the run's `triggers` even while
+        // the stream is stopped — without these in the key, a trigger config
         // change with no running stream (no new frame to re-feed on) left
         // the chip stale until something else happened to fire this
         // selector (issue #26 review #6).
         s.triggers,
-        s.run.triggers,
-        s.run.trigArmPending,
+        focusedRun(s).triggers,
+        focusedRun(s).trigArmPending,
       ]),
     () => {
       const s = store.get();

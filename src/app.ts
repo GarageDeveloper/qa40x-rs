@@ -30,6 +30,12 @@ import {
   restoreWorkspaceAtBoot,
 } from "./store/actions/workspace";
 import { startRun, stopRun } from "./store/actions/stream";
+import {
+  anyBusy,
+  anyProgramLock,
+  focusedDevice,
+  focusedRun,
+} from "./store/selectors/session";
 import { refreshRest } from "./store/actions/rest";
 import { toast } from "./store/actions/ui";
 import { mountToasts } from "./ui/toast";
@@ -149,12 +155,15 @@ export async function mountApp(
       return;
     }
     e.preventDefault();
+    // Space acts on the FOCUSED session (Raphaël decision 2, issue #25):
+    // per-device transports live on the E4 group headers.
     const s = store.get();
-    if (s.run.streaming) void stopRun(store, ipc);
+    const run = focusedRun(s);
+    if (run.streaming) void stopRun(store, ipc);
     else if (
-      !s.run.stopping &&
-      s.run.programLock === null &&
-      s.device.status === "connected"
+      !run.stopping &&
+      run.programLock === null &&
+      focusedDevice(s).status === "connected"
     ) {
       void startRun(store, ipc, { playAllIfIdle: true });
     }
@@ -180,16 +189,10 @@ export async function mountApp(
     // is an OS enumeration with no device I/O, so this gate is about not
     // ADDING work during a run, not about protecting the capture; it can't
     // see REST/script sessions (backend-owned) — harmless for the same
-    // reason (#25 lot D review #7).
+    // reason (#25 lot D review #7). Bench-global by intent: ANY session's
+    // activity holds the scan off, not just the focused one.
     const s = store.get();
-    if (
-      !s.run.streaming &&
-      !s.run.stopping &&
-      !s.run.generatorRunning &&
-      !s.run.outputOnly &&
-      s.run.programLock === null &&
-      s.device.status !== "connecting"
-    ) {
+    if (!anyBusy(s) && anyProgramLock(s) === null) {
       void refreshDevices(store, ipc);
     }
   }, AUTOCONNECT_POLL_MS);

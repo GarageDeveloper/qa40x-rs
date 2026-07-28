@@ -14,6 +14,11 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState } from "../state";
+import {
+  focusedDevice,
+  focusedRun,
+  updateFocusedRun,
+} from "../selectors/session";
 import { slotsFromSources, startRun } from "./stream";
 import { toast } from "./ui";
 
@@ -27,11 +32,10 @@ function anyPlaying(s: AppState): boolean {
  * immediately: on = stream loop → gap-free generator, off = back to capture
  * + analysis (the stream restarts under the play-auto-starts rule). */
 export function setOutputOnly(store: Store<AppState>, ipc: Ipc, on: boolean): void {
-  if (store.get().run.outputOnly === on) return;
-  store.update("outputonly/mode", (s) => ({
-    ...s,
-    run: { ...s.run, outputOnly: on },
-  }));
+  if (focusedRun(store.get()).outputOnly === on) return;
+  store.update("outputonly/mode", (s) =>
+    updateFocusedRun(s, (r) => ({ ...r, outputOnly: on }))
+  );
   syncOutputOnly(store, ipc);
 }
 
@@ -45,43 +49,42 @@ export function syncOutputOnly(store: Store<AppState>, ipc: Ipc): void {
 
 async function sync(store: Store<AppState>, ipc: Ipc): Promise<void> {
   const s = store.get();
-  const wanted = s.run.outputOnly && s.device.status === "connected" && anyPlaying(s);
+  const wanted =
+    focusedRun(s).outputOnly && focusedDevice(s).status === "connected" && anyPlaying(s);
   if (wanted) {
     // (Re)build the loop buffer. The backend stops the stream loop and any
     // previous generator itself — one DAC owner at a time; run.streaming
     // clears when the stream's Stopped message lands.
     const status = await ipc.call("output_only_start", { slots: slotsFromSources(s) });
-    store.update("outputonly/started", (st) => ({
-      ...st,
-      run: {
-        ...st.run,
+    store.update("outputonly/started", (st) =>
+      updateFocusedRun(st, (r) => ({
+        ...r,
         generatorRunning: true,
         sigmaPeakDbv: status.sigma_peak_dbv,
-        clip: { ...st.run.clip, output: status.clipped },
+        clip: { ...r.clip, output: status.clipped },
         fittedOutputRangeDbv: status.fitted_output_range_dbv,
         slotErrors: status.errors,
-      },
-    }));
+      }))
+    );
     return;
   }
-  if (store.get().run.generatorRunning) {
+  if (focusedRun(store.get()).generatorRunning) {
     await ipc.call("stop_generator", {});
-    store.update("outputonly/stopped", (st) => ({
-      ...st,
-      run: {
-        ...st.run,
+    store.update("outputonly/stopped", (st) =>
+      updateFocusedRun(st, (r) => ({
+        ...r,
         generatorRunning: false,
         // The Σ readout follows the DAC: nothing driving it, nothing to show.
-        sigmaPeakDbv: st.run.streaming ? st.run.sigmaPeakDbv : null,
-      },
-    }));
+        sigmaPeakDbv: r.streaming ? r.sigmaPeakDbv : null,
+      }))
+    );
   }
   // Mode off with sources still playing: capture + analysis resume.
   const st = store.get();
   if (
-    !st.run.outputOnly &&
-    st.device.status === "connected" &&
-    !st.run.streaming &&
+    !focusedRun(st).outputOnly &&
+    focusedDevice(st).status === "connected" &&
+    !focusedRun(st).streaming &&
     anyPlaying(st)
   ) {
     await startRun(store, ipc);

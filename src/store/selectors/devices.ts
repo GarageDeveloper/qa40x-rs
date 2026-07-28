@@ -6,6 +6,7 @@
  */
 import type { DeviceCapabilities, DeviceEntry } from "../../gen";
 import type { AppState } from "../state";
+import { focusedDevice } from "./session";
 
 /** The unit the single-device UI describes (see `DevicesState.primary`). */
 export function primaryEntry(s: AppState): DeviceEntry | null {
@@ -43,10 +44,11 @@ export function outputRangesDbv(s: AppState): number[] {
  * lacked its current rate. */
 export function sampleRatesHz(s: AppState): number[] {
   const entry = primaryEntry(s);
-  if (s.device.status === "connected" && !entry?.open && s.device.info) {
-    return s.device.info.sample_rates;
+  const device = focusedDevice(s);
+  if (device.status === "connected" && !entry?.open && device.info) {
+    return device.info.sample_rates;
   }
-  return entry?.capabilities.sample_rates_hz ?? s.device.info?.sample_rates ?? NO_VALUES;
+  return entry?.capabilities.sample_rates_hz ?? device.info?.sample_rates ?? NO_VALUES;
 }
 
 /** Every available unit, in backend order (USB first, then the virtual). */

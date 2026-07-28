@@ -11,6 +11,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import { shallowEq } from "../../store/store";
 import type { AppState } from "../../store/state";
+import { focusedDevice } from "../../store/selectors/session";
 import { openAppDrawer } from "../appmenu/drawer";
 import { openFirmwareDialog } from "../firmware/dialog";
 import { el } from "../../ui/dom";
@@ -53,7 +54,7 @@ export function mountStatusBar(
   );
 
   store.select(
-    (s) => s.device,
+    (s) => focusedDevice(s),
     (device) => {
       const connected = device.status === "connected" && device.info;
       identity.textContent = connected

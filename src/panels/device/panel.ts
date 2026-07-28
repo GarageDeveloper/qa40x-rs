@@ -22,6 +22,7 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
+import { focusedDevice } from "../../store/selectors/session";
 import { pickDevice } from "../../store/actions/devices";
 import {
   availableEntries,
@@ -97,7 +98,7 @@ export function mountDevicePanel(
   const connectBtn = el("button.btn.btn--primary", {
     "data-testid": "btn-connect",
     onclick: () => {
-      const { status } = store.get().device;
+      const { status } = focusedDevice(store.get());
       if (status === "connected") void disconnect(store, ipc);
       else if (status === "disconnected")
         // Rule P3: a deviceId rides along only when the user explicitly
@@ -112,7 +113,7 @@ export function mountDevicePanel(
     "data-testid": "btn-demo",
     title: "Demo mode — connect to a built-in virtual QA403 (no hardware needed)",
     onclick: () => {
-      if (store.get().device.status === "disconnected")
+      if (focusedDevice(store.get()).status === "disconnected")
         void connectVirtual(store, ipc);
     },
   }, "Demo");
@@ -207,7 +208,7 @@ export function mountDevicePanel(
     // arrays are entry-stable; setOptions' signature guard absorbs the
     // refresh churn.
     (s) => ({
-      device: s.device,
+      device: focusedDevice(s),
       inputRanges: inputRangesDbv(s),
       outputRanges: outputRangesDbv(s),
       rates: sampleRatesHz(s),
@@ -271,10 +272,10 @@ export function mountDevicePanel(
       // While connected the picker mirrors the OPEN unit (= the primary,
       // rule P1); disconnected it shows the user's pick, else the primary.
       value:
-        s.device.status === "disconnected"
+        focusedDevice(s).status === "disconnected"
           ? s.devices.pick ?? s.devices.primary
           : s.devices.primary,
-      connected: s.device.status !== "disconnected",
+      connected: focusedDevice(s).status !== "disconnected",
     }),
     ({ show, sig, value, connected }) => {
       unitSel.classList.toggle("u-hidden", !show);

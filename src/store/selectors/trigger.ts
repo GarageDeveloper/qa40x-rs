@@ -12,6 +12,7 @@ import type { TraceId } from "../../core/model";
 import type { TriggerConfig, TriggerRequest } from "../../gen";
 import { DEFAULT_TRIGGER, HW_TRACE_IDS, type AppState, type TileConfig } from "../state";
 import { chipSourceTraceId, visibleTiles } from "./layout";
+import { focusedDevice } from "./session";
 
 /**
  * The endpoint a tile's trigger aligns to: the explicit `triggerSource` when
@@ -33,7 +34,7 @@ export function tileTriggerSourceId(s: AppState, tile: TileConfig): TraceId | nu
 export function tileWindowSamples(s: AppState, tile: TileConfig): number {
   const fftSize = s.acquisition.fftSize;
   if (tile.timeWindowMs === null) return fftSize;
-  const sampleRate = s.device.config?.sample_rate ?? 48000;
+  const sampleRate = focusedDevice(s).config?.sample_rate ?? 48000;
   const samples = Math.round((tile.timeWindowMs / 1000) * sampleRate);
   return Math.min(Math.max(samples, 1), fftSize);
 }
