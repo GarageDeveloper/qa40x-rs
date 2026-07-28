@@ -6,7 +6,9 @@
  */
 import type { DeviceCapabilities, DeviceEntry } from "../../gen";
 import type { AppState } from "../state";
-import { focusedDevice } from "./session";
+import type { SessionKey } from "../sessionkey";
+import { slotOfSessionKey } from "../sessionkey";
+import { focusedDevice, session } from "./session";
 
 /** The unit the single-device UI describes (see `DevicesState.primary`). */
 export function primaryEntry(s: AppState): DeviceEntry | null {
@@ -94,10 +96,86 @@ export function autoConnectDeviceId(s: AppState): string | undefined {
   return pick !== undefined && !s.devices.byId[pick]?.is_virtual ? pick : undefined;
 }
 
-/** Picker policy (lot D): shown only when ≥2 physical units are enumerated.
- * With 0 or 1 QA40x on the bus the bar is byte-for-byte the pre-lot-D bar —
- * the pixel-identity guarantee; the Demo button stays the one-click
- * no-hardware path. */
+/** Number of live sessions: slot 0 always, plus one per added device while
+ * it is open (an eviction removes its session). ≥ 2 ⇒ the bench is
+ * multi-device (issue #25 lot E4). */
+export function liveSessionCount(s: AppState): number {
+  return Object.keys(s.devices.sessions).length;
+}
+
+/** Picker policy: shown when ≥2 physical units are enumerated (lot D) OR
+ * when ≥2 sessions are live (lot E4 — the likely dev bench is demo + one
+ * real unit: one physical, yet the focus must be selectable). With 0 or 1
+ * QA40x on the bus and a single session, the bar is byte-for-byte the
+ * pre-lot-D bar — the pixel-identity guarantee; the Demo button stays the
+ * one-click no-hardware path. */
 export function showDevicePicker(s: AppState): boolean {
-  return physicalAvailable(s).length >= 2;
+  return physicalAvailable(s).length >= 2 || liveSessionCount(s) >= 2;
+}
+
+/** The toolbar `device-select`'s mode (issue #25 lot E4, decision B7):
+ * "pick" ⇒ byte-identical lot-D picker (which unit would Connect open);
+ * "focus" at ≥ 2 live sessions ⇒ the focus selector (which open device the
+ * transport/chrome follow — option values are SESSION KEYS, handler is
+ * setFocusedSession). Read at dispatch time, never captured. */
+export function focusSelectorMode(s: AppState): "pick" | "focus" {
+  return liveSessionCount(s) >= 2 ? "focus" : "pick";
+}
+
+/** Enumerated units the add-device menu offers (issue #25 lot E4): not
+ * open anywhere, not held by a session (a transiently stale enumeration
+ * must not re-offer a unit a session still holds), no add in flight. */
+export function addableEntries(s: AppState): DeviceEntry[] {
+  const held = new Set(
+    Object.values(s.devices.sessions)
+      .map((x) => x.deviceId)
+      .filter((id): id is string => id !== null)
+  );
+  return availableEntries(s).filter(
+    (d) => !d.open && !held.has(d.id) && !s.devices.adding.includes(d.id)
+  );
+}
+
+/** A session's display name for group headers and the focus selector:
+ * alias-aware unit label when the registry entry is known, else the
+ * session's own DeviceMeta identity, else a slot-derived placeholder
+ * (`Device #2` — never another unit's name, item 8). */
+export function sessionLabel(s: AppState, key: SessionKey): string {
+  const sess = session(s, key);
+  const id = sess?.deviceId ?? null;
+  const entry = id !== null ? s.devices.byId[id] : undefined;
+  if (entry) return deviceLabel(s, entry);
+  const info = sess?.device.info;
+  if (info) {
+    return `${info.model} · ${info.serial}${info.is_virtual ? " (virtual)" : ""}`;
+  }
+  return `Device #${(sess?.slot ?? slotOfSessionKey(key)) + 1}`;
+}
+
+/** The registry entry a session's unit maps to (null while unadopted). */
+function sessionEntry(s: AppState, key: SessionKey): DeviceEntry | null {
+  const id = session(s, key)?.deviceId;
+  return id ? s.devices.byId[id] ?? null : null;
+}
+
+/* Per-session range/rate tables (issue #25 lot E4): the group-header
+ * controls must offer THIS unit's registers, never the primary's — two
+ * different models on one bench have different tables. Same
+ * connected-unit-wins rule as sampleRatesHz (lot D review #3). */
+
+export function sessionInputRanges(s: AppState, key: SessionKey): number[] {
+  return sessionEntry(s, key)?.capabilities.input_ranges_dbv ?? NO_VALUES;
+}
+
+export function sessionOutputRanges(s: AppState, key: SessionKey): number[] {
+  return sessionEntry(s, key)?.capabilities.output_ranges_dbv ?? NO_VALUES;
+}
+
+export function sessionRates(s: AppState, key: SessionKey): number[] {
+  const entry = sessionEntry(s, key);
+  const device = session(s, key)?.device;
+  if (device?.status === "connected" && !entry?.open && device.info) {
+    return device.info.sample_rates;
+  }
+  return entry?.capabilities.sample_rates_hz ?? device?.info?.sample_rates ?? NO_VALUES;
 }

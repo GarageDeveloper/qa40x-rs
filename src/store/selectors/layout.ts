@@ -6,6 +6,7 @@
 import type { TraceId } from "../../core/model";
 import type { AppState, TileConfig } from "../state";
 import { patternTileCount } from "../state";
+import { hwSlotOfTraceId } from "../hwtraces";
 import { getFrames } from "../../data/frames";
 
 /** The tiles the current pattern actually displays, in grid order. */
@@ -38,8 +39,25 @@ export function chipSourceTraceId(tile: TileConfig): TraceId | null {
   if (tile.chipSource !== "auto" && tile.traces.includes(tile.chipSource)) {
     return tile.chipSource;
   }
+  // "auto" never crosses device slots (issue #25 lot E4, E3 review #5):
+  // the tile's slot is its FIRST hw member's, and a hw candidate of any
+  // other slot is skipped in the with-frames scan — device 2 landing its
+  // first frame must not silently steal the chips / trigger source / CSV
+  // source line from device 1's endpoint. Non-hw members (memory /
+  // transform / program) stay eligible: they are bench artifacts, not
+  // device endpoints. Single-slot tiles are byte-identical (pinned).
+  let tileSlot: number | null = null;
+  for (const id of tile.traces) {
+    const slot = hwSlotOfTraceId(id);
+    if (slot !== null) {
+      tileSlot = slot;
+      break;
+    }
+  }
   const drawn = shownTraces(tile);
   for (const id of drawn) {
+    const slot = hwSlotOfTraceId(id);
+    if (slot !== null && tileSlot !== null && slot !== tileSlot) continue;
     const f = getFrames(id);
     if (f && (f.td || f.fd)) return id;
   }
