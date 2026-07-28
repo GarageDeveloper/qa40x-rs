@@ -26,8 +26,16 @@ import {
   setSampleRate,
 } from "../../store/actions/device";
 import { startRun, stopRun } from "../../store/actions/stream";
+import { togglePanelCollapsed } from "../../store/actions/workspace";
 import { session } from "../../store/selectors/session";
 import { el } from "../../ui/dom";
+
+/** The `workspace.collapsed` key of one group's fold state — the SAME
+ * store the sidebar sections use (persists with the doc; slot-keyed like
+ * the trace ids, so it is bench-portable, never device-bound). */
+export function traceGroupCollapseKey(slot: number): string {
+  return `traces-group-${slot}`;
+}
 
 /** The per-group projection the panel selects — NO per-frame fields
  * (run.stats, telemetry): the panel's keyed list re-runs on its JSON
@@ -45,6 +53,10 @@ export interface GroupVM {
   stopping: boolean;
   locked: boolean;
   routable: boolean;
+  /** Folded to its header line (workspace.collapsed, key
+   * `traces-group-<slot>` — Raphaël 2026-07-28: reclaim the space once a
+   * device is set up). */
+  collapsed: boolean;
   inputRanges: number[];
   outputRanges: number[];
   rates: number[];
@@ -93,6 +105,15 @@ export function createDeviceGroup(
   key: SessionKey,
   slot: number
 ): GroupView {
+  const collapseBtn = el(
+    "button.traces__group-collapse",
+    {
+      "data-testid": `group-collapse-${slot}`,
+      title: "Collapse / expand this device",
+      onclick: () => togglePanelCollapsed(store, traceGroupCollapseKey(slot)),
+    },
+    "▾"
+  );
   const led = el("span.led", { "data-testid": `group-led-${slot}` });
   const title = el("span.traces__group-title", {
     "data-testid": `group-title-${slot}`,
@@ -137,6 +158,7 @@ export function createDeviceGroup(
   const head = el(
     "div.traces__group-head",
     {},
+    collapseBtn,
     led,
     title,
     alias,
@@ -192,6 +214,8 @@ export function createDeviceGroup(
   );
 
   function update(vm: GroupVM): void {
+    root.classList.toggle("traces__group--collapsed", vm.collapsed);
+    collapseBtn.textContent = vm.collapsed ? "▸" : "▾";
     led.className = `led${
       vm.status === "connected"
         ? " led--on"

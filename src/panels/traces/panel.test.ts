@@ -91,3 +91,29 @@ describe("Traces panel (DOM) — no-layout-shift controls render DISABLED, never
     expect(addDev!.disabled).toBe(true);
   });
 });
+
+describe("Traces panel (DOM) — per-group collapse (Raphaël 2026-07-28)", () => {
+  it("the chevron folds the group to its header (rows/ctls hidden by class, header controls still present) and persists via workspace.collapsed", async () => {
+    const { host, store } = mount();
+    await flush();
+    const group = host.querySelector('[data-testid="traces-group-0"]')!;
+    const btn = host.querySelector(
+      '[data-testid="group-collapse-0"]'
+    ) as HTMLButtonElement;
+    expect(group.classList.contains("traces__group--collapsed")).toBe(false);
+    expect(btn.textContent).toBe("▾");
+
+    btn.click();
+    await flush();
+    expect(store.get().workspace.collapsed).toContain("traces-group-0");
+    expect(group.classList.contains("traces__group--collapsed")).toBe(true);
+    expect(btn.textContent).toBe("▸");
+    // The header stays whole — Run/Remove/alias remain reachable folded.
+    expect(host.querySelector('[data-testid="group-run-0"]')).not.toBeNull();
+
+    btn.click();
+    await flush();
+    expect(store.get().workspace.collapsed).not.toContain("traces-group-0");
+    expect(group.classList.contains("traces__group--collapsed")).toBe(false);
+  });
+});

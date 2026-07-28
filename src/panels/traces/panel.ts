@@ -33,7 +33,12 @@ import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openTransformDialog } from "./transformdialog";
 import { createTraceRow, updateTraceRow, type Row } from "./row";
-import { createDeviceGroup, type GroupVM, type GroupView } from "./devicegroup";
+import {
+  createDeviceGroup,
+  traceGroupCollapseKey,
+  type GroupVM,
+  type GroupView,
+} from "./devicegroup";
 
 interface GroupItem {
   vm: GroupVM;
@@ -131,6 +136,9 @@ export function mountTracesPanel(
             stopping: sess?.run.stopping ?? false,
             locked: (sess?.run.programLock ?? null) !== null,
             routable: isRoutable(s, g.key),
+            collapsed: s.workspace.collapsed.includes(
+              traceGroupCollapseKey(g.slot)
+            ),
             inputRanges: sessionInputRanges(s, g.key),
             outputRanges: sessionOutputRanges(s, g.key),
             rates: sessionRates(s, g.key),
@@ -175,8 +183,13 @@ export function mountTracesPanel(
         },
       });
       keyedList(tailHost, tail, (r) => r.id, rowRenderer);
+      // Prune views whose group keyedList just removed. Membership in
+      // groupsHost, NOT isConnected: the panel may live in a detached host
+      // (jsdom tests) where isConnected is false for everything — the
+      // first render would purge every live view and later updates would
+      // silently no-op.
       for (const [k, v] of groupViews) {
-        if (!v.root.isConnected) groupViews.delete(k);
+        if (v.root.parentElement !== groupsHost) groupViews.delete(k);
       }
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)

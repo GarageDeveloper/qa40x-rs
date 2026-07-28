@@ -202,8 +202,37 @@
   color: var(--ink-3);
 }
 
-.traces__group-sel {
+/* Compact .field override: the sidebar row holds THREE labelled selects —
+   the top bar's 13px/8px+24px chrome truncates "42 dBV" to "42 dE"
+   (Raphaël, 2026-07-28). Smaller font, tighter padding, arrow pulled in.
+   `select.` prefix: `select.field` (element+class) outranks a lone class,
+   so the override must match its specificity to win by cascade order. */
+select.traces__group-sel {
   font-size: 11px;
   min-width: 0;
   flex: 1;
+  padding: 3px 4px;
+  padding-right: 15px;
+  background-position: right 4px center;
+}
+
+.traces__group-collapse {
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 2px;
+  flex: none;
+}
+
+.traces__group-collapse:hover {
+  color: var(--ink-1);
+}
+
+/* Collapsed group: header only — controls and rows fold away (same
+   disclosure idiom as the sidebar sections' is-collapsed). */
+.traces__group--collapsed .traces__group-ctls,
+.traces__group--collapsed .traces__group-rows {
+  display: none;
 }
