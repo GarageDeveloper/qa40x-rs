@@ -51,6 +51,17 @@ export function sampleRatesHz(s: AppState): number[] {
   return entry?.capabilities.sample_rates_hz ?? device.info?.sample_rates ?? NO_VALUES;
 }
 
+/** The display name of a unit: its user alias when one is stored (issue
+ * #25 lot E2, Raphaël decision 3), else the identity string the picker has
+ * always rendered — byte-identical with no alias, pinned by a vitest test
+ * against the historical literal. */
+export function deviceLabel(s: AppState, entry: DeviceEntry): string {
+  return (
+    s.devices.aliases[entry.id] ??
+    `${entry.model} · ${entry.serial}${entry.is_virtual ? " (virtual)" : ""}`
+  );
+}
+
 /** Every available unit, in backend order (USB first, then the virtual). */
 export function availableEntries(s: AppState): DeviceEntry[] {
   return s.devices.available

@@ -75,6 +75,43 @@ store.select(
   }
 );
 
+// Device aliases (issue #25 lot E2, Raphaël decision 3): app-side only,
+// keyed by registry id, the theme's localStorage pattern — read before
+// mount, mirrored on every change. Never part of the workspace doc and
+// never sent to the backend.
+try {
+  const raw = localStorage.getItem("qa40x-v2-device-aliases");
+  if (raw) {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const aliases: Record<string, string> = {};
+      for (const [id, alias] of Object.entries(parsed)) {
+        if (typeof alias === "string" && alias.trim() !== "") {
+          aliases[id] = alias.slice(0, 64);
+        }
+      }
+      if (Object.keys(aliases).length > 0) {
+        store.update("devices/aliases-init", (s) => ({
+          ...s,
+          devices: { ...s.devices, aliases },
+        }));
+      }
+    }
+  }
+} catch {
+  /* no storage — aliases stay session-local */
+}
+store.select(
+  (s) => s.devices.aliases,
+  (aliases) => {
+    try {
+      localStorage.setItem("qa40x-v2-device-aliases", JSON.stringify(aliases));
+    } catch {
+      /* ignore */
+    }
+  }
+);
+
 // Re-apply the user's fixed REST bearer token (App drawer choice) so it is
 // already in force if the server starts exposed (QA40X_REST_EXPOSE).
 try {

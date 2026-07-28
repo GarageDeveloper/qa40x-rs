@@ -75,8 +75,49 @@ export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesStat
     enumerating: false,
     sessions,
     focus: prev.focus,
+    aliases: prev.aliases,
   };
   return { ...next, primary: derivePrimary(next) };
+}
+
+/** Longest alias kept (UI sanity — a rename field, not a note field). */
+const MAX_ALIAS_CHARS = 64;
+/** Most remembered aliases; the oldest-set entry is evicted past this (a
+ * long-lived install sees many units; the map must not grow unbounded). */
+const MAX_ALIAS_ENTRIES = 64;
+
+/**
+ * Name (or un-name) a unit (issue #25 lot E2, Raphaël decision 3). Pure
+ * store write, keyed by REGISTRY ID (see `DevicesState.aliases`); empty or
+ * whitespace clears the alias. Persistence is main.ts's localStorage
+ * mirror; nothing here (or anywhere) puts an alias on the wire.
+ */
+export function setDeviceAlias(
+  store: Store<AppState>,
+  deviceId: string,
+  alias: string | null
+): void {
+  store.update("devices/alias", (s) => {
+    const trimmed = (alias ?? "").trim().slice(0, MAX_ALIAS_CHARS);
+    const prev = s.devices.aliases;
+    if (trimmed === "") {
+      if (!(deviceId in prev)) return s;
+      const aliases = { ...prev };
+      delete aliases[deviceId];
+      return { ...s, devices: { ...s.devices, aliases } };
+    }
+    if (prev[deviceId] === trimmed) return s;
+    // Re-inserting moves the id to the newest position (delete-then-set),
+    // so the size cap below evicts the LEAST-recently-named unit.
+    const aliases = { ...prev };
+    delete aliases[deviceId];
+    aliases[deviceId] = trimmed;
+    const keys = Object.keys(aliases);
+    for (let i = 0; keys.length - i > MAX_ALIAS_ENTRIES; i++) {
+      delete aliases[keys[i]];
+    }
+    return { ...s, devices: { ...s.devices, aliases } };
+  });
 }
 
 /** Monotonic enumeration sequencing (reviewer finding #1): refreshes

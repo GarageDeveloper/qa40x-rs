@@ -26,6 +26,7 @@ import { focusedDevice } from "../../store/selectors/session";
 import { pickDevice } from "../../store/actions/devices";
 import {
   availableEntries,
+  deviceLabel,
   inputRangesDbv,
   outputRangesDbv,
   pickedDeviceId,
@@ -268,7 +269,11 @@ export function mountDevicePanel(
     // entries are read back off the store inside the callback.
     (s) => ({
       show: showDevicePicker(s),
-      sig: s.devices.available.join("|"),
+      // Aliases join the signature (lot E2): a rename must rebuild the
+      // option texts even though the id list is unchanged.
+      sig: s.devices.available
+        .map((id) => `${id}=${s.devices.aliases[id] ?? ""}`)
+        .join("|"),
       // While connected the picker mirrors the OPEN unit (= the primary,
       // rule P1); disconnected it shows the user's pick, else the primary.
       value:
@@ -285,11 +290,7 @@ export function mountDevicePanel(
         unitSel.dataset.sig = sig;
         unitSel.replaceChildren(
           ...units.map((u) =>
-            el(
-              "option",
-              { value: u.id },
-              `${u.model} · ${u.serial}${u.is_virtual ? " (virtual)" : ""}`
-            )
+            el("option", { value: u.id }, deviceLabel(store.get(), u))
           )
         );
       }

@@ -709,6 +709,16 @@ export interface DevicesState {
   /** The session the single-device chrome describes and Run/Space act on
    * (Raphaël decision 2, 2026-07-28). Always a key present in `sessions`. */
   focus: SessionKey;
+  /**
+   * User-given device names (Raphaël decision 3, 2026-07-28), keyed by
+   * REGISTRY ID — deliberately the other keying than `sessions`: an alias
+   * must survive a replug onto a different slot. App-side only, persisted
+   * in localStorage (main.ts), NEVER sent to the backend and NEVER part of
+   * the workspace doc (a doc carried to another bench must not carry this
+   * bench's names). The editable surface lands with E4's group headers;
+   * E2 lands the store + persistence + read-through labels.
+   */
+  aliases: Record<string, string>;
 }
 
 export interface AppState {
@@ -936,6 +946,7 @@ export function initialState(): AppState {
       enumerating: false,
       sessions: { [SLOT0]: initialSession(0) },
       focus: SLOT0,
+      aliases: {},
     },
     acquisition: {
       fftSize: 32768,
