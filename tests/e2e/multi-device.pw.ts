@@ -197,6 +197,34 @@ test("removing a device purges its slot and the toolbar select returns to the lo
   expect(await app.openSlots()).toEqual([0]);
 });
 
+test("a dormant group REVIVES when its unit is re-added — same slot, same rows, never a duplicate group (the D1 promise)", async ({
+  app,
+}) => {
+  await addUnitB(app);
+  await app.unplugUnit(UNIT_B);
+  await expect.poll(() => app.groupTitle(1)).toContain("not connected");
+
+  // The unit comes back on the bus (bus-wide replug clears the unplug)…
+  await app.setPresent(true);
+  await expect
+    .poll(() => app.addableOptions(), { timeout: 15_000 })
+    .toContain(UNIT_B);
+  // …and re-adding it lands on the SAME freed slot: the dormant group's
+  // rows come back to life instead of a second group appearing.
+  await app.addDeviceFromPanel(UNIT_B);
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-1"]?.status)
+    .toBe("connected");
+  expect(await app.groupCount()).toBe(2);
+  expect(await app.groupTitle(1)).not.toContain("not connected");
+  const rows = await app.poolRows();
+  expect(rows.map((r) => r.id)).toEqual([...SLOT0_IDS, ...SLOT1_IDS]);
+  // And it runs again.
+  await expect.poll(() => app.groupRunDisabled(1)).toBe(false);
+  await app.groupRun(1);
+  await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(0);
+});
+
 test("a second virtual unit (the real-app shape) adds, and an alias renames its chrome — never its persisted labels", async ({
   app,
 }) => {

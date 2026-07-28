@@ -245,7 +245,7 @@ export function createDeviceGroup(
       !vm.live || vm.status !== "connected" || !vm.routable || vm.stopping || vm.locked;
     runBtn.toggleAttribute("disabled", runBlocked);
     runBtn.title = !vm.live
-      ? "Not connected — re-add the device to run it"
+      ? "Not connected — re-add the device from the + device menu above (it reopens on this same slot and these rows come back to life)"
       : vm.status !== "connected"
         ? "Not connected"
         : !vm.routable
