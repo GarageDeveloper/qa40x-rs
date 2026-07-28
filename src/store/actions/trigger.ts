@@ -15,6 +15,7 @@ import type { TraceId } from "../../core/model";
 import type { Store } from "../store";
 import type { AppState, TriggerEdge, TriggerMode, TriggerSettings } from "../state";
 import { DEFAULT_TRIGGER } from "../state";
+import { updateFocusedRun } from "../selectors/session";
 import { syncStream } from "./stream";
 
 function patchTrigger(
@@ -49,13 +50,13 @@ export function setTriggerMode(
     // re-armed scan ran (see RunState.trigArmPending).
     const toSingle = mode === "single";
     const next = toSingle ? { ...cur, mode, armEpoch: cur.armEpoch + 1 } : { ...cur, mode };
-    return {
-      ...s,
-      triggers: { ...s.triggers, [endpointId]: next },
-      run: toSingle
-        ? { ...s.run, trigArmPending: { ...s.run.trigArmPending, [endpointId]: true } }
-        : s.run,
-    };
+    const withTrigger = { ...s, triggers: { ...s.triggers, [endpointId]: next } };
+    return toSingle
+      ? updateFocusedRun(withTrigger, (r) => ({
+          ...r,
+          trigArmPending: { ...r.trigArmPending, [endpointId]: true },
+        }))
+      : withTrigger;
   });
   syncStream(store, ipc);
 }
@@ -126,11 +127,13 @@ export function setTriggerHystV(
 export function armSingle(store: Store<AppState>, ipc: Ipc, endpointId: TraceId): void {
   store.update("trigger/arm", (s) => {
     const cur = s.triggers[endpointId] ?? DEFAULT_TRIGGER;
-    return {
-      ...s,
-      triggers: { ...s.triggers, [endpointId]: { ...cur, armEpoch: cur.armEpoch + 1 } },
-      run: { ...s.run, trigArmPending: { ...s.run.trigArmPending, [endpointId]: true } },
-    };
+    return updateFocusedRun(
+      {
+        ...s,
+        triggers: { ...s.triggers, [endpointId]: { ...cur, armEpoch: cur.armEpoch + 1 } },
+      },
+      (r) => ({ ...r, trigArmPending: { ...r.trigArmPending, [endpointId]: true } })
+    );
   });
   syncStream(store, ipc);
 }

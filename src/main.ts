@@ -8,6 +8,7 @@ import { initialState } from "./store/state";
 import { tauriIpc } from "./ipc/ipc";
 import { scopeVM, spectrumVM, sweepVM } from "./store/selectors/chartvm";
 import { visibleTiles } from "./store/selectors/layout";
+import { debugState } from "./store/selectors/session";
 import { createWorkspaceStore } from "./store/wsstore";
 import { mountApp } from "./app";
 import { setRestToken } from "./store/actions/rest";
@@ -20,7 +21,10 @@ const wsStore = createWorkspaceStore();
 // asserts what the user sees, never a chart internal. `spectrumVM()` with
 // no argument keeps the M1 shape: the first displayed spectrum tile.
 (window as unknown as { qa40xV2Debug: unknown }).qa40xV2Debug = {
-  state: () => store.get(),
+  // `debugState`, not the raw tree: the E2 sessions fold moved device/run
+  // into devices.sessions — the projection keeps `state().run.*` (the four
+  // e2e adapter accessors) and console muscle memory working.
+  state: () => debugState(store.get()),
   spectrumVM: (tileId?: string) => {
     const s = store.get();
     const tile = tileId
@@ -65,6 +69,47 @@ store.select(
   (t) => {
     try {
       localStorage.setItem("qa40x-v2-theme", t);
+    } catch {
+      /* ignore */
+    }
+  }
+);
+
+// Device aliases (issue #25 lot E2, Raphaël decision 3): app-side only,
+// keyed by registry id, the theme's localStorage pattern — read before
+// mount, mirrored on every change. Never part of the workspace doc and
+// never sent to the backend.
+try {
+  const raw = localStorage.getItem("qa40x-v2-device-aliases");
+  if (raw) {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      // Same normalization as setDeviceAlias (trim + 64-char clamp + 64
+      // entry cap) — a hand-edited or older store must not smuggle in
+      // whitespace-padded names or an unbounded map.
+      const aliases: Record<string, string> = {};
+      for (const [id, alias] of Object.entries(parsed)) {
+        if (Object.keys(aliases).length >= 64) break;
+        if (typeof alias === "string" && alias.trim() !== "") {
+          aliases[id] = alias.trim().slice(0, 64);
+        }
+      }
+      if (Object.keys(aliases).length > 0) {
+        store.update("devices/aliases-init", (s) => ({
+          ...s,
+          devices: { ...s.devices, aliases },
+        }));
+      }
+    }
+  }
+} catch {
+  /* no storage — aliases stay session-local */
+}
+store.select(
+  (s) => s.devices.aliases,
+  (aliases) => {
+    try {
+      localStorage.setItem("qa40x-v2-device-aliases", JSON.stringify(aliases));
     } catch {
       /* ignore */
     }

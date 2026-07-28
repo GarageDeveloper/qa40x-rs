@@ -32,6 +32,7 @@ import {
   setTriggerMode,
 } from "../../store/actions/trigger";
 import { shownTraces } from "../../store/selectors/layout";
+import { focusedDevice, focusedRun } from "../../store/selectors/session";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
 import { programProgressText } from "../../store/actions/programs";
@@ -398,7 +399,7 @@ export function createTile(
   const updateProgress = (): void => {
     const s = store.get();
     const tile = s.layout.tiles[tileId];
-    const lockId = s.run.programLock;
+    const lockId = focusedRun(s).programLock;
     const prog = lockId ? s.programs.byId[lockId] : undefined;
     const show =
       !!tile &&
@@ -409,7 +410,7 @@ export function createTile(
     progressEl.hidden = !show;
     if (show && prog) {
       const label = s.traces.byId[prog.id]?.label ?? "measurement";
-      const sr = s.device.config?.sample_rate ?? 48000;
+      const sr = focusedDevice(s).config?.sample_rate ?? 48000;
       progressEl.textContent = `▶ ${label} · ${programProgressText(prog, sr, performance.now())}`;
     }
   };
@@ -936,7 +937,7 @@ export function createTile(
       // `vm.trigger` is null (e.g. no snapshot latched yet).
       const trigSourceId = tileTriggerSourceId(s, tile);
       const trigSettings = trigSourceId ? (s.triggers[trigSourceId] ?? DEFAULT_TRIGGER) : DEFAULT_TRIGGER;
-      const trigState = trigSourceId ? s.run.triggers[trigSourceId]?.state : undefined;
+      const trigState = trigSourceId ? focusedRun(s).triggers[trigSourceId]?.state : undefined;
       trigChip.textContent = triggerChipText(trigSettings.mode, trigSettings.edge, trigState);
       armBtn.toggleAttribute("disabled", trigSettings.mode !== "single");
       // Armed = SINGLE still waiting for its shot: state `waiting` (or none
@@ -947,7 +948,7 @@ export function createTile(
       armBtn.classList.toggle(
         "btn--primary",
         trigSettings.mode === "single" &&
-          ((trigSourceId !== null && s.run.trigArmPending[trigSourceId] === true) ||
+          ((trigSourceId !== null && focusedRun(s).trigArmPending[trigSourceId] === true) ||
             (trigState !== "triggered" && trigState !== "stopped"))
       );
 

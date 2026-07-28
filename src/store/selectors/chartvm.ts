@@ -19,6 +19,7 @@ import { displayOffsetDb, displayScale } from "../../core/units";
 import { getFrames, type DecodedSweep } from "../../data/frames";
 import { getTriggerSnapshot, type TriggerSnapshot } from "../../data/triggered";
 import { chipSourceTraceId, shownTraces } from "./layout";
+import { focusedRun } from "./session";
 import { tileTriggerSourceId, tileWindowSamples } from "./trigger";
 import {
   DEFAULT_TRIGGER,
@@ -497,7 +498,7 @@ export function scopeVM(s: AppState, tile: TileConfig): ScopeVM {
     series.push(scaledTdSeries(t, td.samples, td.sampleRate, unit, t.offsetDb));
   }
 
-  const state: TriggerState = s.run.triggers[sourceId]?.state ?? snap.state;
+  const state: TriggerState = focusedRun(s).triggers[sourceId]?.state ?? snap.state;
   const sourceOffsetDb = snap.offsetDb[sourceId] ?? null;
   const trigger: ScopeTriggerVM = {
     sourceId,

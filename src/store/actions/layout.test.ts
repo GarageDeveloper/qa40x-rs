@@ -21,6 +21,7 @@ import {
   toggleTraceHidden,
 } from "./layout";
 import { shownTraces, visibleTiles } from "../selectors/layout";
+import { withRun } from "./sessions.fixtures";
 
 /** An Ipc stub: layout actions only ever fire stream_update (ignored). */
 const ipc: Ipc = {
@@ -177,7 +178,7 @@ describe("tile trigger fields (Lot A, issue #26)", () => {
 
   it("setTileTriggerPosition opts.sync = false skips the stream sync (review #10)", () => {
     const store = makeStore();
-    store.update("test/stream-on", (s) => ({ ...s, run: { ...s.run, streaming: true } }));
+    store.update("test/stream-on", (s) => withRun(s, { streaming: true }));
     const calls: unknown[] = [];
     const syncingIpc: Ipc = {
       call: (method: string, args?: unknown) => {

@@ -38,6 +38,11 @@ import type {
   WowFlutterProgramResult,
 } from "../state";
 import { DEFAULT_SWEEP_PARAMS, liveCaptureProvenance, nextTraceColor } from "../state";
+import {
+  focusedDevice,
+  focusedRun,
+  updateFocusedRun,
+} from "../selectors/session";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -227,7 +232,7 @@ export function configureScriptProgram(
 /** Why the transports are locked right now, or null. Names the running
  * program so panels grey their controls with a reason (v1 Phase H). */
 export function programLockReason(s: AppState): string | null {
-  const id = s.run.programLock;
+  const id = focusedRun(s).programLock;
   if (id === null) return null;
   const label = s.traces.byId[id]?.label ?? "program";
   return `measurement "${label}" is running`;
@@ -487,11 +492,11 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
   const s = store.get();
   const prog = s.programs.byId[id];
   if (!prog || prog.run === "running") return;
-  if (s.run.programLock !== null) {
+  if (focusedRun(s).programLock !== null) {
     toast(store, "info", "Another measurement is running — try again once it finishes.");
     return;
   }
-  if (s.device.status !== "connected") {
+  if (focusedDevice(s).status !== "connected") {
     toast(store, "error", "Connect the device first — a program drives the hardware.");
     return;
   }
@@ -500,25 +505,29 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     return;
   }
 
-  const wasStreaming = s.run.streaming;
-  const wasOutputOnly = s.run.outputOnly && s.run.generatorRunning;
+  const wasStreaming = focusedRun(s).streaming;
+  const wasOutputOnly = focusedRun(s).outputOnly && focusedRun(s).generatorRunning;
   sweepCancel.delete(id);
-  store.update("programs/start", (st) => ({
-    ...st,
-    run: { ...st.run, programLock: id },
-    programs: {
-      ...st.programs,
-      byId: {
-        ...st.programs.byId,
-        [id]: {
-          ...st.programs.byId[id],
-          run: "running",
-          progress: null,
-          startedAtMs: performance.now(),
+  store.update("programs/start", (st) =>
+    updateFocusedRun(
+      {
+        ...st,
+        programs: {
+          ...st.programs,
+          byId: {
+            ...st.programs.byId,
+            [id]: {
+              ...st.programs.byId[id],
+              run: "running",
+              progress: null,
+              startedAtMs: performance.now(),
+            },
+          },
         },
       },
-    },
-  }));
+      (r) => ({ ...r, programLock: id })
+    )
+  );
 
   try {
     // Hand the device over deterministically: the generator loop first,
@@ -526,12 +535,11 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     // exited (single-stream hard rule; the device wedges otherwise).
     if (wasOutputOnly) {
       await ipc.call("stop_generator", {});
-      store.update("programs/generator-stopped", (st) => ({
-        ...st,
-        run: { ...st.run, generatorRunning: false },
-      }));
+      store.update("programs/generator-stopped", (st) =>
+        updateFocusedRun(st, (r) => ({ ...r, generatorRunning: false }))
+      );
     }
-    if (wasStreaming || s.run.stopping) await stopRun(store, ipc);
+    if (wasStreaming || focusedRun(s).stopping) await stopRun(store, ipc);
 
     if (prog.kind === "sweep") await runSweep(store, ipc, id);
     else await runScript(store, ipc, id);
@@ -552,26 +560,30 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     else toast(store, "error", `Program failed: ${e}`);
   } finally {
     sweepCancel.delete(id);
-    store.update("programs/finish", (st) => ({
-      ...st,
-      run: { ...st.run, programLock: null },
-      programs: {
-        ...st.programs,
-        byId: {
-          ...st.programs.byId,
-          ...(st.programs.byId[id]
-            ? {
-                [id]: {
-                  ...st.programs.byId[id],
-                  run: "idle" as const,
-                  progress: null,
-                  startedAtMs: null,
-                },
-              }
-            : {}),
+    store.update("programs/finish", (st) =>
+      updateFocusedRun(
+        {
+          ...st,
+          programs: {
+            ...st.programs,
+            byId: {
+              ...st.programs.byId,
+              ...(st.programs.byId[id]
+                ? {
+                    [id]: {
+                      ...st.programs.byId[id],
+                      run: "idle" as const,
+                      progress: null,
+                      startedAtMs: null,
+                    },
+                  }
+                : {}),
+            },
+          },
         },
-      },
-    }));
+        (r) => ({ ...r, programLock: null })
+      )
+    );
     // Resume the session that ran before — the playing flags were never
     // touched, so the same mix comes back (or nothing, if nothing ran).
     if (wasOutputOnly) syncOutputOnly(store, ipc);
@@ -680,7 +692,7 @@ export function initProgramEvents(store: Store<AppState>): void {
     // estimate until real per-point counts arrive.
     if (e.payload.done === 0) return;
     const s = store.get();
-    const id = s.run.programLock;
+    const id = focusedRun(s).programLock;
     if (!id || s.programs.byId[id]?.run !== "running") return;
     patchProgram(store, "programs/progress", id, (p) => ({
       ...p,

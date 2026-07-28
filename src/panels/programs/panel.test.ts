@@ -25,11 +25,11 @@ import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../../store/store";
 import { initialState, type AppState } from "../../store/state";
 import { addProgram, configureSweepProgram } from "../../store/actions/programs";
+import { withDevice } from "../../store/actions/sessions.fixtures";
 import { mountProgramsPanel } from "./panel";
 
 function connectedState(): AppState {
-  const s = initialState();
-  return { ...s, device: { ...s.device, status: "connected" } };
+  return withDevice(initialState(), { status: "connected" });
 }
 
 const noopIpc: Ipc = {

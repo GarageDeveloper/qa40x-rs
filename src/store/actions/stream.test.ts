@@ -4,16 +4,34 @@
  * and the slot-building invariants ported from mixer.test.ts (M2: the
  * mixer.ts slot-building half must not drift in the port).
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+
+// startRun/stopRun's per-session sequencing pins (below) exercise the real
+// startStream() → `new Channel()` path — mocked the same way
+// programs.test.ts does it, so no real Tauri IPC runtime is required.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: unknown;
+    constructor(cb?: unknown) {
+      this.onmessage = cb;
+    }
+  },
+}));
+
 import type { ScopeMeasures, TriggerAlign } from "../../gen";
 import type { DecodedFrame } from "../../ipc/stream";
+import type { Ipc } from "../../ipc/ipc";
 import { clearAllFrames, getFrames } from "../../data/frames";
 import { clearTriggerSnapshots, getTriggerSnapshot } from "../../data/triggered";
-import type { PeriodicSource, ScriptSource, SourceMeta } from "../state";
-import { initialState } from "../state";
+import type { AppState, PeriodicSource, ScriptSource, SourceMeta } from "../state";
+import { initialSession, initialState, SLOT0 } from "../state";
 import { HW_TRACE_IDS } from "../state";
+import { focusedRun } from "../selectors/session";
+import { withDevice, withRun } from "./sessions.fixtures";
 import { Store } from "../store";
 import {
+  __resetSessionGlobals,
   buildStreamConfig,
   frameCaptureProvenance,
   ingestFrame,
@@ -22,6 +40,8 @@ import {
   slotFromSource,
   slotsFromSources,
   snapToBin,
+  startRun,
+  stopRun,
 } from "./stream";
 
 const noSnap = (hz: number): number => hz;
@@ -148,8 +168,9 @@ describe("buildStreamConfig", () => {
   });
 
   it("declares one slot per PLAYING source, bin-snapped, dBV → linear", () => {
-    const s = initialState();
-    s.device.config = { input_gain: 18, output_gain: 8, sample_rate: 48000 };
+    const s = withDevice(initialState(), {
+      config: { input_gain: 18, output_gain: 8, sample_rate: 48000 },
+    });
     s.sources = {
       order: ["a", "b"],
       byId: {
@@ -402,7 +423,7 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
 
   it("writes a snapshot on 'triggered' and mirrors run.triggers", () => {
     const store = freshStore();
-    ingestFrame(store, frame({ inputL: align("triggered", 2, 0.5) }));
+    ingestFrame(store, SLOT0, frame({ inputL: align("triggered", 2, 0.5) }));
     const snap = getTriggerSnapshot(HW_TRACE_IDS.inputL);
     expect(snap).toBeDefined();
     expect(snap!.state).toBe("triggered");
@@ -410,7 +431,7 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
     expect(snap!.frac).toBe(0.5);
     expect(Array.from(snap!.samples[HW_TRACE_IDS.inputL])).toEqual([0.1, 0.2, 0.3]);
     expect(snap!.offsetDb[HW_TRACE_IDS.inputL]).toBe(20);
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toEqual({
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputL]).toEqual({
       state: "triggered",
       index: 2,
       frac: 0.5,
@@ -419,54 +440,53 @@ describe("ingestFrame — trigger snapshot + run.triggers mirror (Lot A, issue #
 
   it("writes a snapshot on 'auto' too", () => {
     const store = freshStore();
-    ingestFrame(store, frame({ inputL: align("auto", 0, 0) }));
+    ingestFrame(store, SLOT0, frame({ inputL: align("auto", 0, 0) }));
     expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBeDefined();
   });
 
   it("leaves a PREVIOUS snapshot untouched on 'waiting'/'stopped'", () => {
     const store = freshStore();
-    ingestFrame(store, frame({ inputL: align("triggered", 2, 0.5) }));
+    ingestFrame(store, SLOT0, frame({ inputL: align("triggered", 2, 0.5) }));
     const latched = getTriggerSnapshot(HW_TRACE_IDS.inputL);
 
-    ingestFrame(store, frame({ inputL: align("waiting", 0, 0) }));
+    ingestFrame(store, SLOT0, frame({ inputL: align("waiting", 0, 0) }));
     expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBe(latched); // same object — not rewritten
     // The live state still mirrors "waiting" — only the snapshot is held.
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputL].state).toBe("waiting");
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputL].state).toBe("waiting");
 
-    ingestFrame(store, frame({ inputL: align("stopped", 0, 0) }));
+    ingestFrame(store, SLOT0, frame({ inputL: align("stopped", 0, 0) }));
     expect(getTriggerSnapshot(HW_TRACE_IDS.inputL)).toBe(latched);
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputL].state).toBe("stopped");
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputL].state).toBe("stopped");
   });
 
   it("a pending Arm survives a stale 'stopped' frame and settles on any other state", () => {
     const store = freshStore();
-    store.update("test/arm", (s) => ({
-      ...s,
-      run: { ...s.run, trigArmPending: { [HW_TRACE_IDS.inputL]: true } },
-    }));
+    store.update("test/arm", (s) =>
+      withRun(s, { trigArmPending: { [HW_TRACE_IDS.inputL]: true } })
+    );
 
     // The in-flight frame captured under the PRE-re-arm config still says
     // "stopped" — the pending flag (and the Arm highlight) must hold.
-    ingestFrame(store, frame({ inputL: align("stopped", 0, 0) }));
-    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
+    ingestFrame(store, SLOT0, frame({ inputL: align("stopped", 0, 0) }));
+    expect(focusedRun(store.get()).trigArmPending[HW_TRACE_IDS.inputL]).toBe(true);
 
     // First frame proving the re-armed scan ran settles it.
-    ingestFrame(store, frame({ inputL: align("waiting", 0, 0) }));
-    expect(store.get().run.trigArmPending[HW_TRACE_IDS.inputL]).toBeUndefined();
+    ingestFrame(store, SLOT0, frame({ inputL: align("waiting", 0, 0) }));
+    expect(focusedRun(store.get()).trigArmPending[HW_TRACE_IDS.inputL]).toBeUndefined();
   });
 
   it("an endpoint the frame doesn't report is absent from run.triggers", () => {
     const store = freshStore();
-    ingestFrame(store, frame({ inputL: align("triggered", 1, 0) }));
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputR]).toBeUndefined();
+    ingestFrame(store, SLOT0, frame({ inputL: align("triggered", 1, 0) }));
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputR]).toBeUndefined();
   });
 
   it("run.triggers is replaced wholesale — a since-disabled endpoint drops out", () => {
     const store = freshStore();
-    ingestFrame(store, frame({ inputL: align("triggered", 1, 0) }));
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeDefined();
-    ingestFrame(store, frame({})); // input_l no longer requested
-    expect(store.get().run.triggers[HW_TRACE_IDS.inputL]).toBeUndefined();
+    ingestFrame(store, SLOT0, frame({ inputL: align("triggered", 1, 0) }));
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputL]).toBeDefined();
+    ingestFrame(store, SLOT0, frame({})); // input_l no longer requested
+    expect(focusedRun(store.get()).triggers[HW_TRACE_IDS.inputL]).toBeUndefined();
   });
 });
 
@@ -529,7 +549,7 @@ describe("ingestFrame — scope measurement suite reaches the frames cache (issu
 
   it("a landed scope suite reaches data/frames.ts's cache for that trace", () => {
     const store = freshStore();
-    ingestFrame(store, frameWithMeasures(scopeFixture(2.0)));
+    ingestFrame(store, SLOT0, frameWithMeasures(scopeFixture(2.0)));
     const cached = getFrames(HW_TRACE_IDS.inputL);
     expect(cached?.scope?.vpp.value).toBe(2.0);
     expect(cached?.scope?.freq_hz.value).toBe(1000);
@@ -538,7 +558,7 @@ describe("ingestFrame — scope measurement suite reaches the frames cache (issu
   it("the scope field disappears once the endpoint drops out of the MeasureRequest", () => {
     const store = freshStore();
     // Frame 1: the suite is requested and lands.
-    ingestFrame(store, frameWithMeasures(scopeFixture(2.0)));
+    ingestFrame(store, SLOT0, frameWithMeasures(scopeFixture(2.0)));
     expect(getFrames(HW_TRACE_IDS.inputL)?.scope).toBeDefined();
 
     // Frame 2: same td (so the write isn't skipped), but the backend no
@@ -546,7 +566,7 @@ describe("ingestFrame — scope measurement suite reaches the frames cache (issu
     // or the selector stopped requesting it) — `measures.inputL` is null.
     // `putFrames` replaces the cached record wholesale, so `scope` must be
     // gone entirely, not a stale leftover from frame 1.
-    ingestFrame(store, frameWithMeasures(null));
+    ingestFrame(store, SLOT0, frameWithMeasures(null));
     expect(getFrames(HW_TRACE_IDS.inputL)?.scope).toBeUndefined();
   });
 });
@@ -587,10 +607,8 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
 
   function connectedStore() {
     const store = new Store(initialState(), { freeze: true });
-    store.update("test/connect", (s) => ({
-      ...s,
-      device: {
-        ...s.device,
+    store.update("test/connect", (s) =>
+      withDevice(s, {
         info: {
           model: "QA403",
           firmware_version: 61,
@@ -602,14 +620,14 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
           is_virtual: false,
         },
         config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
-      },
-    }));
+      })
+    );
     return store;
   }
 
   it("stamps the frame's bench on every written endpoint (frame-side truth first)", () => {
     const store = connectedStore();
-    ingestFrame(store, frame());
+    ingestFrame(store, SLOT0, frame());
     const cap = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
     expect(cap).not.toBeNull();
     expect(cap!.device).toEqual({
@@ -637,18 +655,19 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
 
   it("one frozen snapshot object rides every frame until the bench moves (no per-frame churn)", () => {
     const store = connectedStore();
-    ingestFrame(store, frame());
+    ingestFrame(store, SLOT0, frame());
     const first = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
     // All four endpoints of one capture share the ONE object…
     expect(store.get().traces.byId[HW_TRACE_IDS.inputR].capture).toBe(first);
     // …and the next same-bench frame reuses it (identity, not equality).
-    ingestFrame(store, frame());
+    ingestFrame(store, SLOT0, frame());
     expect(store.get().traces.byId[HW_TRACE_IDS.inputL].capture).toBe(first);
     expect(Object.isFrozen(first)).toBe(true);
 
     // The bench moves (a range change shifts the ADC offsets): new snapshot.
     ingestFrame(
       store,
+      SLOT0,
       frame({ offsets: { input_l: 32, input_r: 32.5, output_l: 0, output_r: 0, calibrated: true } })
     );
     const second = store.get().traces.byId[HW_TRACE_IDS.inputL].capture;
@@ -658,7 +677,7 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
 
   it("frameCaptureProvenance with no device info still records the frame's bench", () => {
     const store = new Store(initialState(), { freeze: true });
-    const cap = frameCaptureProvenance(store.get(), frame({ sampleRate: 96000 }));
+    const cap = frameCaptureProvenance(store.get(), SLOT0, frame({ sampleRate: 96000 }));
     expect(cap.device).toBeNull();
     expect(cap.sampleRateHz).toBe(96000);
     expect(cap.inputRangeDbv).toBeNull(); // no config read yet — unknown, never guessed
@@ -673,15 +692,13 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
     // the stale object: content-addressing (the signature), not
     // last-call-wins, is what makes reuse across unrelated tests safe.
     const storeA = connectedStore(); // QA403 / AB12_CD34, 42/18 dBV, 20/20.5
-    ingestFrame(storeA, frame());
+    ingestFrame(storeA, SLOT0, frame());
     const capA = storeA.get().traces.byId[HW_TRACE_IDS.inputL].capture;
     expect(capA!.device?.serial).toBe("AB12_CD34");
 
     const storeB = new Store(initialState(), { freeze: true });
-    storeB.update("test/connect-other", (s) => ({
-      ...s,
-      device: {
-        ...s.device,
+    storeB.update("test/connect-other", (s) =>
+      withDevice(s, {
         info: {
           model: "QA402",
           firmware_version: 12,
@@ -693,10 +710,11 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
           is_virtual: true,
         },
         config: { input_gain: 6, output_gain: -2, sample_rate: 48000 },
-      },
-    }));
+      })
+    );
     ingestFrame(
       storeB,
+      SLOT0,
       frame({ offsets: { input_l: 0, input_r: 0, output_l: 0, output_r: 0, calibrated: false } })
     );
     const capB = storeB.get().traces.byId[HW_TRACE_IDS.inputL].capture;
@@ -714,5 +732,311 @@ describe("ingestFrame — capture provenance stamped on endpoint traces (issue #
 
     // …and storeA is untouched by storeB's ingest (no cross-store bleed).
     expect(storeA.get().traces.byId[HW_TRACE_IDS.inputL].capture).toBe(capA);
+  });
+
+  it("keyed PER SESSION (lot E2): two sessions with an IDENTICAL bench get their own frozen objects, never a shared one", () => {
+    // Same store, same content on both sessions — the memo is a Map keyed
+    // by SessionKey (lastCaptureBySession), so identity must differ even
+    // though the two captures are content-equal.
+    const store = connectedStore(); // slot-0: QA403 / AB12_CD34, 42/18 dBV
+    store.update("test/add-slot1-same-bench", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...initialSession(1), device: s.devices.sessions[SLOT0].device },
+        },
+      },
+    }));
+
+    const f = frame();
+    const capSlot0 = frameCaptureProvenance(store.get(), SLOT0, f);
+    const capSlot1 = frameCaptureProvenance(store.get(), "slot-1", f);
+    expect(capSlot1).toEqual(capSlot0); // same bench content
+    expect(capSlot1).not.toBe(capSlot0); // but independently frozen — never shared cross-session
+  });
+});
+
+/** A minimal fully-typed pushed frame for the per-session ingest/routing
+ * pins below — same shape as the other describe blocks' local `frame()`
+ * helpers, parameterized on the fields each test actually varies. */
+function minimalFrame(
+  over: {
+    deviceId?: string | null;
+    frames?: number;
+    offsets?: DecodedFrame["offsets"];
+  } = {}
+): DecodedFrame {
+  return {
+    seq: 1,
+    deviceId: over.deviceId ?? null,
+    sampleRate: 48000,
+    input: {
+      l: { sampleRate: 48000, samples: Float64Array.from([0.1, 0.2]) },
+      r: { sampleRate: 48000, samples: Float64Array.from([0.3, 0.4]) },
+    },
+    output: null,
+    fd: { inputL: null, inputR: null, outputL: null, outputR: null },
+    metrics: { inputL: null, inputR: null, harmonicsL: null, harmonicsR: null },
+    mix: {
+      sigma_peak_dbv: null,
+      clip_input: "none",
+      clip_output: false,
+      fitted_output_range_dbv: 8,
+    },
+    offsets: over.offsets ?? { input_l: 1, input_r: 2, output_l: 3, output_r: 4, calibrated: true },
+    stats: { frames: over.frames ?? 1, fps: 30, frame_ms: 33 },
+    errors: [],
+    trigger: { inputL: null, inputR: null, outputL: null, outputR: null },
+    measures: { inputL: null, inputR: null, outputL: null, outputR: null },
+  };
+}
+
+/** `s` with a second session added at slot 1 (E4 mints these; these tests
+ * hand-build one to exercise the per-session ingest routing). */
+function addSlot1(s: AppState): AppState {
+  return {
+    ...s,
+    devices: {
+      ...s.devices,
+      sessions: { ...s.devices.sessions, "slot-1": initialSession(1) },
+    },
+  };
+}
+
+describe("ingestFrame — per-session routing (issue #25 lot E2)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+    __resetSessionGlobals();
+  });
+
+  // SCOPE of this isolation (E2 review #7): only the run/device HALVES are
+  // per-session. The frames cache and traces.byId keys (HW_TRACE_IDS.*)
+  // stay bench-global until E3 slots the trace ids — two sessions streaming
+  // concurrently WOULD interleave on the same four traces today. This pin
+  // must not be read as trace-pool isolation.
+  it("ingestFrame(store, 'slot-1', frame) writes slot-1's run.stats/clip and device.offsets, and leaves slot-0 untouched", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/add-slot1", addSlot1);
+
+    ingestFrame(
+      store,
+      "slot-1",
+      minimalFrame({
+        frames: 7,
+        offsets: { input_l: 9, input_r: 9, output_l: 9, output_r: 9, calibrated: true },
+      })
+    );
+
+    const s = store.get();
+    expect(s.devices.sessions["slot-1"].run.stats.frames).toBe(7);
+    expect(s.devices.sessions["slot-1"].run.clip).toEqual({ input: "none", output: false });
+    expect(s.devices.sessions["slot-1"].device.offsets).toEqual({
+      input_l: 9,
+      input_r: 9,
+      output_l: 9,
+      output_r: 9,
+      calibrated: true,
+    });
+    // slot-0 never asked for — still its fresh initial values.
+    expect(s.devices.sessions[SLOT0].run.stats.frames).toBe(0);
+    expect(s.devices.sessions[SLOT0].device.offsets).toBeNull();
+  });
+
+  it("ingestFrame on an absent session key is a no-op — no cache write, no store change", () => {
+    const store = new Store(initialState(), { freeze: true });
+    const before = store.get();
+    ingestFrame(store, "slot-99", minimalFrame());
+    expect(store.get()).toBe(before); // the guard returns before any store.update
+    expect(getFrames(HW_TRACE_IDS.inputL)).toBeUndefined();
+  });
+});
+
+describe("ingestFrame — F5: frame.deviceId is asserted, never routed on (issue #25 lot E2)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+    __resetSessionGlobals();
+  });
+
+  function adoptedStore(id: string): Store<AppState> {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/adopt", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          [SLOT0]: { ...s.devices.sessions[SLOT0], deviceId: id },
+        },
+      },
+    }));
+    return store;
+  }
+
+  it("a frame whose deviceId mismatches the session's adopted id is STILL ingested", () => {
+    const store = adoptedStore("usb/A");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: "usb/B", frames: 3 }));
+    expect(focusedRun(store.get()).stats.frames).toBe(3); // ingested, not dropped
+    warn.mockRestore();
+  });
+
+  it("console.warn fires exactly once for 3 identical mismatching frames (throttled per (session, stamp, adopted) triple)", () => {
+    const store = adoptedStore("usb/A");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: "usb/B" }));
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: "usb/B" }));
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: "usb/B" }));
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("a frame with deviceId null never warns (the e2e fake and every pre-adoption frame)", () => {
+    const store = adoptedStore("usb/A");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: null }));
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("the mismatch check is skipped while the session's OWN deviceId is still null (not yet adopted)", () => {
+    const store = new Store(initialState(), { freeze: true }); // SLOT0.deviceId is null
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingestFrame(store, SLOT0, minimalFrame({ deviceId: "usb/X" }));
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe("startRun/stopRun — per-session sequencing (issue #25 lot E2)", () => {
+  beforeEach(() => __resetSessionGlobals());
+
+  it("stopRun('slot-0') in flight does NOT sequence startRun('slot-1') behind it", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/add-slot1-connected", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            // Adopted id: an UNADOPTED slot ≥ 1 is refused by the
+            // isRoutable gate (pinned below) and would never reach the wire.
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+
+    const order: string[] = [];
+    let resolveStop!: () => void;
+    const ipc: Ipc = {
+      call: (method: string) => {
+        if (method === "stream_stop") {
+          return new Promise((resolve) => {
+            resolveStop = () => {
+              order.push("stop-resolved");
+              resolve(undefined as never);
+            };
+          }) as never;
+        }
+        if (method === "stream_start") order.push("stream_start");
+        return Promise.resolve(null as never);
+      },
+    };
+
+    const stopP = stopRun(store, ipc, SLOT0); // gated: never resolves until resolveStop()
+    // A DIFFERENT session's start must not be sequenced behind it.
+    await startRun(store, ipc, { sessionKey: "slot-1" });
+    expect(order).toEqual(["stream_start"]); // reached BEFORE the slot-0 stop resolved
+
+    resolveStop();
+    await stopP;
+    expect(order).toEqual(["stream_start", "stop-resolved"]);
+  });
+
+  it("an UNADOPTED slot-1 never touches the wire — startRun and stopRun both refuse (E2 review #2/#3: the arg-less command would drive the DEFAULT runtime, the other device)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/add-slot1-unadopted", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1), // deviceId stays null
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+    const calls: string[] = [];
+    const ipc: Ipc = {
+      call: (method: string) => {
+        calls.push(method);
+        return Promise.resolve(null as never);
+      },
+    };
+    await startRun(store, ipc, { sessionKey: "slot-1" });
+    await stopRun(store, ipc, "slot-1");
+    expect(calls).toEqual([]);
+    // And the refused stop left no dangling transport state.
+    expect(store.get().devices.sessions["slot-1"].run.stopping).toBe(false);
+  });
+
+  it("stopRun on an ABSENT session resolves without touching the wire (E2 review #3)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const calls: string[] = [];
+    const ipc: Ipc = {
+      call: (method: string) => {
+        calls.push(method);
+        return Promise.resolve(null as never);
+      },
+    };
+    await stopRun(store, ipc, "slot-99");
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("stopRun — F8: 'Unknown device' rejection is swallowed, not toasted (issue #25 lot E2)", () => {
+  beforeEach(() => __resetSessionGlobals());
+
+  function ipcRejecting(message: string): Ipc {
+    return {
+      call: (method: string) =>
+        method === "stream_stop"
+          ? Promise.reject(new Error(message))
+          : (Promise.resolve(null) as never),
+    };
+  }
+
+  it("swallows 'Unknown device: usb/X' — no toast, and 'stopping' still clears", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    await stopRun(store, ipcRejecting("Unknown device: usb/X"), SLOT0);
+    expect(store.get().ui.toasts).toEqual([]);
+    expect(focusedRun(store.get()).stopping).toBe(false);
+    expect(focusedRun(store.get()).streaming).toBe(false);
+  });
+
+  it("case-insensitive substring match: a command-wrapper-prefixed, differently-cased message also swallows", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    await stopRun(store, ipcRejecting("stream_stop failed: UNKNOWN DEVICE: usb/Y"), SLOT0);
+    expect(store.get().ui.toasts).toEqual([]);
+  });
+
+  it("any OTHER rejection still toasts 'Stop failed:'", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    await stopRun(store, ipcRejecting("USB timeout"), SLOT0);
+    expect(store.get().ui.toasts).toHaveLength(1);
+    expect(store.get().ui.toasts[0]).toMatchObject({
+      kind: "error",
+      message: "Stop failed: Error: USB timeout",
+    });
+    expect(focusedRun(store.get()).stopping).toBe(false);
   });
 });

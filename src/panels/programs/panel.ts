@@ -18,6 +18,7 @@ import {
   runProgram,
   stopProgram,
 } from "../../store/actions/programs";
+import { focusedDevice, focusedRun } from "../../store/selectors/session";
 import { freezeTrace, setTraceColor } from "../../store/actions/traces";
 import { exportTraceCsv } from "../../export/export";
 import { el, keyedList } from "../../ui/dom";
@@ -289,7 +290,7 @@ export function mountProgramsPanel(
     node.querySelector(".programs__name")!.textContent = vm.label;
 
     const type = node.querySelector<HTMLElement>(`[data-testid="prog-type-${id}"]`)!;
-    const sr = store.get().device.config?.sample_rate ?? 48000;
+    const sr = focusedDevice(store.get()).config?.sample_rate ?? 48000;
     type.textContent = running
       ? `${typeLabel(vm.prog)} · ${programProgressText(vm.prog, sr, performance.now())}`
       : typeLabel(vm.prog);
@@ -348,7 +349,7 @@ export function mountProgramsPanel(
             label: t?.label ?? prog.id,
             color: t?.color ?? "#888888",
             hasData: (t?.domains.length ?? 0) > 0,
-            lock: s.run.programLock === prog.id ? null : lock,
+            lock: focusedRun(s).programLock === prog.id ? null : lock,
           };
         });
     },

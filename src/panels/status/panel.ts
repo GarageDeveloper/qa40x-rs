@@ -11,6 +11,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import { shallowEq } from "../../store/store";
 import type { AppState } from "../../store/state";
+import { focusedDevice, focusedDeviceId } from "../../store/selectors/session";
 import { openAppDrawer } from "../appmenu/drawer";
 import { openFirmwareDialog } from "../firmware/dialog";
 import { el } from "../../ui/dom";
@@ -53,11 +54,19 @@ export function mountStatusBar(
   );
 
   store.select(
-    (s) => s.device,
-    (device) => {
+    (s) => ({
+      device: focusedDevice(s),
+      // The user's name for the open unit (lot E2) — null with no alias,
+      // and the line renders byte-identically to pre-alias builds.
+      alias: (() => {
+        const id = focusedDeviceId(s);
+        return id !== null ? s.devices.aliases[id] ?? null : null;
+      })(),
+    }),
+    ({ device, alias }) => {
       const connected = device.status === "connected" && device.info;
       identity.textContent = connected
-        ? `${device.info!.model} · ${device.info!.serial} ·`
+        ? `${alias ?? `${device.info!.model} · ${device.info!.serial}`} ·`
         : "No device";
 
       fwBtn.hidden = !connected;

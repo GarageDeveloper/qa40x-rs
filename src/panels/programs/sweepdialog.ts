@@ -16,6 +16,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import type { AppState, SweepProgramParams } from "../../store/state";
 import { configureSweepProgram } from "../../store/actions/programs";
+import { focusedDevice } from "../../store/selectors/session";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
 
@@ -67,7 +68,7 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
   // asked — an unbounded input invites a silent surprise. `duration`'s own
   // max/min are further adjusted per-measurement in `syncVisibility()`
   // since FR's chirp length has no such ceiling.
-  const nyquist = (s.device.config?.sample_rate ?? 48000) / 2;
+  const nyquist = (focusedDevice(s).config?.sample_rate ?? 48000) / 2;
   const wowReference = num(`sweep-wowref-${id}`, p.wowReferenceHz, {
     min: "20",
     max: String(Math.floor(nyquist * 0.9)),

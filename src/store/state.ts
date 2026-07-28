@@ -22,6 +22,12 @@ import type {
   UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
+// One-way runtime edge only: selectors/session.ts imports its VALUES from
+// the leaf store/sessionkey.ts and only TYPES from this module (erased at
+// compile time), so this import creates no cycle.
+import { focusedDevice } from "./selectors/session";
+import { SLOT0, sessionKeyForSlot } from "./sessionkey";
+import type { SessionKey } from "./sessionkey";
 
 /**
  * Per-converter, per-channel dBFS→dBV display offsets. Four values, never
@@ -237,7 +243,8 @@ export function captureBenchSignature(c: CaptureProvenance): string {
  * frame's own sampleRate/offsets). The export compares a trace's snapshot
  * against this to decide whether the bench has moved since capture. */
 export function liveCaptureProvenance(s: AppState): CaptureProvenance {
-  const info = s.device.info;
+  const device = focusedDevice(s);
+  const info = device.info;
   return {
     device: info
       ? {
@@ -247,10 +254,10 @@ export function liveCaptureProvenance(s: AppState): CaptureProvenance {
           isVirtual: info.is_virtual,
         }
       : null,
-    sampleRateHz: s.device.config?.sample_rate ?? null,
-    inputRangeDbv: s.device.config?.input_gain ?? null,
-    outputRangeDbv: s.device.config?.output_gain ?? null,
-    offsets: s.device.offsets,
+    sampleRateHz: device.config?.sample_rate ?? null,
+    inputRangeDbv: device.config?.input_gain ?? null,
+    outputRangeDbv: device.config?.output_gain ?? null,
+    offsets: device.offsets,
     fftSize: s.acquisition.fftSize,
     window: s.acquisition.window,
     averaging: { ...s.acquisition.averaging },
@@ -620,10 +627,38 @@ export interface LayoutState {
   focus: string | null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Per-device sessions (issue #25 lot E2).                              */
+/* ------------------------------------------------------------------ */
+
+// The key primitives live in the LEAF module store/sessionkey.ts (see its
+// header for the slot-not-device-id rationale); re-exported here so state
+// consumers keep one import site.
+export { SLOT0, sessionKeyForSlot, slotOfSessionKey } from "./sessionkey";
+export type { SessionKey } from "./sessionkey";
+
+/** One open (or opening) device's live state: the lot-D root-level
+ * `AppState.device` + `AppState.run` pair, folded per slot (lot E2).
+ * `device` and `run` stay SUB-OBJECTS, never flattened into the session:
+ * panels select them with `shallowEq` reference identity — a run-only
+ * update must not re-fire a `s => focusedDevice(s)` selection. */
+export interface DeviceSession {
+  key: SessionKey;
+  slot: number;
+  /** The registry id of the unit this session has open, adopted from
+   * `list_devices` (`entry.open && entry.slot === slot`). Null until the
+   * first enumeration lands after the open, and again once it reports the
+   * slot empty. NEVER guessed from `device.info`: DeviceMeta carries a
+   * serial, not a registry id. */
+  deviceId: string | null;
+  device: DeviceState;
+  run: RunState;
+}
+
 /**
- * The enumerated-units slice (issue #25 lot D). Wire entries are stored
- * VERBATIM (no frontend mapping layer to drift); `AppState.device` remains
- * the OPEN device's live state until lot E folds it into `byId`.
+ * The enumerated-units slice (issue #25 lot D) + the per-device sessions
+ * (lot E2). Wire entries are stored VERBATIM (no frontend mapping layer to
+ * drift).
  *
  * Never persisted: `WorkspaceDoc` enumerates its slices explicitly and this
  * one stays out by design — a persisted device list would resurrect phantom
@@ -651,13 +686,28 @@ export interface DevicesState {
   primary: string | null;
   /** An enumeration is in flight (the bar keeps showing the last list). */
   enumerating: boolean;
+  /** Per-slot sessions (lot E2). Always holds SLOT0 — created at boot,
+   * never removed (the connect/demo flows reuse it). Added units get their
+   * sessions in lot E4. */
+  sessions: Record<SessionKey, DeviceSession>;
+  /** The session the single-device chrome describes and Run/Space act on
+   * (Raphaël decision 2, 2026-07-28). Always a key present in `sessions`. */
+  focus: SessionKey;
+  /**
+   * User-given device names (Raphaël decision 3, 2026-07-28), keyed by
+   * REGISTRY ID — deliberately the other keying than `sessions`: an alias
+   * must survive a replug onto a different slot. App-side only, persisted
+   * in localStorage (main.ts), NEVER sent to the backend and NEVER part of
+   * the workspace doc (a doc carried to another bench must not carry this
+   * bench's names). The editable surface lands with E4's group headers;
+   * E2 lands the store + persistence + read-through labels.
+   */
+  aliases: Record<string, string>;
 }
 
 export interface AppState {
-  device: DeviceState;
   devices: DevicesState;
   acquisition: AcquisitionState;
-  run: RunState;
   traces: TracesState;
   sources: SourcesState;
   programs: ProgramsState;
@@ -826,17 +876,51 @@ export function initialSources(): SourcesState {
   return { order: [sine.id], byId: { [sine.id]: sine } };
 }
 
+/** A fresh disconnected device state (one per session). */
+export function initialDeviceState(): DeviceState {
+  return {
+    status: "disconnected",
+    present: false,
+    userDisconnected: false,
+    info: null,
+    config: null,
+    telemetry: null,
+    offsets: null,
+  };
+}
+
+/** A fresh idle run state (one per session). */
+export function initialRunState(): RunState {
+  return {
+    streaming: false,
+    stopping: false,
+    stats: { fps: 0, frameMs: 0, frames: 0 },
+    sigmaPeakDbv: null,
+    clip: { input: "none", output: false },
+    fittedOutputRangeDbv: null,
+    slotErrors: [],
+    outputOnly: false,
+    generatorRunning: false,
+    programLock: null,
+    triggers: {},
+    trigArmPending: {},
+  };
+}
+
+/** A fresh session for `slot` (used by initialState for slot 0; lot E4
+ * mints further ones when a unit opens on a higher slot). */
+export function initialSession(slot: number): DeviceSession {
+  return {
+    key: sessionKeyForSlot(slot),
+    slot,
+    deviceId: null,
+    device: initialDeviceState(),
+    run: initialRunState(),
+  };
+}
+
 export function initialState(): AppState {
   return {
-    device: {
-      status: "disconnected",
-      present: false,
-      userDisconnected: false,
-      info: null,
-      config: null,
-      telemetry: null,
-      offsets: null,
-    },
     devices: {
       order: [],
       byId: {},
@@ -844,6 +928,9 @@ export function initialState(): AppState {
       pick: null,
       primary: null,
       enumerating: false,
+      sessions: { [SLOT0]: initialSession(0) },
+      focus: SLOT0,
+      aliases: {},
     },
     acquisition: {
       fftSize: 32768,
@@ -851,20 +938,6 @@ export function initialState(): AppState {
       window: "hann",
       peakHold: false,
       coherentGen: true,
-    },
-    run: {
-      streaming: false,
-      stopping: false,
-      stats: { fps: 0, frameMs: 0, frames: 0 },
-      sigmaPeakDbv: null,
-      clip: { input: "none", output: false },
-      fittedOutputRangeDbv: null,
-      slotErrors: [],
-      outputOnly: false,
-      generatorRunning: false,
-      programLock: null,
-      triggers: {},
-      trigArmPending: {},
     },
     traces: initialTraces(),
     sources: initialSources(),

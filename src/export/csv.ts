@@ -26,6 +26,7 @@
 import type { AppState, CaptureProvenance, TraceMeta } from "../store/state";
 import { captureBenchSignature, liveCaptureProvenance } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
+import { focusedDevice } from "../store/selectors/session";
 import type { DecodedSweep } from "../data/frames";
 import type { DecodedFd, DecodedTd } from "../ipc/stream";
 
@@ -121,7 +122,7 @@ function benchLines(s: AppState, appVersion: string, exportedAt: string): Proven
     { key: "app_version", value: appVersion },
     { key: "exported_at", value: exportedAt },
   ];
-  const info = s.device.info;
+  const info = focusedDevice(s).info;
   if (info) {
     lines.push(
       { key: "device_model", value: info.model },
@@ -132,7 +133,7 @@ function benchLines(s: AppState, appVersion: string, exportedAt: string): Proven
   } else {
     lines.push({ key: "device_model", value: "none" });
   }
-  const cfg = s.device.config;
+  const cfg = focusedDevice(s).config;
   if (cfg) {
     lines.push(
       { key: "sample_rate_hz", value: String(cfg.sample_rate) },
@@ -150,7 +151,7 @@ function benchLines(s: AppState, appVersion: string, exportedAt: string): Proven
     lines.push({ key: "averaging_count", value: String(acq.averaging.count) });
   }
   lines.push({ key: "round_to_bin", value: String(acq.coherentGen) });
-  const off = s.device.offsets;
+  const off = focusedDevice(s).offsets;
   lines.push({ key: "calibrated", value: String(off?.calibrated === true) });
   if (off) {
     lines.push(

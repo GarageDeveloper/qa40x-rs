@@ -1,17 +1,13 @@
 import { describe, expect, test } from "vitest";
 import { initialState, type AppState } from "../state";
+import { withDevice, withRun } from "../actions/sessions.fixtures";
 import { annunciators, attenEngaged } from "./annunciators";
 
 function withInputRange(dbv: number): AppState {
-  const s = initialState();
-  return {
-    ...s,
-    device: {
-      ...s.device,
-      status: "connected",
-      config: { input_gain: dbv, output_gain: 18, sample_rate: 48000 },
-    },
-  };
+  return withDevice(initialState(), {
+    status: "connected",
+    config: { input_gain: dbv, output_gain: 18, sample_rate: 48000 },
+  });
 }
 
 const badge = (s: AppState, key: string) =>
@@ -36,10 +32,7 @@ describe("ATTEN derivation (no register — hardware engages at ≥ 24 dBV)", ()
 describe("other badges", () => {
   test("clip badges follow run.clip and are alarms", () => {
     const s = initialState();
-    const clipped: AppState = {
-      ...s,
-      run: { ...s.run, clip: { input: "clip", output: true } },
-    };
+    const clipped: AppState = withRun(s, { clip: { input: "clip", output: true } });
     expect(badge(s, "clip").lit).toBe(false);
     expect(badge(clipped, "clip")).toMatchObject({ lit: true, alarm: true });
     expect(badge(clipped, "outclip")).toMatchObject({ lit: true, alarm: true });
@@ -47,10 +40,7 @@ describe("other badges", () => {
 
   test("near full scale lights CLIP as a warning, not an alarm (backend tri-state)", () => {
     const s = initialState();
-    const near: AppState = {
-      ...s,
-      run: { ...s.run, clip: { input: "near", output: false } },
-    };
+    const near: AppState = withRun(s, { clip: { input: "near", output: false } });
     expect(badge(near, "clip")).toMatchObject({ lit: true, warn: true, alarm: false });
     expect(badge(near, "outclip").lit).toBe(false);
   });

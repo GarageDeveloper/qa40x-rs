@@ -20,6 +20,8 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../store";
 import { initialState, type AppState } from "../state";
+import { focusedRun } from "../selectors/session";
+import { withDevice, withRun } from "./sessions.fixtures";
 import { clearAllFrames, getFrames } from "../../data/frames";
 import {
   addProgram,
@@ -34,12 +36,9 @@ import { wowSummary } from "../../panels/programs/panel";
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 function connectedStreamingState(): AppState {
-  const s = initialState();
-  return {
-    ...s,
-    device: { ...s.device, status: "connected" },
-    run: { ...s.run, streaming: true },
-  };
+  return withRun(withDevice(initialState(), { status: "connected" }), {
+    streaming: true,
+  });
 }
 
 /** Stub backend: records the call order, serves a 3-point THD sweep. The
@@ -149,10 +148,7 @@ describe("actions/programs — the device lock", () => {
 
   it("a second program is refused while one runs; an idle session stays idle", async () => {
     // NOT streaming: completion must not start a stream that never ran.
-    const store = new Store({
-      ...connectedStreamingState(),
-      run: { ...connectedStreamingState().run, streaming: false },
-    });
+    const store = new Store(withRun(connectedStreamingState(), { streaming: false }));
     const { ipc, log, release } = stubIpc();
     const a = addProgram(store, "thd");
     const b = addProgram(store, "thd");
@@ -314,25 +310,20 @@ describe("actions/programs — capture provenance stamped at land (issue #40)", 
   beforeEach(() => clearAllFrames());
 
   function connectedDeviceStreamingState(): AppState {
-    const s = connectedStreamingState();
-    return {
-      ...s,
-      device: {
-        ...s.device,
-        info: {
-          model: "QA403",
-          firmware_version: 61,
-          serial: "AB12-CD34",
-          product: "QA403 Audio Analyzer",
-          sample_rates: [48000],
-          supports_flash: false,
-          capabilities: {} as never,
-          is_virtual: false,
-        },
-        config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
-        offsets: { input_l: 20, input_r: 20.5, output_l: 1, output_r: 1.5, calibrated: true },
+    return withDevice(connectedStreamingState(), {
+      info: {
+        model: "QA403",
+        firmware_version: 61,
+        serial: "AB12-CD34",
+        product: "QA403 Audio Analyzer",
+        sample_rates: [48000],
+        supports_flash: false,
+        capabilities: {} as never,
+        is_virtual: false,
       },
-    };
+      config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+      offsets: { input_l: 20, input_r: 20.5, output_l: 1, output_r: 1.5, calibrated: true },
+    });
   }
 
   it("lands a THD sweep's result with the device identity, a frozen programParams copy, a pinned instant — and NO UI-cached bench values", async () => {
@@ -609,10 +600,13 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
   });
 
   it("the generator stops before the measurement and restarts after, in output-only mode", async () => {
-    const base = connectedStreamingState();
+    const base = withRun(connectedStreamingState(), {
+      streaming: false,
+      outputOnly: true,
+      generatorRunning: true,
+    });
     const store = new Store<AppState>({
       ...base,
-      run: { ...base.run, streaming: false, outputOnly: true, generatorRunning: true },
       sources: {
         order: ["src-1"],
         byId: {
@@ -636,7 +630,7 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
     await flush();
     expect(log.indexOf("stop_generator")).toBeGreaterThanOrEqual(0);
     expect(log.indexOf("stop_generator")).toBeLessThan(log.indexOf("measure_wow_flutter"));
-    expect(store.get().run.generatorRunning).toBe(false);
+    expect(focusedRun(store.get()).generatorRunning).toBe(false);
 
     release();
     await run;
@@ -645,7 +639,7 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
     await flush();
 
     expect(log.indexOf("output_only_start")).toBeGreaterThan(log.indexOf("measure_wow_flutter"));
-    expect(store.get().run.generatorRunning).toBe(true);
+    expect(focusedRun(store.get()).generatorRunning).toBe(true);
     expect(programLockReason(store.get())).toBeNull();
   });
 

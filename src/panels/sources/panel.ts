@@ -42,6 +42,7 @@ import { setOutputOnly } from "../../store/actions/outputonly";
 import { setCoherentGen } from "../../store/actions/acquisition";
 import { playedFrequencyHz } from "../../store/actions/stream";
 import { programLockReason } from "../../store/actions/programs";
+import { focusedDevice, focusedRun } from "../../store/selectors/session";
 import { routeChecks, routeFromChecks } from "../../core/routing";
 import { toneListStats } from "../../core/tonestats";
 import { el, keyedList } from "../../ui/dom";
@@ -514,7 +515,7 @@ export function mountSourcesPanel(
 
   store.select(
     (s) => {
-      const errors = new Map(s.run.slotErrors.map((e) => [e.id, e.error]));
+      const errors = new Map(focusedRun(s).slotErrors.map((e) => [e.id, e.error]));
       const lock = programLockReason(s);
       return s.sources.order
         .map((id) => s.sources.byId[id])
@@ -547,12 +548,12 @@ export function mountSourcesPanel(
 
   store.select(
     (s) => ({
-      peak: s.run.sigmaPeakDbv,
-      clip: s.run.clip.output,
-      range: s.run.fittedOutputRangeDbv,
-      driving: s.run.streaming || s.run.generatorRunning,
-      outputOnly: s.run.outputOnly,
-      connected: s.device.status === "connected",
+      peak: focusedRun(s).sigmaPeakDbv,
+      clip: focusedRun(s).clip.output,
+      range: focusedRun(s).fittedOutputRangeDbv,
+      driving: focusedRun(s).streaming || focusedRun(s).generatorRunning,
+      outputOnly: focusedRun(s).outputOnly,
+      connected: focusedDevice(s).status === "connected",
     }),
     ({ peak, clip, range, driving, outputOnly, connected }) => {
       sigma.textContent =

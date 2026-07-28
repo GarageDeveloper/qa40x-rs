@@ -25,6 +25,7 @@ import {
   snapshotWorkspace,
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
+import { anyProgramLock } from "../selectors/session";
 import { syncStream } from "./stream";
 import { toast } from "./ui";
 
@@ -47,7 +48,9 @@ export function applyWorkspaceDoc(
   doc: WorkspaceDoc
 ): boolean {
   const s = store.get();
-  if (s.run.programLock !== null) {
+  // Bench-global by intent: a program running on ANY session (not just the
+  // focused one) owns a result trace the load would replace under it.
+  if (anyProgramLock(s) !== null) {
     toast(store, "info", "A measurement is running — stop it before loading a workspace.");
     return false;
   }

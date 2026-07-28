@@ -28,6 +28,7 @@ import {
   sweepXUnit,
 } from "../store/selectors/chartvm";
 import { chipSourceTraceId, shownTraces } from "../store/selectors/layout";
+import { focusedDevice } from "../store/selectors/session";
 import { getFrames } from "../data/frames";
 import { toast } from "../store/actions/ui";
 import {
@@ -416,7 +417,7 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
       ? tileExportCapture(s, tile, scopeVM(s, tile).trigger?.capture)
       : tileCapture(s, tile)
     : null;
-  const info = s.device.info;
+  const info = focusedDevice(s).info;
   const device = cap?.device
     ? `${cap.device.model} #${cap.device.serial}` +
       (cap.device.firmware !== null ? ` fw${cap.device.firmware}` : "") +
@@ -425,7 +426,7 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
       ? `${info.model} #${info.serial} fw${info.firmware_version}${info.is_virtual ? " (virtual)" : ""}`
       : "no device";
   const acq = s.acquisition;
-  const rateHz = cap?.sampleRateHz ?? s.device.config?.sample_rate ?? null;
+  const rateHz = cap?.sampleRateHz ?? focusedDevice(s).config?.sample_rate ?? null;
   const fft = cap ? cap.fftSize : acq.fftSize;
   const window = cap ? cap.window : acq.window;
   const averaging = cap ? cap.averaging : acq.averaging;
