@@ -7,7 +7,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { DeviceList } from "../../gen";
 import type { Store } from "../store";
 import type { AppState, DevicesState, SessionKey } from "../state";
-import { slotOfSessionKey } from "../state";
+import { SLOT0, initialSession, sessionKeyForSlot, slotOfSessionKey } from "../state";
 import { syncAllStreams } from "./stream";
 
 /**
@@ -68,6 +68,50 @@ function derivePrimary(d: Omit<DevicesState, "primary">): string | null {
 }
 
 /**
+ * Mint the session for a unit just opened on `slot` (issue #25 lot E4) —
+ * PURE, with the registry id adopted AT MINT: the id comes from the
+ * `connect_additional_device` answer itself, so `isRoutable` is true from
+ * the first instant and no command can fall through to the default runtime
+ * (bookkeeping item 1). The focus is deliberately untouched — an added
+ * device comes up in MONITOR mode (Raphaël decision 1: only the focused
+ * session carries the bench's sources). Status starts "connecting"; the
+ * add flow flips it once `get_device_info` answers.
+ */
+export function mintSession(s: AppState, slot: number, deviceId: string): AppState {
+  const key = sessionKeyForSlot(slot);
+  const base = initialSession(slot);
+  const sessions = {
+    ...s.devices.sessions,
+    [key]: {
+      ...base,
+      deviceId,
+      device: { ...base.device, status: "connecting" as const, present: true },
+    },
+  };
+  const devices = { ...s.devices, sessions };
+  return { ...s, devices: { ...devices, primary: derivePrimary(devices) } };
+}
+
+/**
+ * Evict a session (device removed or lost — issue #25 lot E4). PURE.
+ * SLOT0 is never dropped (the connect/demo flows own it). A focus on the
+ * dropped key falls back to the lowest remaining slot; the CALLER must
+ * re-sync every running stream in the same gesture (the setFocusedSession
+ * rationale: the DAC slot program follows the focus).
+ */
+export function dropSession(s: AppState, key: SessionKey): AppState {
+  if (key === SLOT0 || !s.devices.sessions[key]) return s;
+  const sessions = { ...s.devices.sessions };
+  delete sessions[key];
+  const focus =
+    s.devices.focus === key
+      ? (Object.values(sessions).sort((a, b) => a.slot - b.slot)[0]?.key ?? SLOT0)
+      : s.devices.focus;
+  const devices = { ...s.devices, sessions, focus };
+  return { ...s, devices: { ...devices, primary: derivePrimary(devices) } };
+}
+
+/**
  * Fold one enumeration answer into the slice (pure — the vitest target).
  * `order` is sticky: a unit keeps its slot across a vanish/reappear;
  * `available` reflects only THIS answer; entries refresh verbatim.
@@ -103,6 +147,7 @@ export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesStat
     available,
     pick: prev.pick,
     enumerating: false,
+    adding: prev.adding,
     sessions,
     focus: prev.focus,
     aliases: prev.aliases,

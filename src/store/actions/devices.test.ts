@@ -467,19 +467,48 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
     return store;
   }
 
-  it("deviceLost(store, 'usb/B') tears down ONLY the session that adopted usb/B — slot-0 (usb/A) stays streaming", () => {
+  it("deviceLost 'usb/B' EVICTS the session that adopted usb/B (lot E4 decision B4) — slot-0 (usb/A) stays streaming, and the loss is a wire-visible focus event only for survivors", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, "usb/B");
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/B");
     const s = store.get();
-    expect(s.devices.sessions["slot-1"].device.status).toBe("disconnected");
-    expect(s.devices.sessions["slot-1"].run.streaming).toBe(false);
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.devices.focus).toBe(SLOT0);
     expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
   });
 
-  it("deviceLost(store, null) tears down slot 0 only (the payload-less monitor event)", () => {
+  it("a duplicate loss event for an already-evicted id is a NO-OP while ≥ 2 sessions survive (the unmatched-id rule keeps covering the post-eviction echo)", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, null);
+    store.update("test/third-session", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-2": {
+            ...initialSession(2),
+            deviceId: "usb/C",
+            device: { ...initialSession(2).device, status: "connected" as const },
+            run: { ...initialSession(2).run, streaming: true },
+          },
+        },
+      },
+    }));
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/B");
+    deviceLost(store, ipc, "usb/B");
+    const s = store.get();
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
+    expect(s.devices.sessions["slot-2"].device.status).toBe("connected");
+  });
+
+  it("deviceLost(null) tears down slot 0 only (the payload-less monitor event)", () => {
+    const store = twoAdoptedSessionsStore();
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, null);
     const s = store.get();
     expect(s.devices.sessions[SLOT0].device.status).toBe("disconnected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(false);
@@ -489,7 +518,8 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
 
   it("with SEVERAL sessions, an id nobody adopted is a NO-OP — a stale enumeration clearing an id must not get slot 0 torn down for another unit's loss (E2 review #5)", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, "usb/never-adopted");
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/never-adopted");
     const s = store.get();
     expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
@@ -512,7 +542,7 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
         },
       },
     }));
-    deviceLost(store, "usb/A");
+    deviceLost(store, recordingIpc(list()).ipc, "usb/A");
     expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
   });
 });

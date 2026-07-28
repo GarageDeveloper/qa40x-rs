@@ -18,6 +18,7 @@ import type { Store } from "../store";
 import type { AppState, HwTraceSource, TraceMeta, TraceSource } from "../state";
 import {
   HW_TRACE_IDS,
+  hwTraceIds,
   hwTraceMetas,
   hwTraceSource,
   isRatioTrace,
@@ -87,6 +88,99 @@ export function reconcileHwTraces(s: AppState): AppState {
     ...s,
     traces: { order: nextOrder ?? s.traces.order, byId: nextById ?? s.traces.byId },
   };
+}
+
+/**
+ * Fresh-slate `slot`'s 4 endpoint traces (issue #25 lot E4, decision B6):
+ * called at session MINT, because `free_or_new_runtime` REUSES freed
+ * slots — a different unit can land on a slot whose dormant traces still
+ * hold the previous unit's frames, and its first captures must never blend
+ * into them. Clears the caches and zeroes the data-derived meta fields
+ * (domains / offsetDb / capture); user label/color edits are kept (theirs).
+ * `seq` bumps so tiles re-read — and find nothing.
+ */
+export function resetSlotEndpointTraces(store: Store<AppState>, slot: number): void {
+  const ids = Object.values(hwTraceIds(slot));
+  for (const id of ids) {
+    clearFrames(id);
+    clearMeasures(id);
+  }
+  store.update("traces/reset-slot-endpoints", (s) => {
+    let byId: Record<TraceId, TraceMeta> | null = null;
+    for (const id of ids) {
+      const t = s.traces.byId[id];
+      if (!t) continue;
+      if (t.domains.length === 0 && t.offsetDb === null && t.capture === null) continue;
+      (byId ??= { ...s.traces.byId })[id] = {
+        ...t,
+        domains: [],
+        seq: t.seq + 1,
+        offsetDb: null,
+        capture: null,
+      };
+    }
+    return byId ? { ...s, traces: { ...s.traces, byId } } : s;
+  });
+}
+
+/**
+ * Purge `slot`'s 4 endpoint traces from the whole bench (issue #25 lot E4,
+ * decision B5 — the "remove device" gesture on a group header): pool +
+ * order, every tile's membership / hidden / hiddenCurves, chip and trigger
+ * sources pointing at them (back to "auto"), the per-endpoint trigger
+ * settings, and the frames/measures/chain caches. Slot 0 is refused — the
+ * default device's endpoints are permanent (the delete-guard invariant
+ * stays unconditional: an hw endpoint row never carries a ✕).
+ */
+export function purgeSlotEndpointTraces(store: Store<AppState>, ipc: Ipc, slot: number): void {
+  if (slot === 0) return;
+  const ids = new Set<TraceId>(Object.values(hwTraceIds(slot)));
+  store.update("traces/purge-slot-endpoints", (s) => {
+    const order = s.traces.order.filter((id) => !ids.has(id));
+    const byId = { ...s.traces.byId };
+    for (const id of ids) delete byId[id];
+    const tiles = Object.fromEntries(
+      Object.entries(s.layout.tiles).map(([tid, tile]) => {
+        const touched =
+          tile.traces.some((id) => ids.has(id)) ||
+          tile.hidden.some((id) => ids.has(id)) ||
+          Object.keys(tile.hiddenCurves).some((id) => ids.has(id)) ||
+          ids.has(tile.chipSource as TraceId) ||
+          ids.has(tile.triggerSource as TraceId);
+        if (!touched) return [tid, tile];
+        const hiddenCurves = Object.fromEntries(
+          Object.entries(tile.hiddenCurves).filter(([id]) => !ids.has(id))
+        );
+        return [
+          tid,
+          {
+            ...tile,
+            traces: tile.traces.filter((id) => !ids.has(id)),
+            hidden: tile.hidden.filter((id) => !ids.has(id)),
+            hiddenCurves,
+            chipSource: ids.has(tile.chipSource as TraceId) ? ("auto" as const) : tile.chipSource,
+            triggerSource: ids.has(tile.triggerSource as TraceId)
+              ? ("auto" as const)
+              : tile.triggerSource,
+          },
+        ];
+      })
+    );
+    const triggers = { ...s.triggers };
+    for (const id of ids) delete triggers[id];
+    return {
+      ...s,
+      traces: { order, byId },
+      layout: { ...s.layout, tiles },
+      triggers,
+    };
+  });
+  for (const id of ids) {
+    resetChain(id);
+    clearFrames(id);
+    clearMeasures(id);
+  }
+  syncAllStreams(store, ipc);
 }
 
 /** Muted overlay tint for a frozen copy of `color` (8-digit hex alpha). */

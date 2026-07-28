@@ -6,16 +6,22 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, LevelOffsetsDb, RunState, SessionKey } from "../state";
-import { SLOT0 } from "../state";
+import { SLOT0, sessionKeyForSlot, slotOfSessionKey } from "../state";
 import { autoConnectDeviceId } from "../selectors/devices";
 import {
+  isRoutable,
   session,
   sessionArgs,
   updateDevice,
   updateRun,
 } from "../selectors/session";
-import { refreshDevices } from "./devices";
-import { syncStream } from "./stream";
+import { dropSession, mintSession, refreshDevices } from "./devices";
+import { disposeSession, syncAllStreams, syncStream } from "./stream";
+import {
+  purgeSlotEndpointTraces,
+  reconcileHwTraces,
+  resetSlotEndpointTraces,
+} from "./traces";
 import { toast } from "./ui";
 
 /**
@@ -46,12 +52,15 @@ async function readOffsets(
  * (E2 review #4): the wire is arg-less for slot 0 (sessionArgs contract),
  * and the answer lands on the SAME session it was read from — a connect on
  * slot 0 with the focus elsewhere must never overwrite the focused unit's
- * four-offsets record (the #48/#50/#51 class). */
-async function refreshConfig(
+ * four-offsets record (the #48/#50/#51 class). The isRoutable gate (E4)
+ * covers a session evicted mid-flow: reads for a dead slot ≥ 1 key must
+ * not fall through to the default runtime. Exported for E4's add flow. */
+export async function refreshConfig(
   store: Store<AppState>,
   ipc: Ipc,
   key: SessionKey
 ): Promise<void> {
+  if (!isRoutable(store.get(), key)) return;
   const scope = sessionArgs(store.get(), key);
   const [config, offsets] = await Promise.all([
     ipc.call("get_device_config", scope),
@@ -265,29 +274,122 @@ function runStoppedByDisconnect(r: RunState): RunState {
 }
 
 /**
+ * Open `deviceId` as an ADDITIONAL device (issue #25 lot E4 — the traces
+ * panel's add-device gesture). The backend answer carries the opened id +
+ * slot, and the session is minted WITH the id (bookkeeping item 1: no
+ * unroutable window — `isRoutable` is true from the first store state that
+ * holds the session). The new device comes up in monitor mode (mintSession
+ * leaves the focus alone) with a fresh endpoint slate (decision B6: a
+ * reused slot must not show the previous unit's frames).
+ */
+export async function addDevice(
+  store: Store<AppState>,
+  ipc: Ipc,
+  deviceId: string
+): Promise<void> {
+  const s0 = store.get();
+  if (s0.devices.adding.includes(deviceId)) return;
+  const held = Object.values(s0.devices.sessions).some((x) => x.deviceId === deviceId);
+  if (held || s0.devices.byId[deviceId]?.open) {
+    toast(store, "info", "This device is already connected");
+    return;
+  }
+  store.update("devices/adding", (s) => ({
+    ...s,
+    devices: { ...s.devices, adding: [...s.devices.adding, deviceId] },
+  }));
+  try {
+    const { device_id, slot } = await ipc.call("connect_additional_device", { deviceId });
+    const key = sessionKeyForSlot(slot);
+    store.update("devices/mint-session", (s) => mintSession(s, slot, device_id));
+    store.update("traces/reconcile-hw", reconcileHwTraces);
+    resetSlotEndpointTraces(store, slot);
+    const info = await ipc.call("get_device_info", { deviceId: device_id });
+    store.update("device/added", (s) =>
+      updateDevice(s, key, (d) => ({ ...d, status: "connected", present: true, info }))
+    );
+    await refreshConfig(store, ipc, key);
+    toast(store, "success", `Added ${info?.model ?? "device"}`);
+  } catch (e) {
+    toast(store, "error", `Add device failed: ${e}`);
+  } finally {
+    store.update("devices/adding-done", (s) => ({
+      ...s,
+      devices: { ...s.devices, adding: s.devices.adding.filter((x) => x !== deviceId) },
+    }));
+    void refreshDevices(store, ipc);
+  }
+}
+
+/**
+ * Remove `key`'s device from the bench (issue #25 lot E4 — the ✕ on a
+ * group header): keyed disconnect (best-effort — the F8 rule: an already-
+ * gone unit answers `Unknown device`, which reports nothing actionable),
+ * session eviction, and the slot's endpoint purge (decision B5). Also the
+ * purge path for a DORMANT group: no session, just dead traces. SLOT0 is
+ * refused — the default device disconnects from the top bar and its
+ * endpoints are permanent.
+ */
+export async function removeDevice(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key: SessionKey
+): Promise<void> {
+  if (key === SLOT0) return;
+  const slot = slotOfSessionKey(key);
+  const sess = session(store.get(), key);
+  if (sess) {
+    if (sess.deviceId !== null && sess.device.status !== "disconnected") {
+      try {
+        await ipc.call("disconnect_device", { deviceId: sess.deviceId });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!msg.toLowerCase().includes("unknown device")) {
+          toast(store, "error", `Disconnect: ${e}`);
+        }
+      }
+    }
+    disposeSession(key);
+    store.update("devices/drop-session", (s) => dropSession(s, key));
+    // A focus that sat on the dropped key fell back to another session —
+    // wire-visible (the DAC program follows the focus): re-sync every
+    // running stream in this same gesture, like setFocusedSession does.
+    syncAllStreams(store, ipc);
+  }
+  purgeSlotEndpointTraces(store, ipc, slot);
+  void refreshDevices(store, ipc);
+}
+
+/**
  * Backend pushed a disconnect (USB monitoring event). Idempotent: the
  * monitor also fires after a MANUAL disconnect (it only sees "no longer
  * connected"), and any duplicate event must not re-toast or churn state.
  *
  * `deviceId` names the lost unit (issue #25 lot C); the loss is ROUTED to
  * the session holding that id (lot E2) so unit A's loss never tears down
- * unit B's session. Fallback to slot 0 covers the payload-less event
- * (older backend, the e2e fake) AND an id no session has adopted yet (the
- * post-connect enumeration hasn't landed) — the pre-E2 behavior for the
- * only session that can be open then; E4 revisits when several are.
+ * unit B's session. Slot 0 keeps the historic mark-disconnected shape; a
+ * matched slot ≥ 1 session is EVICTED instead (lot E4, decision B4): its
+ * traces stay in the pool (the group goes dormant, D1) but a dead session
+ * must not linger unroutable. Fallback to slot 0 covers the payload-less
+ * event (older backend, the e2e fake) AND an unmatched id while slot 0 is
+ * the lone session — the pre-adoption window right after connect, and the
+ * single-device contract smoke.pw.ts pins (any id ≡ payload-less there).
+ * With several sessions an unmatched id is a NO-OP (E2 review #5). Known
+ * accepted edge: a DUPLICATE loss event for an id evicted a moment ago
+ * lands in the lone-session fallback once only slot 0 remains — the
+ * pinned single-device behavior wins over guarding a double-fire the
+ * per-generation monitor doesn't produce.
  */
-export function deviceLost(store: Store<AppState>, deviceId: string | null = null): void {
+export function deviceLost(
+  store: Store<AppState>,
+  ipc: Ipc,
+  deviceId: string | null = null
+): void {
   const s0 = store.get();
   const matched =
     deviceId !== null
       ? Object.values(s0.devices.sessions).find((x) => x.deviceId === deviceId)?.key
       : undefined;
-  // SLOT0 fallback ONLY for the payload-less event or while slot 0 is the
-  // lone session (the pre-adoption window right after connect). With
-  // several sessions, an id nobody holds must be a NO-OP (E2 review #5): a
-  // stale enumeration can transiently clear a session's adopted id, and
-  // tearing down slot 0 for ANOTHER unit's loss would kill the wrong
-  // capture.
   const key =
     matched ??
     (deviceId === null || Object.keys(s0.devices.sessions).length === 1
@@ -300,6 +402,17 @@ export function deviceLost(store: Store<AppState>, deviceId: string | null = nul
   // can outrace a doomed connect's own failure path).
   const status = session(s0, key)?.device.status;
   if (status === undefined || status === "disconnected") return;
+  if (key !== SLOT0) {
+    // Eviction (E4): teardown of the module maps first (a late frame from
+    // the dead channel must find its gen counter gone), then the store
+    // drop. A focus on the lost key fell back — wire-visible, so every
+    // surviving stream re-syncs in this same gesture.
+    disposeSession(key);
+    store.update("device/lost-evicted", (s) => dropSession(s, key));
+    syncAllStreams(store, ipc);
+    toast(store, "info", "Device disconnected");
+    return;
+  }
   store.update("device/lost", (s) =>
     updateRun(
       updateDevice(s, key, (d) => ({

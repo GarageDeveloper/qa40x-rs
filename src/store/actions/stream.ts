@@ -493,6 +493,24 @@ export function __resetSessionGlobals(): void {
   warnedFrameMismatches.clear();
 }
 
+/**
+ * Drop every per-session module entry for an EVICTED session (issue #25
+ * lot E4 — the teardown twin of the maps above): the capture memo has no
+ * other eviction (E3 tester note), and deleting the gen counter makes a
+ * late frame from the dead channel fail its `gen === streamGen.get(key)`
+ * guard — nothing of a removed device may keep writing. The mismatch-warn
+ * memo drops its keys too so a session re-minted on the same slot warns
+ * afresh.
+ */
+export function disposeSession(key: SessionKey): void {
+  stopInFlight.delete(key);
+  streamGen.delete(key);
+  lastCaptureBySession.delete(key);
+  for (const sig of [...warnedFrameMismatches]) {
+    if (sig.startsWith(`${key}|`)) warnedFrameMismatches.delete(sig);
+  }
+}
+
 export async function startRun(
   store: Store<AppState>,
   ipc: Ipc,

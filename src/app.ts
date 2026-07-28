@@ -173,7 +173,7 @@ export async function mountApp(
   // unit (issue #25 lot C); optional-safe — older backends and the e2e
   // harness emit the event with no payload at all.
   void listen<DeviceLost | undefined>("device-disconnected", (e) => {
-    deviceLost(store, e.payload?.device_id ?? null);
+    deviceLost(store, ipc, e.payload?.device_id ?? null);
     void refreshDevices(store, ipc);
   });
 
