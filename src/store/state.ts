@@ -26,6 +26,7 @@ import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
 // the leaf store/sessionkey.ts and only TYPES from this module (erased at
 // compile time), so this import creates no cycle.
 import { focusedDevice } from "./selectors/session";
+import { EXTRA_TRACE_COLORS, hwTraceIds, hwTraceMetas } from "./hwtraces";
 import { SLOT0, sessionKeyForSlot } from "./sessionkey";
 import type { SessionKey } from "./sessionkey";
 
@@ -725,24 +726,23 @@ export const FFT_SIZES = [
   4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
 ] as const;
 
-/* The 4 hardware endpoints — always present, never deletable (Traces V2).
- * Ids are stable (they key the frames cache and the e2e specs); colors are
- * the validated series palette so In L/R match the classic L/R hues. */
-export const HW_TRACE_IDS = {
-  inputL: "hw-in-left",
-  inputR: "hw-in-right",
-  outputL: "hw-out-left",
-  outputR: "hw-out-right",
-} as const;
+// The hardware endpoint id/meta primitives live in the LEAF module
+// store/hwtraces.ts (lot E3 — see its header for the slot-in-the-id
+// rationale); re-exported here so state consumers keep one import site.
+export {
+  hwTraceIds,
+  hwSlotOfTraceId,
+  isHwTraceId,
+  hwTraceMetas,
+  hwTraceSource,
+  HW_ENDPOINTS,
+} from "./hwtraces";
 
-function hwTrace(
-  id: TraceId,
-  label: string,
-  color: string,
-  source: TraceSource
-): TraceMeta {
-  return { id, label, color, source, domains: [], seq: 0, offsetDb: null, capture: null };
-}
+/* The 4 hardware endpoints of SLOT 0 — always present, never deletable
+ * (Traces V2). Ids are stable (they key the frames cache and the e2e
+ * specs). Kept as a named constant: it predates the slot dimension and
+ * ~40 sites read it as "the default device's endpoints". */
+export const HW_TRACE_IDS = hwTraceIds(0);
 
 /** A transform chain containing a deconvolve step produces a RATIO spectrum
  * (dB re its reference): converter offsets / absolute fd units must not
@@ -756,11 +756,6 @@ export function isRatioTrace(t: TraceMeta): boolean {
   );
 }
 
-/** Colors handed to user-created traces (transforms, programs), cycling —
- * distinct from the 4 hardware endpoint hues. */
-const EXTRA_TRACE_COLORS = [
-  "#9a6ee2", "#4dc4cf", "#d1793c", "#7fb069", "#c95d63", "#5a7bd8",
-];
 
 /** Color for one curve of a multi-curve trace (a sweep's L + R): curve 0 is
  * the trace's own color; each further curve steps to the next palette slot,
@@ -793,12 +788,7 @@ export function nextTraceColor(s: AppState): string {
 }
 
 export function initialTraces(): TracesState {
-  const traces = [
-    hwTrace(HW_TRACE_IDS.inputL, "Input L", "#3987e5", { kind: "hw_input", channel: "left" }),
-    hwTrace(HW_TRACE_IDS.inputR, "Input R", "#199e70", { kind: "hw_input", channel: "right" }),
-    hwTrace(HW_TRACE_IDS.outputL, "Output L", "#e6a23c", { kind: "hw_output", channel: "left" }),
-    hwTrace(HW_TRACE_IDS.outputR, "Output R", "#e06ca6", { kind: "hw_output", channel: "right" }),
-  ];
+  const traces = hwTraceMetas(0);
   return {
     order: traces.map((t) => t.id),
     byId: Object.fromEntries(traces.map((t) => [t.id, t])),
