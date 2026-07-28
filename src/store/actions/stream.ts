@@ -18,13 +18,14 @@ import type {
   SourceMeta,
   TraceMeta,
 } from "../state";
-import { captureBenchSignature, HW_TRACE_IDS, hwTraceIds } from "../state";
+import { captureBenchSignature, hwTraceIds } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import {
   isRoutable,
   session,
   sessionArgs,
+  sessionKeys,
   updateDevice,
   updateRun,
 } from "../selectors/session";
@@ -146,30 +147,41 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
 /** The stream config is a pure projection of the state tree. The spectra
  * request is the display budget: an FFT is computed only for hardware
  * endpoints some displayed spectrum tile shows (#52). `sessionKey` keys
- * the sample-rate-dependent parts (bin snapping — see playedFrequencyHz);
- * acquisition/sources/display budget stay bench-global by design. */
+ * the sample-rate-dependent parts (bin snapping — see playedFrequencyHz)
+ * and, since lot E3, the endpoint projections: spectra/triggers/measures
+ * read through the session slot's own trace ids (wire shapes byte-identical
+ * — the slot dimension lives outside them, one config per device).
+ * Acquisition and the display budget stay bench-global by design.
+ *
+ * `slots` (the DAC program) is emitted for the FOCUSED session only
+ * (Raphaël decision 1, 2026-07-28: sources = focused device; added devices
+ * capture in monitor mode — an empty slot set). Per-device source routing
+ * is lot F. */
 export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamConfig {
+  const key = sessionKey ?? s.devices.focus;
+  const slot = session(s, key)?.slot ?? 0;
+  const ids = hwTraceIds(slot);
   const { mode, count } = s.acquisition.averaging;
   const fdShown = fdShownTraceIds(s);
   return {
     buffer_size: s.acquisition.fftSize,
-    slots: slotsFromSources(s, sessionKey),
+    slots: key === s.devices.focus ? slotsFromSources(s, key) : [],
     window: s.acquisition.window,
     averaging: {
       coherent: mode === "coherent",
       count: mode === "off" ? 1 : Math.max(1, count),
     },
     spectra: {
-      input_l: fdShown.has(HW_TRACE_IDS.inputL),
-      input_r: fdShown.has(HW_TRACE_IDS.inputR),
-      output_l: fdShown.has(HW_TRACE_IDS.outputL),
-      output_r: fdShown.has(HW_TRACE_IDS.outputR),
+      input_l: fdShown.has(ids.inputL),
+      input_r: fdShown.has(ids.inputR),
+      output_l: fdShown.has(ids.outputL),
+      output_r: fdShown.has(ids.outputR),
     },
     // M1: always auto-fit to the summed peak (a fixed-range UI lands with
     // the full output-range readout parity).
     output_range_dbv: null,
-    triggers: triggerRequest(s),
-    measures: measureRequest(s),
+    triggers: triggerRequest(s, slot),
+    measures: measureRequest(s, slot),
   };
 }
 
@@ -646,4 +658,18 @@ export function syncStream(
         toast(store, "error", `Stream update: ${e}`);
       }
     });
+}
+
+/**
+ * Push the current config to EVERY session's running stream (lot E3):
+ * bench-global mutators — acquisition, trigger settings, trace pool,
+ * layout, workspace load — reshape every device's config, not just the
+ * focused one's. Each per-session sync no-ops when that session is not
+ * streaming and refuses an unroutable slot ≥ 1 (syncStream's own gates).
+ * Focus-bound mutators (sources, transport, output-only) keep calling
+ * `syncStream` directly — decision D3: sources ride the focused device.
+ * Dormant with one session: exactly one syncStream, as before.
+ */
+export function syncAllStreams(store: Store<AppState>, ipc: Ipc): void {
+  for (const key of sessionKeys(store.get())) syncStream(store, ipc, key);
 }

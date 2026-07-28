@@ -24,7 +24,7 @@ import {
   nextTraceColor,
   slotOfSessionKey,
 } from "../state";
-import { syncStream } from "./stream";
+import { syncAllStreams } from "./stream";
 
 /** Two hw sources are the same endpoint. */
 function sameHwSource(a: TraceSource, b: HwTraceSource): boolean {
@@ -215,7 +215,7 @@ export function deleteTrace(store: Store<AppState>, ipc: Ipc, id: TraceId): void
   const meta = store.get().traces.byId[id];
   if (!meta || (meta.source.kind !== "memory" && meta.source.kind !== "transform")) return;
   removeTraceEverywhere(store, id);
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** Shared pool/tiles/cache removal (also used when a program is removed). */
@@ -347,6 +347,6 @@ export function configureTransform(
   });
   // The transform may read a hardware endpoint no displayed tile shows —
   // the fd display budget resolves through it (selectors/layout.ts).
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
   syncChains(store, ipc);
 }

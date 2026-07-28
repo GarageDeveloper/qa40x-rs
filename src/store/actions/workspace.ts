@@ -26,7 +26,7 @@ import {
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
 import { anyProgramLock } from "../selectors/session";
-import { syncStream } from "./stream";
+import { syncAllStreams } from "./stream";
 import { reconcileHwTraces } from "./traces";
 import { toast } from "./ui";
 
@@ -123,7 +123,7 @@ export function applyWorkspaceDoc(
 
   // A running stream keeps running and simply follows the new bench (its
   // slots empty out — nothing plays; its display budget follows the tiles).
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
   syncChains(store, ipc);
   return true;
 }

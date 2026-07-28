@@ -7,7 +7,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, AveragingMode, WindowKind } from "../state";
 import { FFT_SIZES } from "../state";
-import { syncStream } from "./stream";
+import { syncAllStreams } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 import { toast } from "./ui";
 
@@ -17,7 +17,7 @@ export function setFftSize(store: Store<AppState>, ipc: Ipc, fftSize: number): v
     ...s,
     acquisition: { ...s.acquisition, fftSize },
   }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 export function setAveraging(
@@ -30,7 +30,7 @@ export function setAveraging(
     ...s,
     acquisition: { ...s.acquisition, averaging: { mode, count } },
   }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 export function setWindow(store: Store<AppState>, ipc: Ipc, window: WindowKind): void {
@@ -38,7 +38,7 @@ export function setWindow(store: Store<AppState>, ipc: Ipc, window: WindowKind):
     ...s,
     acquisition: { ...s.acquisition, window },
   }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
 }
 
 /** The coherent-generator toggle (issue #14). Both DAC owners must follow:
@@ -50,7 +50,7 @@ export function setCoherentGen(store: Store<AppState>, ipc: Ipc, coherentGen: bo
     ...s,
     acquisition: { ...s.acquisition, coherentGen },
   }));
-  syncStream(store, ipc);
+  syncAllStreams(store, ipc);
   syncOutputOnly(store, ipc);
 }
 
