@@ -274,6 +274,17 @@ impl DeviceRuntime {
         OpenGeneration(self.inner.lifecycle.lock().expect("lifecycle lock").generation)
     }
 
+    /// ATOMIC snapshot of (current open unit, its generation) — one lock
+    /// acquisition. The liveness monitor derives its probe, its generation
+    /// token AND the id it will report from this single snapshot: reading
+    /// them separately let a concurrent open interleave, pairing unit A's
+    /// probe with unit B's generation and id — a false loss report against
+    /// a healthy device (adversarial review, MUST-FIX #3).
+    pub fn open_snapshot(&self) -> Option<(OpenDevice, OpenGeneration)> {
+        let st = self.inner.lifecycle.lock().expect("lifecycle lock");
+        st.current.clone().map(|cur| (cur, OpenGeneration(st.generation)))
+    }
+
     /// Record a successful open: bumps the generation, replaces `current`,
     /// stamps the open-unit cell. Returns the new generation — the token a
     /// bookkeeping writer (liveness monitor, bootloader detach) must present
@@ -388,18 +399,22 @@ impl DeviceRuntime {
 
     /* ---- liveness monitor ---------------------------------------------- */
 
-    /// Claim the liveness-monitor slot for `gen`. `false` when a monitor is
-    /// already watching that same generation (the caller must not spawn a
-    /// second one — the old duplicate-toast bug); a claim for a NEWER
-    /// generation displaces the previous one, whose monitor exits quietly on
-    /// its next tick.
+    /// Claim the liveness-monitor slot for `gen`. `false` when a monitor
+    /// already watches that same generation (the caller must not spawn a
+    /// second one — the old duplicate-toast bug) or a NEWER one (a stale
+    /// spawner that lost the race to a fresh open must not displace the
+    /// live monitor — adversarial review, MUST-FIX #3); a claim for a newer
+    /// generation displaces the previous one, whose monitor exits quietly
+    /// on its next tick.
     pub fn monitor_claim(&self, gen: OpenGeneration) -> bool {
         let mut st = self.inner.lifecycle.lock().expect("lifecycle lock");
-        if st.monitor_generation == Some(gen.0) {
-            return false;
+        match st.monitor_generation {
+            Some(existing) if existing >= gen.0 => false,
+            _ => {
+                st.monitor_generation = Some(gen.0);
+                true
+            }
         }
-        st.monitor_generation = Some(gen.0);
-        true
     }
 
     /// Release the monitor slot IF still owned by `gen` (a displaced
@@ -517,29 +532,46 @@ pub(crate) fn spawn_liveness_monitor_with_tick(
     tick: std::time::Duration,
     on_lost: impl FnOnce(DeviceLost) + Send + 'static,
 ) {
-    // The probe follows the open unit's own transport. Nothing open at spawn
-    // means nothing to monitor (connect commands spawn the monitor right
-    // after a successful open; anything else is a stale caller).
-    let Some(cur) = rt.current() else { return };
+    // ONE atomic snapshot: the probe, the generation token and the reported
+    // id must all describe the SAME open (MUST-FIX #3 — reading them
+    // separately let a concurrent open pair unit A's probe with unit B's
+    // generation and id). Nothing open at spawn means nothing to monitor
+    // (connect commands spawn the monitor right after a successful open;
+    // anything else is a stale caller).
+    let Some((cur, gen)) = rt.open_snapshot() else { return };
     let probe = PresenceProbe::for_transport(&cur.descriptor.transport);
-    spawn_liveness_monitor_with_probe(rt, tick, probe, on_lost);
+    spawn_monitor_at(rt, gen, cur.id, tick, probe, on_lost);
 }
 
 /// The monitor body with an explicit [`PresenceProbe`] — the seam that lets
 /// per-unit loss semantics (issue #25 lot E: one unit's unplug, its sibling
 /// untouched) be tested without a USB bus.
+#[cfg(test)]
 pub(crate) fn spawn_liveness_monitor_with_probe(
     rt: DeviceRuntime,
     tick: std::time::Duration,
     probe: PresenceProbe,
     on_lost: impl FnOnce(DeviceLost) + Send + 'static,
 ) {
-    let gen = rt.generation();
+    let Some((cur, gen)) = rt.open_snapshot() else { return };
+    spawn_monitor_at(rt, gen, cur.id, tick, probe, on_lost);
+}
+
+fn spawn_monitor_at(
+    rt: DeviceRuntime,
+    gen: OpenGeneration,
+    id: DeviceId,
+    tick: std::time::Duration,
+    probe: PresenceProbe,
+    on_lost: impl FnOnce(DeviceLost) + Send + 'static,
+) {
     if !rt.monitor_claim(gen) {
-        // A monitor is already watching this (re)connection.
+        // A monitor is already watching this (re)connection — or a newer
+        // one: a spawner whose snapshot was superseded before it could
+        // claim must not displace the live monitor.
         return;
     }
-    let device_id = rt.device_id().map(|id| id.as_str().to_string());
+    let device_id = Some(id.as_str().to_string());
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tick).await;
@@ -567,14 +599,31 @@ pub(crate) fn spawn_liveness_monitor_with_probe(
                     // the device object reads honestly disconnected. Only
                     // with the lifecycle gate free AND the generation still
                     // ours: an in-flight or later open resets the device
-                    // state itself (release_claim first), and its fresh
-                    // connection must never be wiped by this stale cleanup.
-                    // Lock order: gate → device mutex, as everywhere.
+                    // state itself (release_claim first, teardown on close),
+                    // so a busy gate means whoever holds it will leave the
+                    // state consistent — skipping is safe, and never
+                    // retrying is deliberate. Lock order: gate → device
+                    // mutex, as everywhere; the device await is BOUNDED so a
+                    // wedged capture can't pin the gate (and with it every
+                    // open) for its whole length — same 2 s cap as
+                    // `shutdown()`'s gate wait.
                     if let Ok(_gate) = rt.lifecycle_gate().try_lock() {
                         if rt.generation() == gen {
                             let handle = rt.handle();
-                            handle.lock().await.mark_disconnected().await;
-                            log::debug!("usb-monitor: dead claim released");
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                handle.lock(),
+                            )
+                            .await
+                            {
+                                Ok(dev) => {
+                                    dev.mark_disconnected().await;
+                                    log::debug!("usb-monitor: dead claim released");
+                                }
+                                Err(_) => log::warn!(
+                                    "usb-monitor: device busy after 2 s — leaving the dead claim to the next open"
+                                ),
+                            };
                         }
                     }
                 }
@@ -652,6 +701,12 @@ mod tests {
         // The owning monitor's release frees the slot for a fresh claim.
         rt.monitor_release(gen2);
         assert!(rt.monitor_claim(gen2));
+
+        // A claim for an OLDER generation than the live one is refused
+        // (adversarial review MUST-FIX #3): a spawner whose snapshot was
+        // superseded before it could claim must not displace the live
+        // monitor — the newer open already has (or will spawn) its own.
+        assert!(!rt.monitor_claim(gen1), "a stale spawner must not displace the live monitor");
     }
 
     fn opened_fake(rt: &DeviceRuntime, unit: &str) -> (DeviceId, OpenGeneration) {

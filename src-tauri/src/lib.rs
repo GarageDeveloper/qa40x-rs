@@ -202,12 +202,13 @@ async fn connect_device(
     Ok("Connected successfully".to_string())
 }
 
-/// Open `device_id` as an ADDITIONAL device on a free runtime slot (issue
-/// #25 lot E — the traces panel's add-device path). Unlike `connect_device`,
-/// the id is REQUIRED and a unit already open anywhere is rejected
-/// (`Device already open: <id>`) instead of superseded — adding must never
-/// steal an open unit's claim. Any enumerated unit qualifies, virtual
-/// included (a virtual unit never unplugs, so no monitor is spawned for it).
+/// Open `device_id` as an ADDITIONAL device on a free non-default runtime
+/// slot (issue #25 lot E — the traces panel's add-device path). Unlike
+/// `connect_device`, the id is REQUIRED and a unit already open anywhere is
+/// rejected (the error surfaces as `Failed to connect: Device already open:
+/// <id>`) instead of superseded — adding must never steal an open unit's
+/// claim. Any enumerated unit qualifies, virtual included (a virtual unit
+/// never unplugs, so no monitor is spawned for it).
 #[tauri::command]
 async fn connect_additional_device(
     app_handle: tauri::AppHandle,

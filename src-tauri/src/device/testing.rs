@@ -85,9 +85,12 @@ impl FakeSource {
 pub fn fake_descriptor(source: &SourceId, unit_key: &str, physical: bool) -> DeviceDescriptor {
     // Each fake unit gets its OWN bus position (one unit per port, like a
     // real bus) so the registry's port-based substitution can never conflate
-    // two fake units.
-    let port = unit_key.bytes().fold(7u8, |a, b| a.wrapping_add(b));
-    fake_descriptor_at(source, unit_key, physical, &[42, port])
+    // two fake units — the key's bytes ARE the chain, collision-free by
+    // construction (a byte-sum hash could collide, e.g. "AB" vs "BA", and
+    // silently make a port-matching test lie).
+    let mut chain = vec![42u8];
+    chain.extend(unit_key.bytes());
+    fake_descriptor_at(source, unit_key, physical, &chain)
 }
 
 /// [`fake_descriptor`] at an explicit bus position — for the serial-twin
