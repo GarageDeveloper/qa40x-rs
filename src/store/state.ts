@@ -737,6 +737,7 @@ export {
   hwTraceSource,
   HW_ENDPOINTS,
 } from "./hwtraces";
+export type { HwTraceSource } from "./hwtraces";
 
 /* The 4 hardware endpoints of SLOT 0 — always present, never deletable
  * (Traces V2). Ids are stable (they key the frames cache and the e2e

@@ -97,10 +97,13 @@ export function isHwTraceId(id: TraceId): boolean {
   return hwSlotOfTraceId(id) !== null;
 }
 
+/** The hw_input / hw_output half of TraceSource. */
+export type HwTraceSource = Extract<TraceSource, { kind: "hw_input" | "hw_output" }>;
+
 /** The canonical TraceSource for a hw endpoint id, or null for non-hw ids —
  * what `reconcileHwTraces` forces back onto canonical ids (a hand-edited
  * doc must not turn `hw-in-left` into a `memory` trace). */
-export function hwTraceSource(id: TraceId): TraceSource | null {
+export function hwTraceSource(id: TraceId): HwTraceSource | null {
   const m = HW_ID_RE.exec(id);
   if (!m) return null;
   const def = HW_ENDPOINTS.find((e) => e.base === m[1])!;
