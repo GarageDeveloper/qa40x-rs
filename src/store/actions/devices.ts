@@ -9,6 +9,7 @@ import type { Store } from "../store";
 import type { AppState, DevicesState, SessionKey } from "../state";
 import { SLOT0, initialSession, sessionKeyForSlot, slotOfSessionKey } from "../state";
 import { syncAllStreams } from "./stream";
+import { toast } from "./ui";
 
 /**
  * Make `key` the FOCUSED session — the Run/Space target, the single-device
@@ -31,6 +32,19 @@ export function setFocusedSession(
 ): void {
   const s = store.get();
   if (s.devices.focus === key || !s.devices.sessions[key]) return;
+  // The gap-free generator (output-only, M2) plays a FIXED buffer for the
+  // focused session and does NOT follow a focus move the way streams do —
+  // syncAllStreams below re-syncs capture loops, not the generator. A
+  // focus change under a running generator would strand the old device
+  // looping a mix the UI no longer describes, uneditable and unstoppable
+  // from the new focus (E4 review #2b). Refused until per-device sources
+  // land (lot F); stop output-only first.
+  for (const sess of Object.values(s.devices.sessions)) {
+    if (sess.run.generatorRunning) {
+      toast(store, "info", "Stop the output-only generator before switching focus");
+      return;
+    }
+  }
   store.update("devices/focus", (st) => {
     if (!st.devices.sessions[key]) return st;
     const devices = { ...st.devices, focus: key };

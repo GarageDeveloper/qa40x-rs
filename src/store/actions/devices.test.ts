@@ -35,7 +35,13 @@ import {
   setDeviceAlias,
   setFocusedSession,
 } from "./devices";
-import { autoConnectTick, connect, deviceLost, setInputRange } from "./device";
+import {
+  autoConnectTick,
+  connect,
+  deviceLost,
+  refreshTelemetry,
+  setInputRange,
+} from "./device";
 import { startRun } from "./stream";
 import { isRoutable } from "../selectors/session";
 
@@ -535,6 +541,50 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
     expect(s.devices.sessions["slot-1"].device.status).toBe("connected");
   });
 
+  it("a loss event for an id the registry KNOWS but no session holds is a NO-OP even at one session — device B's queued goodbye delivered after its removal must not tear down surviving device A (E4 review #3)", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/lone-adopted-with-known-b", (s) => ({
+      ...s,
+      devices: {
+        ...deriveDevices(
+          s.devices,
+          list(fakeEntry("usb/A", { open: true, slot: 0 }), fakeEntry("usb/B"))
+        ),
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            deviceId: "usb/A",
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+        },
+      },
+    }));
+    deviceLost(store, recordingIpc(list()).ipc, "usb/B");
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(store.get().devices.sessions[SLOT0].run.streaming).toBe(true);
+  });
+
+  it("an id UNKNOWN to the enumeration still falls back at one session — the smoke.pw.ts any-id ≡ payload-less contract", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/lone-adopted", (s) => ({
+      ...s,
+      devices: {
+        ...deriveDevices(s.devices, list(fakeEntry("usb/A", { open: true, slot: 0 }))),
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            deviceId: "usb/A",
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+        },
+      },
+    }));
+    deviceLost(store, recordingIpc(list()).ipc, "usb/never-seen");
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
+  });
+
   it("with slot 0 as the LONE session, an unmatched id still falls back to it — the pre-adoption window right after connect (unplug before the first enumeration lands)", () => {
     const store = new Store(initialState(), { freeze: true });
     store.update("test/pre-adoption", (s) => ({
@@ -602,6 +652,74 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
     setFocusedSession(store, ipc, "slot-7"); // no such session
     setFocusedSession(store, ipc, SLOT0); // already focused
     expect(store.get()).toBe(before);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a focus change while a gap-free generator runs (E4 review #2b) — the generator plays a FIXED buffer for the focused session and does not follow a focus move", () => {
+    const base = twoSessions({ slot0: false, slot1: false });
+    const store = new Store(
+      {
+        ...base,
+        devices: {
+          ...base.devices,
+          sessions: {
+            ...base.devices.sessions,
+            [SLOT0]: {
+              ...base.devices.sessions[SLOT0],
+              run: {
+                ...base.devices.sessions[SLOT0].run,
+                outputOnly: true,
+                generatorRunning: true,
+              },
+            },
+          },
+        },
+      },
+      { freeze: true }
+    );
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    expect(store.get().devices.focus).toBe(SLOT0);
+    expect(calls.filter(([m]) => m === "stream_update")).toHaveLength(0);
+    expect(
+      store.get().ui.toasts.some((t) => t.message.includes("output-only"))
+    ).toBe(true);
+  });
+});
+
+describe("wire-verb isRoutable gates (E4 review #1) — an unroutable slot ≥ 1 key must never fall through to the default runtime", () => {
+  /** A connected slot-1 session whose adopted id a stale enumeration just
+   * cleared — the exact window where an arg-less call would land on the
+   * OTHER device. */
+  function unadoptedSlot1(): Store<AppState> {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/unadopted-slot1", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+    return store;
+  }
+
+  it("setInputRange refuses — a range register is calibration-bearing, and moving the other device's mid-capture is the four-offsets class on the wire", async () => {
+    const store = unadoptedSlot1();
+    const { ipc, calls } = recordingIpc(list());
+    await setInputRange(store, ipc, 18, "slot-1");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refreshTelemetry refuses — the ~1 Hz poll must not take the default runtime's device mutex inside its capture, nor land device A's telemetry on device B's session", async () => {
+    const store = unadoptedSlot1();
+    const { ipc, calls } = recordingIpc(list());
+    await refreshTelemetry(store, ipc, "slot-1");
     expect(calls).toHaveLength(0);
   });
 });

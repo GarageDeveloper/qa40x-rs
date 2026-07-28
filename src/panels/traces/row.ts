@@ -6,7 +6,7 @@
  * transform ⚙ and the memory/transform-only ✕.
  */
 import type { Store } from "../../store/store";
-import type { AppState, TraceMeta } from "../../store/state";
+import type { AppState, TraceSource } from "../../store/state";
 import { hwSlotOfTraceId } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
@@ -15,12 +15,21 @@ import {
   setTraceColor,
 } from "../../store/actions/traces";
 import { exportTraceCsv } from "../../export/export";
-import type { Domain } from "../../core/model";
+import type { Domain, TraceId } from "../../core/model";
 import { el } from "../../ui/dom";
 import { openTransformDialog } from "./transformdialog";
 
+/** The row projection — deliberately NOT the full TraceMeta (E4 review
+ * #9): the panel's keyed list re-runs on this projection's JSON signature,
+ * and a per-frame field (`seq`, `capture`, `offsetDb`) would re-stringify
+ * and re-render the whole pool on every ingested frame. Exactly the
+ * fields the renderer reads. */
 export interface Row {
-  meta: TraceMeta;
+  id: TraceId;
+  kind: TraceSource["kind"];
+  color: string;
+  label: string;
+  domains: Domain[];
   /** Some displayed spectrum tile shows this trace (fd budget member). */
   fdShown: boolean;
 }
@@ -30,8 +39,8 @@ export function createTraceRow(
   ipc: Ipc,
   r: Row
 ): HTMLElement {
-  const id = r.meta.id;
-  const kind = r.meta.source.kind;
+  const id = r.id;
+  const kind = r.kind;
   // The color dot IS the picker (M6 gap 10a) — native color input
   // styled as the classic dot; the swatch itself shows the color.
   const dot = el("input.traces__dot", {
@@ -125,23 +134,23 @@ export function updateTraceRow(node: HTMLElement, r: Row): void {
     HTMLElement,
     HTMLElement,
   ];
-  if (dot.value !== r.meta.color) dot.value = r.meta.color;
-  label.textContent = r.meta.label;
+  if (dot.value !== r.color) dot.value = r.color;
+  label.textContent = r.label;
 
   // Badges: TD/SW when frames carry those domains; FD lit when a
   // spectrum landed, dimmed-with-reason when the display budget
   // excludes this trace — the #52 truthful-badge rule.
-  const hasTd = r.meta.domains.includes("td");
-  const hasFd = r.meta.domains.includes("fd");
-  const hasSw = r.meta.domains.includes("sweep");
-  const isMemory = r.meta.source.kind === "memory";
+  const hasTd = r.domains.includes("td");
+  const hasFd = r.domains.includes("fd");
+  const hasSw = r.domains.includes("sweep");
+  const isMemory = r.kind === "memory";
   const sig = `${hasTd}:${hasFd}:${hasSw}:${r.fdShown}:${isMemory}`;
   if (badges.dataset.sig === sig) return;
   badges.dataset.sig = sig;
   // Export options track the SAME domains sig as the badges — a
   // trace offers exactly the CSVs it has frames for.
   const exSel = node.querySelector<HTMLSelectElement>(
-    `[data-testid="trace-export-${r.meta.id}"]`
+    `[data-testid="trace-export-${r.id}"]`
   );
   if (exSel) {
     exSel.replaceChildren(

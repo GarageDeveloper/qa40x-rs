@@ -16,6 +16,7 @@ import type { Store } from "../store";
 import type { AppState, SessionKey } from "../state";
 import {
   focusedRun,
+  isRoutable,
   session,
   sessionArgs,
   updateRun,
@@ -63,6 +64,11 @@ async function sync(store: Store<AppState>, ipc: Ipc, key: SessionKey): Promise<
   const s = store.get();
   const sess = session(s, key);
   if (!sess) return; // torn-down session's queued rebuild
+  // Never retarget the default runtime (lot E4 review #2a, the same gate
+  // as startRun/stopRun/syncStream): an unadopted slot ≥ 1 key would start
+  // the gap-free generator on the OTHER device's DAC — a stimulus on an
+  // unintended converter (and possibly a DUT).
+  if (!isRoutable(s, key)) return;
   const wanted =
     sess.run.outputOnly && sess.device.status === "connected" && anyPlaying(s);
   if (wanted) {

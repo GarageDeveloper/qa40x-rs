@@ -98,10 +98,20 @@ export function mountTracesPanel(
   store.select(
     (s) => {
       const fdShown = fdShownTraceIds(s);
+      // Narrowed projection (review #9): exactly what the row renderer
+      // reads — never the whole TraceMeta, whose `seq` would re-render the
+      // pool on every ingested frame through the JSON comparison below.
       const rowOf = (id: TraceId): Row | null => {
         const meta = s.traces.byId[id];
         return meta && meta.source.kind !== "program"
-          ? { meta, fdShown: fdShown.has(id) }
+          ? {
+              id,
+              kind: meta.source.kind,
+              color: meta.color,
+              label: meta.label,
+              domains: meta.domains,
+              fdShown: fdShown.has(id),
+            }
           : null;
       };
       const groups: GroupItem[] = deviceGroups(s).map((g) => {
@@ -161,10 +171,10 @@ export function mountTracesPanel(
           const view = groupViews.get(g.vm.key);
           if (!view) return;
           view.update(g.vm);
-          keyedList(view.rowHost, g.rows, (r) => r.meta.id, rowRenderer);
+          keyedList(view.rowHost, g.rows, (r) => r.id, rowRenderer);
         },
       });
-      keyedList(tailHost, tail, (r) => r.meta.id, rowRenderer);
+      keyedList(tailHost, tail, (r) => r.id, rowRenderer);
       for (const [k, v] of groupViews) {
         if (!v.root.isConnected) groupViews.delete(k);
       }

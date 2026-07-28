@@ -149,7 +149,12 @@ export function mountDevicePanel(
       // mutator is setFocusedSession (it re-syncs every running stream).
       if (unitSel.dataset.mode === "focus") {
         setFocusedSession(store, ipc, v as SessionKey);
-      } else {
+        // A refused switch (e.g. output-only generator running) leaves the
+        // focus in place — snap the select back so it never lies.
+        unitSel.value = store.get().devices.focus;
+      } else if (store.get().devices.byId[v]) {
+        // The byId sniff drops a value delivered across a focus→pick mode
+        // flip (a session key is junk as a pick — review note).
         pickDevice(store, v);
       }
     },
@@ -333,7 +338,10 @@ export function mountDevicePanel(
     },
     ({ show, mode, sig, value, connected }) => {
       unitSel.classList.toggle("u-hidden", !show);
-      unitSel.dataset.mode = mode;
+      // The attribute exists only in focus mode: the one-session bar keeps
+      // the exact pre-E4 attribute set (byte-identity, review #10).
+      if (mode === "focus") unitSel.dataset.mode = "focus";
+      else delete unitSel.dataset.mode;
       // Focus mode: always enabled — switching the focus is its whole job
       // (and wire-safe: setFocusedSession re-syncs every running stream).
       // Pick mode keeps the lot-D disabled-while-connected rule.
@@ -342,7 +350,7 @@ export function mountDevicePanel(
         mode === "focus"
           ? "Focused device — the transport, spacebar and bench sources follow it"
           : "Measurement device — pick which unit Connect opens";
-      const fullSig = `${mode}|${sig}`;
+      const fullSig = mode === "focus" ? `focus|${sig}` : sig;
       if (unitSel.dataset.sig !== fullSig) {
         unitSel.dataset.sig = fullSig;
         const s = store.get();

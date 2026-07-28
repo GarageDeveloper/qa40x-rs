@@ -54,14 +54,21 @@ async function readOffsets(
  * slot 0 with the focus elsewhere must never overwrite the focused unit's
  * four-offsets record (the #48/#50/#51 class). The isRoutable gate (E4)
  * covers a session evicted mid-flow: reads for a dead slot ≥ 1 key must
- * not fall through to the default runtime. Exported for E4's add flow. */
+ * not fall through to the default runtime. Exported for E4's add flow,
+ * which passes an EXPLICIT `scope` (review #5): right after the connect
+ * answer a stale enumeration can transiently clear the session's adopted
+ * id — the add flow knows the id regardless, and skipping the read would
+ * leave `config`/`offsets` null forever (playedFrequencyHz would then
+ * snap the generator on a 48 kHz grid whatever the unit runs at — the
+ * #14 coherence class). */
 export async function refreshConfig(
   store: Store<AppState>,
   ipc: Ipc,
-  key: SessionKey
+  key: SessionKey,
+  scope?: { deviceId?: string }
 ): Promise<void> {
-  if (!isRoutable(store.get(), key)) return;
-  const scope = sessionArgs(store.get(), key);
+  if (scope === undefined && !isRoutable(store.get(), key)) return;
+  scope ??= sessionArgs(store.get(), key);
   const [config, offsets] = await Promise.all([
     ipc.call("get_device_config", scope),
     readOffsets(ipc, scope),
@@ -235,6 +242,11 @@ export async function disconnect(
   ipc: Ipc,
   sessionKey: SessionKey = SLOT0
 ): Promise<void> {
+  // Unroutable slot ≥ 1 (adopted id transiently cleared by a stale
+  // enumeration): the arg-less call would close the DEFAULT runtime — the
+  // OTHER device (E4 review #1). Refuse the whole gesture; the id is one
+  // enumeration away.
+  if (!isRoutable(store.get(), sessionKey)) return;
   try {
     // The backend stops the stream loop / generator BEFORE closing the
     // device (a clean Stopped reaches the channel — no capture error).
@@ -308,7 +320,11 @@ export async function addDevice(
     store.update("device/added", (s) =>
       updateDevice(s, key, (d) => ({ ...d, status: "connected", present: true, info }))
     );
-    await refreshConfig(store, ipc, key);
+    // EXPLICIT scope, not the session-keyed read (review #5): a stale
+    // enumeration landing mid-add can transiently clear the adopted id,
+    // and the gated read would then silently skip — leaving config and
+    // offsets null forever on a session nothing re-reads.
+    await refreshConfig(store, ipc, key, { deviceId: device_id });
     toast(store, "success", `Added ${info?.model ?? "device"}`);
   } catch (e) {
     toast(store, "error", `Add device failed: ${e}`);
@@ -371,14 +387,16 @@ export async function removeDevice(
  * matched slot ≥ 1 session is EVICTED instead (lot E4, decision B4): its
  * traces stay in the pool (the group goes dormant, D1) but a dead session
  * must not linger unroutable. Fallback to slot 0 covers the payload-less
- * event (older backend, the e2e fake) AND an unmatched id while slot 0 is
- * the lone session — the pre-adoption window right after connect, and the
- * single-device contract smoke.pw.ts pins (any id ≡ payload-less there).
- * With several sessions an unmatched id is a NO-OP (E2 review #5). Known
- * accepted edge: a DUPLICATE loss event for an id evicted a moment ago
- * lands in the lone-session fallback once only slot 0 remains — the
- * pinned single-device behavior wins over guarding a double-fire the
- * per-generation monitor doesn't produce.
+ * event (older backend, the e2e fake) AND, while slot 0 is the LONE
+ * session, an id that is either unadopted-yet (slot 0's own id is still
+ * null — the pre-adoption window right after connect) or unknown to the
+ * enumeration (the single-device contract smoke.pw.ts pins: any id ≡
+ * payload-less there). An id the registry DOES know that matches no
+ * session is a NO-OP even at one session (E4 review #3): a loss event for
+ * an evicted slot ≥ 1 unit can be delivered after its removal already
+ * shrank the bench to slot 0 alone, and tearing device A down for
+ * device B's queued goodbye would kill the surviving capture. With
+ * several sessions an unmatched id is always a NO-OP (E2 review #5).
  */
 export function deviceLost(
   store: Store<AppState>,
@@ -390,9 +408,13 @@ export function deviceLost(
     deviceId !== null
       ? Object.values(s0.devices.sessions).find((x) => x.deviceId === deviceId)?.key
       : undefined;
+  const lone = Object.keys(s0.devices.sessions).length === 1;
   const key =
     matched ??
-    (deviceId === null || Object.keys(s0.devices.sessions).length === 1
+    (deviceId === null ||
+    (lone &&
+      (session(s0, SLOT0)?.deviceId === null ||
+        s0.devices.byId[deviceId] === undefined))
       ? SLOT0
       : undefined);
   if (key === undefined) return;
@@ -437,8 +459,11 @@ export function deviceLost(
 /* The range/rate setters are KEYED with a SLOT0 default (E2 review #4):
  * the wire call and the refreshConfig read-back must name the SAME session,
  * or a focus elsewhere would land slot 0's fresh offsets on another unit's
- * session. The top-bar menus drive slot 0 in E2; E4's per-group controls
- * pass their own key. */
+ * session. The top bar passes the focus and the group controls their own
+ * key (E4) — hence the isRoutable gates (E4 review #1): an unadopted
+ * slot ≥ 1 key must never fall through to the default runtime; a range
+ * register is calibration-bearing, and moving the OTHER device's register
+ * mid-capture is the four-offsets bug class on the wire. */
 
 export async function setInputRange(
   store: Store<AppState>,
@@ -446,6 +471,7 @@ export async function setInputRange(
   gainDbv: number,
   sessionKey: SessionKey = SLOT0
 ): Promise<void> {
+  if (!isRoutable(store.get(), sessionKey)) return;
   try {
     await ipc.call("set_input_gain", { gainDbv, ...sessionArgs(store.get(), sessionKey) });
     await refreshConfig(store, ipc, sessionKey);
@@ -460,6 +486,7 @@ export async function setOutputRange(
   gainDbv: number,
   sessionKey: SessionKey = SLOT0
 ): Promise<void> {
+  if (!isRoutable(store.get(), sessionKey)) return;
   try {
     await ipc.call("set_output_gain", { gainDbv, ...sessionArgs(store.get(), sessionKey) });
     await refreshConfig(store, ipc, sessionKey);
@@ -474,6 +501,7 @@ export async function setSampleRate(
   rateHz: number,
   sessionKey: SessionKey = SLOT0
 ): Promise<void> {
+  if (!isRoutable(store.get(), sessionKey)) return;
   try {
     await ipc.call("set_sample_rate", { rateHz, ...sessionArgs(store.get(), sessionKey) });
     await refreshConfig(store, ipc, sessionKey);
@@ -495,6 +523,11 @@ export async function refreshTelemetry(
   const s = store.get();
   const sess = session(s, sessionKey);
   if (sess?.device.status !== "connected") return;
+  // The ~1 Hz poll hits EVERY session (C2): an unroutable slot ≥ 1 must
+  // not fall through — an arg-less keepalive takes the DEFAULT runtime's
+  // device mutex inside its live capture, once per second, and its answer
+  // would land as ANOTHER unit's telemetry (E4 review #1).
+  if (!isRoutable(s, sessionKey)) return;
   try {
     // Idle: fire the ~1 s keepalive — it pings the link register (keeps the
     // LINK LED lit, #31) AND reads fresh telemetry. During a run, never

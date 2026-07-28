@@ -54,9 +54,17 @@ function isAllowlisted(path: string): boolean {
 }
 
 /** A file is a candidate offender when it mentions `devices` at all AND
- * carries a tight (no-space-before-colon) `focus:` object-literal key. */
+ * carries either a tight (no-space-before-colon) `focus:` object-literal
+ * key OR a devices-spread with a bare `focus` shorthand
+ * (`{ ...s.devices, focus }` — the ES6 spelling the plain-`focus:` regex
+ * would let through, adversarial-review note; a plain destructuring read
+ * like `const { pattern, focus } = s.layout` must NOT trip it). */
 function looksLikeADevicesFocusWrite(text: string): boolean {
-  return /\bdevices\b/.test(text) && /\bfocus:/.test(text);
+  return (
+    /\bdevices\b/.test(text) &&
+    (/\bfocus:/.test(text) ||
+      /\{\s*\.\.\.[^}]*devices[^}]*\bfocus\s*[,}]/.test(text))
+  );
 }
 
 describe("devices.focus is written from exactly one place (issue #25 lot E4)", () => {

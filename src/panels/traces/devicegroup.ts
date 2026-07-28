@@ -199,7 +199,13 @@ export function createDeviceGroup(
           ? " led--busy"
           : ""
     }`;
-    title.textContent = vm.live ? vm.label : `${vm.label} — not connected`;
+    // "— not connected" covers BOTH a dormant group and a live session
+    // whose device dropped (a top-bar Disconnect of a slot ≥ 1 focus keeps
+    // its session): the dark LED alone under-tells it (review note).
+    title.textContent =
+      vm.live && vm.status !== "disconnected"
+        ? vm.label
+        : `${vm.label} — not connected`;
 
     // Alias editing keys on the REGISTRY id (an alias survives a replug
     // onto another slot); no id ⇒ disabled, still rendered (no layout
@@ -228,13 +234,19 @@ export function createDeviceGroup(
                 ? "Stop this device's capture"
                 : "Start this device's capture (monitor unless focused)";
 
-    removeBtn.toggleAttribute("disabled", vm.slot === 0);
+    // Locked too (review #7): a program owns its device exclusively — a
+    // remove would disconnect it mid-command AND drop the session's lock
+    // out of anyProgramLock, letting a workspace load replace the trace
+    // pool the program is still writing into.
+    removeBtn.toggleAttribute("disabled", vm.slot === 0 || vm.locked);
     removeBtn.title =
       vm.slot === 0
         ? "The default device disconnects from the top bar; its endpoints are permanent"
-        : vm.live
-          ? "Remove this device from the bench (its trace rows go too)"
-          : "Purge this disconnected device's leftover trace rows";
+        : vm.locked
+          ? "A measurement program owns this device"
+          : vm.live
+            ? "Remove this device from the bench (its trace rows go too)"
+            : "Purge this disconnected device's leftover trace rows";
 
     const ctlsDisabled = vm.status !== "connected";
     setOptions(inSel.input, vm.inputRanges, (v) => `${v} dBV`, vm.inputGain);

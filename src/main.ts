@@ -58,7 +58,10 @@ const wsStore = createWorkspaceStore();
   sessions: () => {
     const s = store.get();
     return {
-      focus: s.devices.focus,
+      // Named `focused` on purpose: the focus-mutator source-scan pin
+      // flags a tight devices-context focus key, and this read-projection
+      // must not need an allowlist entry.
+      focused: s.devices.focus,
       byKey: Object.fromEntries(
         Object.values(s.devices.sessions).map((x) => [
           x.key,

@@ -31,7 +31,7 @@ import {
   setTriggerLevelV,
   setTriggerMode,
 } from "../../store/actions/trigger";
-import { shownTraces } from "../../store/selectors/layout";
+import { autoChipSourceTraceId } from "../../store/selectors/layout";
 import { focusedDevice, focusedRun, runForTrace } from "../../store/selectors/session";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
@@ -628,16 +628,10 @@ export function createTile(
   }
 
   /* ---- chip source resolution ----------------------------------------- */
-  // Auto: the first DRAWN trace with data (a legend-hidden curve isn't
-  // what the user is reading).
-  function autoChipSourceId(tile: TileConfig): TraceId | null {
-    const drawn = shownTraces(tile);
-    for (const id of drawn) {
-      const f = getFrames(id);
-      if (f && (f.td || f.fd)) return id;
-    }
-    return drawn[0] ?? tile.traces[0] ?? null;
-  }
+  // Auto resolution: the SELECTOR's own scan (E4 review #6 — a private
+  // copy here drifted from the cross-slot rule), so the "Auto (…)" label
+  // always names the trace the chips would actually read.
+  const autoChipSourceId = autoChipSourceTraceId;
 
   // Shared with the VM (chartvm.chipSourceTraceId) so chips and harmonic
   // markers always follow the same trace.

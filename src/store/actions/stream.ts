@@ -501,10 +501,17 @@ export function __resetSessionGlobals(): void {
  * guard — nothing of a removed device may keep writing. The mismatch-warn
  * memo drops its keys too so a session re-minted on the same slot warns
  * afresh.
+ *
+ * `streamGen` is BUMPED, never deleted (review #4): deleting would reset
+ * the counter, and the next device minted on this reused slot would start
+ * at the same generation a still-draining dead channel captured — its
+ * queued frame would then pass the gen guard and write the OLD unit's
+ * samples into the NEW unit's endpoint traces. Bumping invalidates the
+ * dead channel AND keeps the counter monotonic for the slot's lifetime.
  */
 export function disposeSession(key: SessionKey): void {
   stopInFlight.delete(key);
-  streamGen.delete(key);
+  streamGen.set(key, (streamGen.get(key) ?? 0) + 1);
   lastCaptureBySession.delete(key);
   for (const sig of [...warnedFrameMismatches]) {
     if (sig.startsWith(`${key}|`)) warnedFrameMismatches.delete(sig);

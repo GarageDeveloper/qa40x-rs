@@ -135,6 +135,35 @@ export function resetSlotEndpointTraces(store: Store<AppState>, slot: number): v
 export function purgeSlotEndpointTraces(store: Store<AppState>, ipc: Ipc, slot: number): void {
   if (slot === 0) return;
   const ids = new Set<TraceId>(Object.values(hwTraceIds(slot)));
+  // Transform traces bound to a purged endpoint go with it (review #8),
+  // transitively (a chain can feed a chain, and a deconvolve ref counts):
+  // the endpoint id is RECREATED when another unit lands on the freed
+  // slot, and an "A-weighted Input L #2" silently re-binding onto a
+  // physically different converter is the four-offsets bug class in trace
+  // form. Computed BEFORE the removal below, while byId still holds them.
+  const doomed = new Set<TraceId>(ids);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    const s = store.get();
+    for (const id of s.traces.order) {
+      const t = s.traces.byId[id];
+      if (
+        t?.source.kind === "transform" &&
+        !doomed.has(id) &&
+        (doomed.has(t.source.input) ||
+          t.source.steps.some(
+            (st) => st.type === "deconvolve" && doomed.has(st.ref)
+          ))
+      ) {
+        doomed.add(id);
+        grew = true;
+      }
+    }
+  }
+  for (const id of doomed) {
+    if (!ids.has(id)) removeTraceEverywhere(store, id);
+  }
   store.update("traces/purge-slot-endpoints", (s) => {
     const order = s.traces.order.filter((id) => !ids.has(id));
     const byId = { ...s.traces.byId };

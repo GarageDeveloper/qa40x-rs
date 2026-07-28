@@ -194,7 +194,7 @@ export class AppV2 {
 
   /** Every session's transport scalars + the focus (debug-hook probe). */
   async sessions(): Promise<{
-    focus: string;
+    focused: string;
     byKey: Record<
       string,
       {
@@ -283,15 +283,16 @@ export class AppV2 {
     );
   }
 
-  /** The toolbar device-select's mode: "pick" (lot D) or "focus" (E4). */
-  async focusMode(): Promise<string | null> {
+  /** The toolbar device-select's mode: "pick" (lot D — no data-mode
+   * attribute, the pre-E4 attribute set) or "focus" (E4). */
+  async focusMode(): Promise<string> {
     return this.drv.eval(
       () =>
         (
           document.querySelector(
             '[data-testid="device-select"]'
           ) as HTMLElement | null
-        )?.dataset.mode ?? null,
+        )?.dataset.mode ?? "pick",
       undefined as void
     );
   }
