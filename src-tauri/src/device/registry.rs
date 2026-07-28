@@ -1025,6 +1025,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_add_answer_slot_agrees_with_the_enumerations_entry() {
+        // Lot E4: `connect_additional_device` answers `slot_of()` right
+        // after the open — the value the frontend mints its session from
+        // must be the SAME slot the next `list_devices` reports for that
+        // unit (the id-adoption invariant), and never the default slot.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A on slot 0");
+        reg.open_additional(&b).await.expect("open B");
+
+        let slot = reg.slot_of("usb/B").expect("B has a slot");
+        assert!(slot >= 1, "an additional open never lands on the default slot");
+        let list = reg.list().await;
+        let entry = list
+            .devices
+            .iter()
+            .find(|d| d.id == "usb/B")
+            .expect("B enumerated");
+        assert!(entry.open);
+        assert_eq!(entry.slot, Some(slot as u32));
+    }
+
+    #[tokio::test]
     async fn open_additional_rejects_a_unit_already_open_anywhere() {
         // Planner finding F2's command-level guard: re-opening an open unit
         // onto a second runtime would steal its claim out from under the

@@ -84,6 +84,23 @@ pub struct DeviceList {
     pub open: Vec<String>,
 }
 
+/// The `connect_additional_device` answer (issue #25 lot E4): the opened
+/// unit's id and its runtime slot, IN the connect answer itself — the
+/// frontend mints the slot's session with the id already adopted, so there
+/// is no window where the session is unroutable (`sessionArgs` returning
+/// `{}` would otherwise let an arg-less command drive the DEFAULT runtime —
+/// the E2 wire-safety gate this closes for good).
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AddedDevice {
+    /// Full unit id, `"<source>/<unit-key>"` — what the frontend passes
+    /// back as the session's `deviceId`.
+    pub device_id: String,
+    /// The registry runtime slot the unit was opened on (always ≥ 1: an
+    /// additional device never lands on the default slot).
+    pub slot: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

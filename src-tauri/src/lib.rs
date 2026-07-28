@@ -209,18 +209,30 @@ async fn connect_device(
 /// <id>`) instead of superseded — adding must never steal an open unit's
 /// claim. Any enumerated unit qualifies, virtual included (a virtual unit
 /// never unplugs, so no monitor is spawned for it).
+///
+/// The answer carries the opened unit's id AND slot ([`device::AddedDevice`],
+/// lot E4): the frontend mints the session with the id already adopted, so
+/// no command can ever fall through to the default runtime while waiting
+/// for an enumeration to land.
 #[tauri::command]
 async fn connect_additional_device(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     device_id: String,
-) -> Result<String, String> {
+) -> Result<device::AddedDevice, String> {
     info!("Connect additional device command called ({device_id})");
     let devices = { state.lock().await.devices.clone() };
     let desc = devices
         .open_additional(&device::DeviceId::from_wire(device_id))
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    // The slot is read back right after the open. If the unit is already
+    // gone (lost between the open and this read), answer an error rather
+    // than guess a slot the frontend would mint a phantom session for.
+    let Some(slot) = devices.slot_of(desc.id.as_str()) else {
+        return Err(format!("Failed to connect: device lost right after open: {}", desc.id.as_str()));
+    };
 
     // Watch THIS open for unplug — same rules as connect_device: resolved by
     // the unit just opened (never "the default"), physical units only.
@@ -232,7 +244,10 @@ async fn connect_additional_device(
         }
     }
 
-    Ok("Connected successfully".to_string())
+    Ok(device::AddedDevice {
+        device_id: desc.id.as_str().to_string(),
+        slot: slot as u32,
+    })
 }
 
 /// Connect to the embedded virtual QA40x (demo mode). The simulator runs
