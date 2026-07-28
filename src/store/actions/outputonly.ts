@@ -15,9 +15,10 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, SessionKey } from "../state";
 import {
-  focusedDevice,
   focusedRun,
-  updateFocusedRun,
+  session,
+  sessionArgs,
+  updateRun,
 } from "../selectors/session";
 import { slotsFromSources, startRun } from "./stream";
 import { toast } from "./ui";
@@ -38,33 +39,42 @@ function anyPlaying(s: AppState): boolean {
  * + analysis (the stream restarts under the play-auto-starts rule). */
 export function setOutputOnly(store: Store<AppState>, ipc: Ipc, on: boolean): void {
   if (focusedRun(store.get()).outputOnly === on) return;
+  const key = store.get().devices.focus;
   store.update("outputonly/mode", (s) =>
-    updateFocusedRun(s, (r) => ({ ...r, outputOnly: on }))
+    updateRun(s, key, (r) => ({ ...r, outputOnly: on }))
   );
   syncOutputOnly(store, ipc);
 }
 
 /** Re-sync the DAC loop with the current state (queued; see module docs).
- * Source actions call this instead of `syncStream` while the mode is on. */
+ * Source actions call this instead of `syncStream` while the mode is on.
+ * The session key is captured ONCE, here — `sync` acts on that key, never
+ * on focus-at-execution-time (E2 review #6: two rebuilds queued around a
+ * focus change must not both land on whichever session is focused later). */
 export function syncOutputOnly(store: Store<AppState>, ipc: Ipc): void {
   const key = store.get().devices.focus;
   const chain = (chains.get(key) ?? Promise.resolve())
-    .then(() => sync(store, ipc))
+    .then(() => sync(store, ipc, key))
     .catch((e) => toast(store, "error", `Output-only: ${e}`));
   chains.set(key, chain);
 }
 
-async function sync(store: Store<AppState>, ipc: Ipc): Promise<void> {
+async function sync(store: Store<AppState>, ipc: Ipc, key: SessionKey): Promise<void> {
   const s = store.get();
+  const sess = session(s, key);
+  if (!sess) return; // torn-down session's queued rebuild
   const wanted =
-    focusedRun(s).outputOnly && focusedDevice(s).status === "connected" && anyPlaying(s);
+    sess.run.outputOnly && sess.device.status === "connected" && anyPlaying(s);
   if (wanted) {
     // (Re)build the loop buffer. The backend stops the stream loop and any
     // previous generator itself — one DAC owner at a time; run.streaming
     // clears when the stream's Stopped message lands.
-    const status = await ipc.call("output_only_start", { slots: slotsFromSources(s) });
+    const status = await ipc.call("output_only_start", {
+      slots: slotsFromSources(s, key),
+      ...sessionArgs(s, key),
+    });
     store.update("outputonly/started", (st) =>
-      updateFocusedRun(st, (r) => ({
+      updateRun(st, key, (r) => ({
         ...r,
         generatorRunning: true,
         sigmaPeakDbv: status.sigma_peak_dbv,
@@ -75,10 +85,10 @@ async function sync(store: Store<AppState>, ipc: Ipc): Promise<void> {
     );
     return;
   }
-  if (focusedRun(store.get()).generatorRunning) {
-    await ipc.call("stop_generator", {});
+  if (session(store.get(), key)?.run.generatorRunning) {
+    await ipc.call("stop_generator", sessionArgs(store.get(), key));
     store.update("outputonly/stopped", (st) =>
-      updateFocusedRun(st, (r) => ({
+      updateRun(st, key, (r) => ({
         ...r,
         generatorRunning: false,
         // The Σ readout follows the DAC: nothing driving it, nothing to show.
@@ -88,12 +98,14 @@ async function sync(store: Store<AppState>, ipc: Ipc): Promise<void> {
   }
   // Mode off with sources still playing: capture + analysis resume.
   const st = store.get();
+  const after = session(st, key);
   if (
-    !focusedRun(st).outputOnly &&
-    focusedDevice(st).status === "connected" &&
-    !focusedRun(st).streaming &&
+    after &&
+    !after.run.outputOnly &&
+    after.device.status === "connected" &&
+    !after.run.streaming &&
     anyPlaying(st)
   ) {
-    await startRun(store, ipc);
+    await startRun(store, ipc, { sessionKey: key });
   }
 }

@@ -487,11 +487,32 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
     expect(s.devices.sessions["slot-1"].run.streaming).toBe(true);
   });
 
-  it("an id NO session adopted falls back to slot 0 (documented pre-E2 parity)", () => {
+  it("with SEVERAL sessions, an id nobody adopted is a NO-OP — a stale enumeration clearing an id must not get slot 0 torn down for another unit's loss (E2 review #5)", () => {
     const store = twoAdoptedSessionsStore();
     deviceLost(store, "usb/never-adopted");
     const s = store.get();
-    expect(s.devices.sessions[SLOT0].device.status).toBe("disconnected");
-    expect(s.devices.sessions["slot-1"].device.status).toBe("connected"); // usb/B untouched
+    expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
+    expect(s.devices.sessions["slot-1"].device.status).toBe("connected");
+  });
+
+  it("with slot 0 as the LONE session, an unmatched id still falls back to it — the pre-adoption window right after connect (unplug before the first enumeration lands)", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/pre-adoption", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            // deviceId still null — no enumeration answered yet.
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+        },
+      },
+    }));
+    deviceLost(store, "usb/A");
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
   });
 });

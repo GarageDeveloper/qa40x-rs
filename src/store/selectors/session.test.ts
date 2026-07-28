@@ -12,10 +12,12 @@ import { describe, expect, it } from "vitest";
 import type { AppState, DeviceSession } from "../state";
 import { initialSession, initialState, SLOT0 } from "../state";
 import {
+  anyBusy,
   anyProgramLock,
   debugState,
   focusedDevice,
   focusedRun,
+  isRoutable,
   sessionArgs,
   updateDevice,
   updateRun,
@@ -126,5 +128,47 @@ describe("sessionArgs — the wire deviceId projection (E4's flip point)", () =>
   it("a slot-1 session with deviceId still null stays arg-less too (pre-E4 fallback — watched here so E4's flip to id-routing is a visible diff)", () => {
     const s = withSlot1(initialState()); // deviceId defaults to null via initialSession
     expect(sessionArgs(s, "slot-1")).toEqual({});
+  });
+});
+
+describe("isRoutable — the wire-safety gate over sessionArgs (E2 review #2)", () => {
+  it("slot-0 is always routable (arg-less by contract)", () => {
+    expect(isRoutable(initialState(), SLOT0)).toBe(true);
+  });
+
+  it("a slot-1 session is routable only once its registry id is adopted — an unadopted {} would drive the DEFAULT runtime (the other device)", () => {
+    const unadopted = withSlot1(initialState());
+    expect(isRoutable(unadopted, "slot-1")).toBe(false);
+    const adopted = withSlot1(initialState(), { deviceId: "usb/B" });
+    expect(isRoutable(adopted, "slot-1")).toBe(true);
+  });
+
+  it("an absent session is not routable", () => {
+    expect(isRoutable(initialState(), "slot-7")).toBe(false);
+  });
+});
+
+describe("anyBusy — the bench-global enumeration gate (E2 review #9: pinned so dropping a clause is a visible diff)", () => {
+  it("false on a fresh idle bench", () => {
+    expect(anyBusy(initialState())).toBe(false);
+  });
+
+  it("true for EACH busy flag, on a NON-focused session too (streaming / stopping / generatorRunning / outputOnly / connecting)", () => {
+    const flags: Array<Partial<DeviceSession["run"]>> = [
+      { streaming: true },
+      { stopping: true },
+      { generatorRunning: true },
+      { outputOnly: true },
+    ];
+    for (const patch of flags) {
+      const s = withSlot1(initialState(), {
+        run: { ...initialSession(1).run, ...patch },
+      });
+      expect(anyBusy(s), JSON.stringify(patch)).toBe(true);
+    }
+    const connecting = withSlot1(initialState(), {
+      device: { ...initialSession(1).device, status: "connecting" },
+    });
+    expect(anyBusy(connecting)).toBe(true);
   });
 });

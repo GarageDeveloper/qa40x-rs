@@ -18,9 +18,12 @@ import type {
   DeviceSession,
   DeviceState,
   RunState,
-  SessionKey,
 } from "../state";
-import { SLOT0 } from "../state";
+// Values from the LEAF module (never from state.ts): state.ts imports
+// focusedDevice from here at runtime, and a value import back into it
+// would recreate the cycle review #8 removed.
+import { SLOT0 } from "../sessionkey";
+import type { SessionKey } from "../sessionkey";
 
 /** The session for `key`, or null — never a phantom: writes to an absent
  * key are no-ops (`updateSession`), reads fall back explicitly. */
@@ -161,6 +164,19 @@ export function sessionArgs(
   if (key === SLOT0) return {};
   const id = session(s, key)?.deviceId;
   return id ? { deviceId: id } : {};
+}
+
+/**
+ * Whether a device-scoped command for `key` can be ROUTED safely: slot 0
+ * always (arg-less by contract), a slot ≥ 1 only once its registry id is
+ * adopted. Without this gate, `sessionArgs`'s `{}` for an unadopted
+ * slot ≥ 1 would silently drive the DEFAULT runtime — the command would
+ * act on the OTHER device (E2 review #2: a slot-1 stop killing slot 0's
+ * capture). Transport verbs check this before touching the wire.
+ */
+export function isRoutable(s: AppState, key: SessionKey): boolean {
+  if (key === SLOT0) return true;
+  return (session(s, key)?.deviceId ?? null) !== null;
 }
 
 /**

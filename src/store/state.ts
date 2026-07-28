@@ -22,9 +22,12 @@ import type {
   UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
-// Runtime-safe circular pair: selectors/session.ts imports ONLY types from
-// this module, so its import edge is erased at compile time.
+// One-way runtime edge only: selectors/session.ts imports its VALUES from
+// the leaf store/sessionkey.ts and only TYPES from this module (erased at
+// compile time), so this import creates no cycle.
 import { focusedDevice } from "./selectors/session";
+import { SLOT0, sessionKeyForSlot } from "./sessionkey";
+import type { SessionKey } from "./sessionkey";
 
 /**
  * Per-converter, per-channel dBFS→dBV display offsets. Four values, never
@@ -628,30 +631,11 @@ export interface LayoutState {
 /* Per-device sessions (issue #25 lot E2).                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * A session key is the backend runtime SLOT, stringified. Keyed by slot,
- * NOT by device id: `connect()` writes `status: "connecting"` before any id
- * is known (the legacy arg-less `connect_device` path — pinned by
- * devices.pw.ts's `connectDeviceIds() === [null]`), and the per-session
- * module maps (streamGen, stopInFlight, the capture memo) need a key that
- * never changes under them. The slot is knowable a priori: slot 0 belongs
- * to the connect/demo flows (registry.rs: open/open_first_physical/
- * open_virtual all target it); added units live on slots ≥ 1 (E1 contract).
- * E3 persists the slot for the same reason — a doc carried to another
- * bench must not be bench-bound.
- */
-export type SessionKey = string;
-
-/** The default runtime's session — the connect/demo flows' slot. */
-export const SLOT0: SessionKey = "slot-0";
-
-export function sessionKeyForSlot(slot: number): SessionKey {
-  return `slot-${slot}`;
-}
-
-export function slotOfSessionKey(key: SessionKey): number {
-  return Number(key.slice("slot-".length));
-}
+// The key primitives live in the LEAF module store/sessionkey.ts (see its
+// header for the slot-not-device-id rationale); re-exported here so state
+// consumers keep one import site.
+export { SLOT0, sessionKeyForSlot, slotOfSessionKey } from "./sessionkey";
+export type { SessionKey } from "./sessionkey";
 
 /** One open (or opening) device's live state: the lot-D root-level
  * `AppState.device` + `AppState.run` pair, folded per slot (lot E2).

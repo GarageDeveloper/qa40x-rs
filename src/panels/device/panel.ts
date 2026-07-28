@@ -270,10 +270,13 @@ export function mountDevicePanel(
     (s) => ({
       show: showDevicePicker(s),
       // Aliases join the signature (lot E2): a rename must rebuild the
-      // option texts even though the id list is unchanged.
-      sig: s.devices.available
-        .map((id) => `${id}=${s.devices.aliases[id] ?? ""}`)
-        .join("|"),
+      // option texts even though the id list is unchanged. JSON, not
+      // string joins — the alias is USER TEXT, and a free-text field
+      // containing the join character must never collide two states
+      // (the captureBenchSignature rule, state.ts).
+      sig: JSON.stringify(
+        s.devices.available.map((id) => [id, s.devices.aliases[id] ?? null])
+      ),
       // While connected the picker mirrors the OPEN unit (= the primary,
       // rule P1); disconnected it shows the user's pick, else the primary.
       value:

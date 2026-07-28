@@ -812,6 +812,11 @@ describe("ingestFrame — per-session routing (issue #25 lot E2)", () => {
     __resetSessionGlobals();
   });
 
+  // SCOPE of this isolation (E2 review #7): only the run/device HALVES are
+  // per-session. The frames cache and traces.byId keys (HW_TRACE_IDS.*)
+  // stay bench-global until E3 slots the trace ids — two sessions streaming
+  // concurrently WOULD interleave on the same four traces today. This pin
+  // must not be read as trace-pool isolation.
   it("ingestFrame(store, 'slot-1', frame) writes slot-1's run.stats/clip and device.offsets, and leaves slot-0 untouched", () => {
     const store = new Store(initialState(), { freeze: true });
     store.update("test/add-slot1", addSlot1);
@@ -919,6 +924,9 @@ describe("startRun/stopRun — per-session sequencing (issue #25 lot E2)", () =>
           ...s.devices.sessions,
           "slot-1": {
             ...initialSession(1),
+            // Adopted id: an UNADOPTED slot ≥ 1 is refused by the
+            // isRoutable gate (pinned below) and would never reach the wire.
+            deviceId: "usb/B",
             device: { ...initialSession(1).device, status: "connected" as const },
           },
         },
@@ -950,6 +958,48 @@ describe("startRun/stopRun — per-session sequencing (issue #25 lot E2)", () =>
     resolveStop();
     await stopP;
     expect(order).toEqual(["stream_start", "stop-resolved"]);
+  });
+
+  it("an UNADOPTED slot-1 never touches the wire — startRun and stopRun both refuse (E2 review #2/#3: the arg-less command would drive the DEFAULT runtime, the other device)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/add-slot1-unadopted", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1), // deviceId stays null
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+    const calls: string[] = [];
+    const ipc: Ipc = {
+      call: (method: string) => {
+        calls.push(method);
+        return Promise.resolve(null as never);
+      },
+    };
+    await startRun(store, ipc, { sessionKey: "slot-1" });
+    await stopRun(store, ipc, "slot-1");
+    expect(calls).toEqual([]);
+    // And the refused stop left no dangling transport state.
+    expect(store.get().devices.sessions["slot-1"].run.stopping).toBe(false);
+  });
+
+  it("stopRun on an ABSENT session resolves without touching the wire (E2 review #3)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const calls: string[] = [];
+    const ipc: Ipc = {
+      call: (method: string) => {
+        calls.push(method);
+        return Promise.resolve(null as never);
+      },
+    };
+    await stopRun(store, ipc, "slot-99");
+    expect(calls).toEqual([]);
   });
 });
 

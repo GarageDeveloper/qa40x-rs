@@ -9,12 +9,9 @@ import type { AppState, LevelOffsetsDb, RunState, SessionKey } from "../state";
 import { SLOT0 } from "../state";
 import { autoConnectDeviceId } from "../selectors/devices";
 import {
-  focusedDevice,
-  focusedRun,
   session,
   sessionArgs,
   updateDevice,
-  updateFocusedDevice,
   updateRun,
 } from "../selectors/session";
 import { refreshDevices } from "./devices";
@@ -26,12 +23,15 @@ import { toast } from "./ui";
  * trace must use its own ADC channel offset and an Output trace its own
  * DAC channel offset (bug class #48/#50/#51/#58/#60).
  */
-async function readOffsets(ipc: Ipc): Promise<LevelOffsetsDb> {
+async function readOffsets(
+  ipc: Ipc,
+  scope: { deviceId?: string }
+): Promise<LevelOffsetsDb> {
   const [inL, inR, outL, outR] = await Promise.all([
-    ipc.call("get_input_dbv_offset", { inputChannel: "Left" }),
-    ipc.call("get_input_dbv_offset", { inputChannel: "Right" }),
-    ipc.call("get_output_dbv_offset", { outputChannel: "Left" }),
-    ipc.call("get_output_dbv_offset", { outputChannel: "Right" }),
+    ipc.call("get_input_dbv_offset", { inputChannel: "Left", ...scope }),
+    ipc.call("get_input_dbv_offset", { inputChannel: "Right", ...scope }),
+    ipc.call("get_output_dbv_offset", { outputChannel: "Left", ...scope }),
+    ipc.call("get_output_dbv_offset", { outputChannel: "Right", ...scope }),
   ]);
   return {
     input_l: inL.offset_db,
@@ -42,14 +42,23 @@ async function readOffsets(ipc: Ipc): Promise<LevelOffsetsDb> {
   };
 }
 
-/** Refresh config + offsets together: offsets move with the ranges. */
-async function refreshConfig(store: Store<AppState>, ipc: Ipc): Promise<void> {
+/** Refresh config + offsets together: offsets move with the ranges. KEYED
+ * (E2 review #4): the wire is arg-less for slot 0 (sessionArgs contract),
+ * and the answer lands on the SAME session it was read from — a connect on
+ * slot 0 with the focus elsewhere must never overwrite the focused unit's
+ * four-offsets record (the #48/#50/#51 class). */
+async function refreshConfig(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key: SessionKey
+): Promise<void> {
+  const scope = sessionArgs(store.get(), key);
   const [config, offsets] = await Promise.all([
-    ipc.call("get_device_config", {}),
-    readOffsets(ipc),
+    ipc.call("get_device_config", scope),
+    readOffsets(ipc, scope),
   ]);
   store.update("device/config", (s) =>
-    updateFocusedDevice(s, (d) => ({ ...d, config, offsets }))
+    updateDevice(s, key, (d) => ({ ...d, config, offsets }))
   );
 }
 
@@ -90,7 +99,7 @@ export async function connect(
         demoHwPresent.set(SLOT0, null); // unknown — the tick records a baseline first
       }
     }
-    await refreshConfig(store, ipc);
+    await refreshConfig(store, ipc, SLOT0);
     toast(store, "success", `Connected to ${info?.model ?? "device"}`);
   } catch (e) {
     store.update("device/connect-failed", (s) =>
@@ -144,7 +153,7 @@ export async function connectVirtual(
     } catch {
       demoHwPresent.set(SLOT0, null); // unknown — the tick records a baseline first
     }
-    await refreshConfig(store, ipc);
+    await refreshConfig(store, ipc, SLOT0);
     toast(store, "success", `Demo mode: virtual ${info?.model ?? "QA40x"} connected`);
   } catch (e) {
     store.update("device/connect-failed", (s) =>
@@ -269,10 +278,22 @@ function runStoppedByDisconnect(r: RunState): RunState {
  */
 export function deviceLost(store: Store<AppState>, deviceId: string | null = null): void {
   const s0 = store.get();
-  const key =
-    (deviceId !== null
+  const matched =
+    deviceId !== null
       ? Object.values(s0.devices.sessions).find((x) => x.deviceId === deviceId)?.key
-      : undefined) ?? SLOT0;
+      : undefined;
+  // SLOT0 fallback ONLY for the payload-less event or while slot 0 is the
+  // lone session (the pre-adoption window right after connect). With
+  // several sessions, an id nobody holds must be a NO-OP (E2 review #5): a
+  // stale enumeration can transiently clear a session's adopted id, and
+  // tearing down slot 0 for ANOTHER unit's loss would kill the wrong
+  // capture.
+  const key =
+    matched ??
+    (deviceId === null || Object.keys(s0.devices.sessions).length === 1
+      ? SLOT0
+      : undefined);
+  if (key === undefined) return;
   // Idempotence: already disconnected (or no such session at all) — a
   // duplicate monitor event must not re-toast or churn state. A session
   // still "connecting" DOES tear down (pre-E2 behavior kept: the monitor
@@ -300,14 +321,21 @@ export function deviceLost(store: Store<AppState>, deviceId: string | null = nul
   toast(store, "info", "Device disconnected");
 }
 
+/* The range/rate setters are KEYED with a SLOT0 default (E2 review #4):
+ * the wire call and the refreshConfig read-back must name the SAME session,
+ * or a focus elsewhere would land slot 0's fresh offsets on another unit's
+ * session. The top-bar menus drive slot 0 in E2; E4's per-group controls
+ * pass their own key. */
+
 export async function setInputRange(
   store: Store<AppState>,
   ipc: Ipc,
-  gainDbv: number
+  gainDbv: number,
+  sessionKey: SessionKey = SLOT0
 ): Promise<void> {
   try {
-    await ipc.call("set_input_gain", { gainDbv });
-    await refreshConfig(store, ipc);
+    await ipc.call("set_input_gain", { gainDbv, ...sessionArgs(store.get(), sessionKey) });
+    await refreshConfig(store, ipc, sessionKey);
   } catch (e) {
     toast(store, "error", `Input range: ${e}`);
   }
@@ -316,11 +344,12 @@ export async function setInputRange(
 export async function setOutputRange(
   store: Store<AppState>,
   ipc: Ipc,
-  gainDbv: number
+  gainDbv: number,
+  sessionKey: SessionKey = SLOT0
 ): Promise<void> {
   try {
-    await ipc.call("set_output_gain", { gainDbv });
-    await refreshConfig(store, ipc);
+    await ipc.call("set_output_gain", { gainDbv, ...sessionArgs(store.get(), sessionKey) });
+    await refreshConfig(store, ipc, sessionKey);
   } catch (e) {
     toast(store, "error", `Output range: ${e}`);
   }
@@ -329,16 +358,17 @@ export async function setOutputRange(
 export async function setSampleRate(
   store: Store<AppState>,
   ipc: Ipc,
-  rateHz: number
+  rateHz: number,
+  sessionKey: SessionKey = SLOT0
 ): Promise<void> {
   try {
-    await ipc.call("set_sample_rate", { rateHz });
-    await refreshConfig(store, ipc);
+    await ipc.call("set_sample_rate", { rateHz, ...sessionArgs(store.get(), sessionKey) });
+    await refreshConfig(store, ipc, sessionKey);
     // A running stream's ms→samples projections (scope windows, trigger
     // pre_samples — selectors/trigger.ts::tileWindowSamples) key on the
     // device sample rate: a step here must reach a live loop, same as every
     // other capture-affecting change (pre-existing gap, surfaced by Lot A).
-    syncStream(store, ipc);
+    syncStream(store, ipc, sessionKey);
   } catch (e) {
     toast(store, "error", `Sample rate: ${e}`);
   }
@@ -346,24 +376,26 @@ export async function setSampleRate(
 
 export async function refreshTelemetry(
   store: Store<AppState>,
-  ipc: Ipc
+  ipc: Ipc,
+  sessionKey: SessionKey = SLOT0
 ): Promise<void> {
   const s = store.get();
-  const device = focusedDevice(s);
-  const run = focusedRun(s);
-  if (device.status !== "connected") return;
+  const sess = session(s, sessionKey);
+  if (sess?.device.status !== "connected") return;
   try {
     // Idle: fire the ~1 s keepalive — it pings the link register (keeps the
     // LINK LED lit, #31) AND reads fresh telemetry. During a run, never
     // touch the register bus: read the cache the stream's own keepalives
     // maintain — between frames and, since #54, at ~1 Hz inside each
-    // capture (`last_telemetry`, no USB I/O).
-    const telemetry = run.streaming
-      ? await ipc.call("last_telemetry", {})
-      : await ipc.call("keepalive", {});
+    // capture (`last_telemetry`, no USB I/O). Keyed like refreshConfig
+    // (E2 review #4): the answer lands on the session it was read from.
+    const scope = sessionArgs(s, sessionKey);
+    const telemetry = sess.run.streaming
+      ? await ipc.call("last_telemetry", scope)
+      : await ipc.call("keepalive", scope);
     if (telemetry) {
       store.update("device/telemetry", (st) =>
-        updateFocusedDevice(st, (d) => ({ ...d, telemetry }))
+        updateDevice(st, sessionKey, (d) => ({ ...d, telemetry }))
       );
     }
   } catch {

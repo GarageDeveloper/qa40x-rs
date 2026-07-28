@@ -84,10 +84,14 @@ try {
   if (raw) {
     const parsed: unknown = JSON.parse(raw);
     if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      // Same normalization as setDeviceAlias (trim + 64-char clamp + 64
+      // entry cap) — a hand-edited or older store must not smuggle in
+      // whitespace-padded names or an unbounded map.
       const aliases: Record<string, string> = {};
       for (const [id, alias] of Object.entries(parsed)) {
+        if (Object.keys(aliases).length >= 64) break;
         if (typeof alias === "string" && alias.trim() !== "") {
-          aliases[id] = alias.slice(0, 64);
+          aliases[id] = alias.trim().slice(0, 64);
         }
       }
       if (Object.keys(aliases).length > 0) {

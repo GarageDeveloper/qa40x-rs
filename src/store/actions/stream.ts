@@ -22,7 +22,7 @@ import { captureBenchSignature, HW_TRACE_IDS } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
 import { measureRequest } from "../selectors/measures";
 import {
-  focusedDevice,
+  isRoutable,
   session,
   sessionArgs,
   updateDevice,
@@ -111,18 +111,32 @@ export function slotFromSource(
 /** The frequency the mixer actually plays for an asked `hz`: clamped to
  * [1 Hz, 0.98·Nyquist], then bin-snapped unless the coherent-generator
  * toggle is off (issue #14 — "Round to eliminate leakage" in the official
- * app). The sources panel shows this value next to the ask when it differs. */
-export function playedFrequencyHz(s: AppState, hz: number): number {
-  const sampleRate = focusedDevice(s).config?.sample_rate ?? 48000;
+ * app). The sources panel shows this value next to the ask when it differs.
+ *
+ * `sessionKey` names the device whose CONVERTER the tone is for (default:
+ * the focused session — the panel's readout and every E2 transport). The
+ * bin grid and the Nyquist clamp are properties of THAT device's sample
+ * rate, never the focused one's (E2 review #1: a slot-1 start snapped
+ * against the focused device's rate would play a non-coherent tone —
+ * ~12 dB pessimistic THD+N, the #14 failure mode — or ask a slower
+ * converter for a tone above its own Nyquist). */
+export function playedFrequencyHz(
+  s: AppState,
+  hz: number,
+  sessionKey?: SessionKey
+): number {
+  const key = sessionKey ?? s.devices.focus;
+  const sampleRate = session(s, key)?.device.config?.sample_rate ?? 48000;
   const clamped = Math.min(Math.max(hz, 1), (sampleRate / 2) * 0.98);
   return s.acquisition.coherentGen
     ? snapToBin(clamped, s.acquisition.fftSize, sampleRate)
     : clamped;
 }
 
-/** The slot declarations for the currently playing sources. */
-export function slotsFromSources(s: AppState): MixerSlotDesc[] {
-  const snap = (hz: number): number => playedFrequencyHz(s, hz);
+/** The slot declarations for the currently playing sources, snapped to
+ * `sessionKey`'s converter grid (default: the focused session's). */
+export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlotDesc[] {
+  const snap = (hz: number): number => playedFrequencyHz(s, hz, sessionKey);
   return s.sources.order
     .map((id) => s.sources.byId[id])
     .filter((src): src is SourceMeta => !!src && src.playing)
@@ -131,13 +145,15 @@ export function slotsFromSources(s: AppState): MixerSlotDesc[] {
 
 /** The stream config is a pure projection of the state tree. The spectra
  * request is the display budget: an FFT is computed only for hardware
- * endpoints some displayed spectrum tile shows (#52). */
-export function buildStreamConfig(s: AppState): StreamConfig {
+ * endpoints some displayed spectrum tile shows (#52). `sessionKey` keys
+ * the sample-rate-dependent parts (bin snapping — see playedFrequencyHz);
+ * acquisition/sources/display budget stay bench-global by design. */
+export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamConfig {
   const { mode, count } = s.acquisition.averaging;
   const fdShown = fdShownTraceIds(s);
   return {
     buffer_size: s.acquisition.fftSize,
-    slots: slotsFromSources(s),
+    slots: slotsFromSources(s, sessionKey),
     window: s.acquisition.window,
     averaging: {
       coherent: mode === "coherent",
@@ -185,8 +201,12 @@ export function frameCaptureProvenance(
   key: SessionKey,
   frame: DecodedFrame
 ): CaptureProvenance {
-  const device = session(s, key)?.device ?? focusedDevice(s);
-  const info = device.info;
+  // Strictly THIS session's device — never another session's (review #12:
+  // borrowing the focused bench's identity would stamp the wrong
+  // model/serial on the frame). ingestFrame guarantees the session exists;
+  // a direct call with a bad key gets an honest null-device snapshot.
+  const device = session(s, key)?.device;
+  const info = device?.info ?? null;
   const next: CaptureProvenance = {
     device: info
       ? {
@@ -197,7 +217,7 @@ export function frameCaptureProvenance(
         }
       : null,
     sampleRateHz: frame.sampleRate,
-    inputRangeDbv: device.config?.input_gain ?? null,
+    inputRangeDbv: device?.config?.input_gain ?? null,
     outputRangeDbv: frame.mix.fitted_output_range_dbv,
     offsets: frame.offsets,
     fftSize: s.acquisition.fftSize,
@@ -478,8 +498,11 @@ export async function startRun(
   const pendingStop = stopInFlight.get(key);
   if (pendingStop) await pendingStop; // user intent order: stop, THEN start
   let s = store.get();
-  const sess = session(s, key);
+  let sess = session(s, key);
   if (!sess) return;
+  // An unadopted slot ≥ 1 must never touch the wire: its arg-less command
+  // would drive the DEFAULT runtime — the other device (review #2).
+  if (!isRoutable(s, key)) return;
   if (sess.run.streaming || sess.device.status !== "connected") return;
   // A measurement program owns the device exclusively (M4): its completion
   // resumes the stream itself; nothing else may start one meanwhile.
@@ -502,6 +525,7 @@ export async function startRun(
       },
     }));
     s = store.get();
+    sess = session(s, key)!; // re-read past our own update (hygiene)
   }
   if (sess.run.outputOnly || sess.run.generatorRunning) {
     // Run is an explicit ask for capture: it takes the DAC back (stream_start
@@ -520,7 +544,7 @@ export async function startRun(
     // deviceId stamp is only asserted (F5, ingestFrame).
     await startStream(
       ipc,
-      buildStreamConfig(s),
+      buildStreamConfig(s, key),
       {
         onFrame: (frame) => {
           if (gen === streamGen.get(key)) ingestFrame(store, key, frame);
@@ -551,6 +575,12 @@ export function stopRun(
   sessionKey?: SessionKey
 ): Promise<void> {
   const key = sessionKey ?? store.get().devices.focus;
+  // No session, or an unadopted slot ≥ 1 (review #2/#3): the arg-less
+  // stream_stop would kill the DEFAULT runtime's live capture while this
+  // key's transport shows nothing — refuse to touch the wire.
+  if (!session(store.get(), key) || !isRoutable(store.get(), key)) {
+    return Promise.resolve();
+  }
   const pending = stopInFlight.get(key);
   if (pending) return pending; // one stop in flight per session is enough
   // Optimistic: the transport reflects the user's intent IMMEDIATELY (the
@@ -597,9 +627,10 @@ export function syncStream(
   const s = store.get();
   const key = sessionKey ?? s.devices.focus;
   if (!session(s, key)?.run.streaming) return;
+  if (!isRoutable(s, key)) return; // never retarget the default runtime (review #2)
   void ipc
     .call("stream_update", {
-      config: buildStreamConfig(store.get()),
+      config: buildStreamConfig(store.get(), key),
       ...sessionArgs(s, key),
     })
     .catch((e) => {
