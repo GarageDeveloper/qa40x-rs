@@ -1,0 +1,342 @@
+/**
+ * addDevice / removeDevice (issue #25 lot E4, actions/device.ts): the
+ * add-device wire flow (guards, mint-with-adopted-id, reconcile, the
+ * `adding` in-flight lifecycle) and the remove-device flow (keyed
+ * disconnect, eviction, endpoint purge). mintSession/dropSession's own
+ * PURITY pins live in devices.test.ts (their home file, actions/devices.ts);
+ * these pins exercise the higher-level actions built on top of them.
+ */
+import { describe, expect, it, vi } from "vitest";
+
+// addDevice/removeDevice never reach the real Tauri runtime in these tests
+// (a hand-rolled Ipc stands in — see fakeIpc below), but the module import
+// graph still pulls in "@tauri-apps/api/core" transitively (via
+// ipc/stream.ts's `Channel`) — mocked the same way devices.test.ts/
+// stream.test.ts do it so no real Tauri context is required at import time.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: unknown;
+    constructor(cb?: unknown) {
+      this.onmessage = cb;
+    }
+  },
+}));
+
+import { Store } from "../store";
+import type { AppState } from "../state";
+import { initialSession, initialState, SLOT0 } from "../state";
+import type { Ipc } from "../../ipc/ipc";
+import type { AddedDevice } from "../../gen";
+import { hwTraceIds } from "../hwtraces";
+import { fakeEntry } from "./devices.fixtures";
+import { addDevice, removeDevice } from "./device";
+import { reconcileHwTraces } from "./traces";
+
+/** An Ipc that records every call and lets a test override specific
+ * methods' behavior (reject, deferred, custom answer) — the rest answer a
+ * plausible default so an untested arm of the flow never throws. */
+function fakeIpc(
+  overrides: Partial<Record<string, (args: unknown) => unknown>> = {}
+): { ipc: Ipc; calls: [string, unknown][] } {
+  const calls: [string, unknown][] = [];
+  const ipc: Ipc = {
+    call: (method: string, args?: unknown) => {
+      calls.push([method, args]);
+      const over = overrides[method];
+      if (over) {
+        const r = over(args);
+        return (r instanceof Promise ? r : Promise.resolve(r)) as never;
+      }
+      switch (method) {
+        case "get_device_info":
+          return Promise.resolve(null as never);
+        case "get_device_config":
+          return Promise.resolve(
+            { input_gain: 0, output_gain: 0, sample_rate: 48000 } as never
+          );
+        case "get_input_dbv_offset":
+        case "get_output_dbv_offset":
+          return Promise.resolve({ offset_db: 0, calibrated: true } as never);
+        case "list_devices":
+          return Promise.resolve({ devices: [], open: [] } as never);
+        case "disconnect_device":
+          return Promise.resolve("ok" as never);
+        default:
+          return Promise.resolve(null as never);
+      }
+    },
+  };
+  return { ipc, calls };
+}
+
+function withAdding(ids: string[]): AppState {
+  const s = initialState();
+  return { ...s, devices: { ...s.devices, adding: ids } };
+}
+
+function withHeldSession(deviceId: string): AppState {
+  const s = initialState();
+  return {
+    ...s,
+    devices: {
+      ...s.devices,
+      sessions: { [SLOT0]: { ...s.devices.sessions[SLOT0], deviceId } },
+    },
+  };
+}
+
+function withOpenEntry(id: string): AppState {
+  const s = initialState();
+  return {
+    ...s,
+    devices: { ...s.devices, byId: { ...s.devices.byId, [id]: fakeEntry(id, { open: true, slot: 0 }) } },
+  };
+}
+
+describe("addDevice — guards refuse without touching the wire (issue #25 lot E4)", () => {
+  it("an id already in `adding` is refused — no wire call, no toast", async () => {
+    const store = new Store(withAdding(["usb/X"]), { freeze: true });
+    const { ipc, calls } = fakeIpc();
+    await addDevice(store, ipc, "usb/X");
+    expect(calls).toEqual([]);
+    expect(store.get().ui.toasts).toEqual([]);
+  });
+
+  it("an id already HELD by a session is refused with an info toast, no connect_additional_device call", async () => {
+    const store = new Store(withHeldSession("usb/A"), { freeze: true });
+    const { ipc, calls } = fakeIpc();
+    await addDevice(store, ipc, "usb/A");
+    expect(calls.some(([m]) => m === "connect_additional_device")).toBe(false);
+    expect(store.get().ui.toasts).toEqual([
+      expect.objectContaining({ kind: "info", message: "This device is already connected" }),
+    ]);
+  });
+
+  it("an id already OPEN (entry.open), even with no session holding it, is refused the same way", async () => {
+    const store = new Store(withOpenEntry("usb/A"), { freeze: true });
+    const { ipc, calls } = fakeIpc();
+    await addDevice(store, ipc, "usb/A");
+    expect(calls.some(([m]) => m === "connect_additional_device")).toBe(false);
+    expect(store.get().ui.toasts).toHaveLength(1);
+    expect(store.get().ui.toasts[0].kind).toBe("info");
+  });
+});
+
+describe("addDevice — backend rejection (issue #25 lot E4)", () => {
+  it("a rejected connect_additional_device toasts an error, mints NO session, and empties `adding`", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc } = fakeIpc({
+      connect_additional_device: () =>
+        Promise.reject(new Error("Failed to connect: All device slots are in use")),
+    });
+    await addDevice(store, ipc, "usb/C");
+    const s = store.get();
+    expect(Object.keys(s.devices.sessions)).toEqual([SLOT0]); // no session minted
+    expect(s.devices.adding).toEqual([]); // lifecycle cleaned up in `finally`
+    expect(s.ui.toasts).toHaveLength(1);
+    expect(s.ui.toasts[0]).toMatchObject({
+      kind: "error",
+      message: "Add device failed: Error: Failed to connect: All device slots are in use",
+    });
+  });
+});
+
+describe("addDevice — success path (issue #25 lot E4)", () => {
+  it("mints the slot's session WITH the adopted id, connects it, reconciles the hw pool, and keys the follow-up reads on the adopted id", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const info = {
+      model: "QA402",
+      serial: "D-serial",
+      firmware_version: 60,
+      product: "QA402 Audio Analyzer",
+      sample_rates: [48000],
+      supports_flash: false,
+      capabilities: {} as never,
+      is_virtual: false,
+    };
+    const { ipc, calls } = fakeIpc({
+      connect_additional_device: () =>
+        Promise.resolve({ device_id: "usb/D", slot: 1 } as AddedDevice),
+      get_device_info: () => Promise.resolve(info as never),
+      get_device_config: () =>
+        Promise.resolve({ input_gain: 18, output_gain: 8, sample_rate: 96000 } as never),
+      // addDevice fires a fire-and-forget refreshDevices() in its `finally`
+      // (never awaited by addDevice itself, but its microtask settles
+      // before this test's own `await addDevice(...)` resumes) — it must
+      // answer a REALISTIC post-connect enumeration (the unit open at its
+      // slot), or deriveDevices's own F6 rule ("nothing open at that slot
+      // clears the id") would legitimately wipe the deviceId this test is
+      // checking, which is a fidelity gap in the fake, not a product bug.
+      list_devices: () =>
+        Promise.resolve({
+          devices: [fakeEntry("usb/D", { open: true, slot: 1 })],
+          open: ["usb/D"],
+        } as never),
+    });
+
+    await addDevice(store, ipc, "usb/D");
+
+    const s = store.get();
+    const sess = s.devices.sessions["slot-1"];
+    expect(sess).toBeDefined();
+    expect(sess.deviceId).toBe("usb/D");
+    expect(sess.device.status).toBe("connected");
+    expect(sess.device.present).toBe(true);
+    expect(sess.device.info).toEqual(info);
+    expect(sess.device.config).toEqual({ input_gain: 18, output_gain: 8, sample_rate: 96000 });
+
+    // reconcileHwTraces ran: slot-1's 4 endpoints are in the pool.
+    const ids = hwTraceIds(1);
+    for (const id of Object.values(ids)) {
+      expect(s.traces.byId[id], id).toBeDefined();
+      expect(s.traces.order, id).toContain(id);
+    }
+
+    // The follow-up reads carry the ADOPTED id, not an arg-less default.
+    const infoCall = calls.find(([m]) => m === "get_device_info");
+    expect(infoCall?.[1]).toEqual({ deviceId: "usb/D" });
+    const configCall = calls.find(([m]) => m === "get_device_config");
+    expect(configCall?.[1]).toEqual({ deviceId: "usb/D" });
+
+    expect(s.ui.toasts).toHaveLength(1);
+    expect(s.ui.toasts[0].kind).toBe("success");
+  });
+});
+
+describe("addDevice — `adding` in-flight lifecycle (issue #25 lot E4)", () => {
+  it("holds the id in `adding` WHILE connect_additional_device is in flight, and empties it once the whole flow settles", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    let resolveConnect!: (v: AddedDevice) => void;
+    const gate = new Promise<AddedDevice>((r) => (resolveConnect = r));
+    const { ipc } = fakeIpc({ connect_additional_device: () => gate });
+
+    const p = addDevice(store, ipc, "usb/E");
+    // Synchronous prelude of an async function runs before the first
+    // `await` yields — `adding` is already populated by the time we get
+    // control back here, with the wire call still pending.
+    expect(store.get().devices.adding).toEqual(["usb/E"]);
+
+    resolveConnect({ device_id: "usb/E", slot: 1 });
+    await p;
+    expect(store.get().devices.adding).toEqual([]);
+  });
+});
+
+/** `s` with a connected slot-1 session (deviceId "usb/B") whose 4 endpoint
+ * traces are reconciled into the pool, plus a tile membership and a
+ * trigger setting pointing at one of them — the shape removeDevice's purge
+ * must clean up everywhere. */
+function slot1Store(): Store<AppState> {
+  const store = new Store(initialState(), { freeze: true });
+  store.update("test/add-slot1", (s) => {
+    const withSession: AppState = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    };
+    const reconciled = reconcileHwTraces(withSession);
+    return {
+      ...reconciled,
+      layout: {
+        ...reconciled.layout,
+        tiles: {
+          ...reconciled.layout.tiles,
+          "tile-1": {
+            ...reconciled.layout.tiles["tile-1"],
+            traces: [...reconciled.layout.tiles["tile-1"].traces, "hw-in-left@1"],
+          },
+        },
+      },
+      triggers: {
+        ...reconciled.triggers,
+        "hw-in-left@1": { mode: "auto", edge: "rising", levelV: 0, hystV: null, armEpoch: 0 },
+      },
+    };
+  });
+  return store;
+}
+
+describe("removeDevice — keyed disconnect + eviction + purge (issue #25 lot E4)", () => {
+  it("disconnects by the session's adopted id, evicts the session, and purges the slot's 4 endpoint traces from the pool, tile membership and triggers", async () => {
+    const store = slot1Store();
+    const { ipc, calls } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    const s = store.get();
+
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(calls).toContainEqual(["disconnect_device", { deviceId: "usb/B" }]);
+
+    for (const id of Object.values(hwTraceIds(1))) {
+      expect(s.traces.byId[id], id).toBeUndefined();
+      expect(s.traces.order, id).not.toContain(id);
+    }
+    expect(s.layout.tiles["tile-1"].traces).not.toContain("hw-in-left@1");
+    expect(s.triggers["hw-in-left@1"]).toBeUndefined();
+  });
+
+  it("swallows an 'Unknown device' disconnect rejection — no error toast, eviction still happens (F8 rule)", async () => {
+    const store = slot1Store();
+    const { ipc } = fakeIpc({
+      disconnect_device: () => Promise.reject(new Error("Unknown device: usb/B")),
+    });
+    await removeDevice(store, ipc, "slot-1");
+    const s = store.get();
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.ui.toasts.filter((t) => t.kind === "error")).toEqual([]);
+  });
+
+  it("any OTHER disconnect rejection still toasts an error — but eviction/purge still complete (best-effort)", async () => {
+    const store = slot1Store();
+    const { ipc } = fakeIpc({
+      disconnect_device: () => Promise.reject(new Error("USB timeout")),
+    });
+    await removeDevice(store, ipc, "slot-1");
+    const s = store.get();
+    expect(s.ui.toasts.some((t) => t.kind === "error")).toBe(true);
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.traces.byId["hw-in-left@1"]).toBeUndefined();
+  });
+
+  it("SLOT0 is refused — no wire call, state unchanged (the default device disconnects from the top bar instead)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const before = store.get();
+    const { ipc, calls } = fakeIpc();
+    await removeDevice(store, ipc, SLOT0);
+    expect(calls).toEqual([]);
+    expect(store.get()).toBe(before);
+  });
+
+  it("the DORMANT path (no live session at the key) still purges the slot's leftover trace rows, with no wire disconnect", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/dormant-slot1", (s) =>
+      reconcileHwTraces({
+        ...s,
+        devices: { ...s.devices, sessions: { ...s.devices.sessions, "slot-1": initialSession(1) } },
+      })
+    );
+    // Drop the SESSION only (hand-built — simulates a doc loaded on a
+    // smaller bench, or a session torn down some other way), leaving the
+    // dormant endpoint traces behind in the pool.
+    store.update("test/drop-session-only", (s) => {
+      const sessions = { ...s.devices.sessions };
+      delete sessions["slot-1"];
+      return { ...s, devices: { ...s.devices, sessions } };
+    });
+    expect(store.get().traces.byId["hw-in-left@1"]).toBeDefined(); // dormant leftover present
+
+    const { ipc, calls } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(calls.some(([m]) => m === "disconnect_device")).toBe(false); // no session ⇒ no wire disconnect
+    expect(store.get().traces.byId["hw-in-left@1"]).toBeUndefined();
+  });
+});

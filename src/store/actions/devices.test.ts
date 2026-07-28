@@ -26,9 +26,18 @@ import { initialSession, initialState, SLOT0 } from "../state";
 import type { DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { fakeEntry, fakeList as list } from "./devices.fixtures";
-import { deriveDevices, pickDevice, refreshDevices, setDeviceAlias, setFocusedSession } from "./devices";
+import {
+  deriveDevices,
+  dropSession,
+  mintSession,
+  pickDevice,
+  refreshDevices,
+  setDeviceAlias,
+  setFocusedSession,
+} from "./devices";
 import { autoConnectTick, connect, deviceLost, setInputRange } from "./device";
 import { startRun } from "./stream";
+import { isRoutable } from "../selectors/session";
 
 const empty = () => initialState().devices;
 
@@ -594,5 +603,70 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
     setFocusedSession(store, ipc, SLOT0); // already focused
     expect(store.get()).toBe(before);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("mintSession / dropSession — pure session mint/evict (issue #25 lot E4)", () => {
+  it("mintSession is PURE: the input state is untouched, and the result holds fresh devices/sessions objects", () => {
+    const before = initialState();
+    const s = mintSession(before, 1, "usb/B");
+    // The input is byte-for-byte untouched — no in-place mutation anywhere.
+    expect(before.devices.sessions["slot-1"]).toBeUndefined();
+    expect(Object.keys(before.devices.sessions)).toEqual([SLOT0]);
+    // The output is a fresh object graph down to the touched sub-objects.
+    expect(s).not.toBe(before);
+    expect(s.devices).not.toBe(before.devices);
+    expect(s.devices.sessions).not.toBe(before.devices.sessions);
+    expect(s.devices.sessions[SLOT0]).toBe(before.devices.sessions[SLOT0]); // untouched sibling, same ref
+  });
+
+  it("adopts the deviceId AT MINT — isRoutable is true from the very first state, no unroutable window", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(s.devices.sessions["slot-1"].deviceId).toBe("usb/B");
+    expect(isRoutable(s, "slot-1")).toBe(true); // bookkeeping item 1: true from instant one
+    expect(s.devices.sessions["slot-1"].device.status).toBe("connecting");
+    expect(s.devices.sessions["slot-1"].device.present).toBe(true);
+  });
+
+  it("leaves the focus untouched — an added device comes up in MONITOR mode (decision 1)", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(s.devices.focus).toBe(SLOT0);
+  });
+
+  it("dropSession moves a dropped focus to the LOWEST remaining slot and re-derives primary", () => {
+    // Two open, enumerated units at slots 0/1 so derivePrimary's P1a rule
+    // (the focused slot's open unit wins) has something to visibly react to.
+    const enumerated = deriveDevices(
+      empty(),
+      list(fakeEntry("usb/A", { open: true, slot: 0 }), fakeEntry("usb/B", { open: true, slot: 1 }))
+    );
+    let s: AppState = { ...initialState(), devices: enumerated };
+    s = mintSession(s, 1, "usb/B");
+    s = { ...s, devices: { ...s.devices, focus: "slot-1", primary: "usb/B" } };
+    expect(s.devices.primary).toBe("usb/B"); // focus slot-1's open unit wins (P1a)
+
+    const next = dropSession(s, "slot-1");
+    expect(next.devices.sessions["slot-1"]).toBeUndefined();
+    expect(next.devices.focus).toBe(SLOT0); // fell back to the lowest remaining slot
+    expect(next.devices.primary).toBe("usb/A"); // re-derived: slot-0's open unit now wins
+  });
+
+  it("dropSession(SLOT0) is IDENTITY — the default session is never dropped", () => {
+    const s = initialState();
+    expect(dropSession(s, SLOT0)).toBe(s);
+  });
+
+  it("dropSession on an unknown key is IDENTITY", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(dropSession(s, "slot-7")).toBe(s);
+  });
+
+  it("dropping a focus NOT on the evicted key leaves focus untouched", () => {
+    let s = mintSession(initialState(), 1, "usb/B");
+    s = mintSession(s, 2, "usb/C");
+    // Focus stays on SLOT0 throughout (mintSession never moves it).
+    const next = dropSession(s, "slot-2");
+    expect(next.devices.focus).toBe(SLOT0);
+    expect(next.devices.sessions["slot-1"]).toBeDefined(); // the OTHER added session survives
   });
 });

@@ -19,7 +19,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-import type { ScopeMeasures, TriggerAlign } from "../../gen";
+import type { ScopeMeasures, StreamMsg, TriggerAlign } from "../../gen";
 import type { DecodedFrame } from "../../ipc/stream";
 import type { Ipc } from "../../ipc/ipc";
 import { clearAllFrames, getFrames } from "../../data/frames";
@@ -30,10 +30,12 @@ import { HW_TRACE_IDS } from "../state";
 import { focusedRun } from "../selectors/session";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { reconcileHwTraces } from "./traces";
+import { deviceLost } from "./device";
 import { Store } from "../store";
 import {
   __resetSessionGlobals,
   buildStreamConfig,
+  disposeSession,
   frameCaptureProvenance,
   ingestFrame,
   levelToAmplitude,
@@ -1119,5 +1121,118 @@ describe("stopRun — F8: 'Unknown device' rejection is swallowed, not toasted (
       message: "Stop failed: Error: USB timeout",
     });
     expect(focusedRun(store.get()).stopping).toBe(false);
+  });
+});
+
+describe("disposeSession — per-session teardown of the module maps (issue #25 lot E4)", () => {
+  beforeEach(() => {
+    clearAllFrames();
+    clearTriggerSnapshots();
+    __resetSessionGlobals();
+  });
+
+  /** An Ipc whose `stream_start` captures the pushed-frame Channel per
+   * routed session (by `deviceId`, absent ⇒ slot 0) — so a test can fire a
+   * frame on a session's channel directly, the same object `startStream`'s
+   * `onFrame` closure guards with `gen === streamGen.get(key)`. */
+  function channelCapturingIpc(): {
+    ipc: Ipc;
+    channels: Map<string, { onmessage: (msg: StreamMsg) => void }>;
+  } {
+    const channels = new Map<string, { onmessage: (msg: StreamMsg) => void }>();
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        if (method === "stream_start") {
+          const a = args as { onFrame: { onmessage: (msg: StreamMsg) => void }; deviceId?: string };
+          const key = a.deviceId === "usb/B" ? "slot-1" : SLOT0;
+          channels.set(key, a.onFrame);
+        }
+        return Promise.resolve(null as never);
+      },
+    };
+    return { ipc, channels };
+  }
+
+  function wireFrame(frames: number): Extract<StreamMsg, { type: "frame" }> {
+    return {
+      type: "frame",
+      seq: frames,
+      device_id: null,
+      captured: { left_channel: [0.1, 0.2], right_channel: [0.3, 0.4], sample_rate: 48000 },
+      stimulus: null,
+      spectra: { frequencies: [], input_l: null, input_r: null, output_l: null, output_r: null },
+      metrics: { input_l: null, input_r: null, harmonics_l: null, harmonics_r: null },
+      trigger: { input_l: null, input_r: null, output_l: null, output_r: null },
+      measures: { input_l: null, input_r: null, output_l: null, output_r: null },
+      mix: { sigma_peak_dbv: null, clip_input: "none", clip_output: false, fitted_output_range_dbv: 8 },
+      offsets: { input_l: 0, input_r: 0, output_l: 0, output_r: 0, calibrated: true },
+      stats: { frames, fps: 30, frame_ms: 33 },
+      errors: [],
+    };
+  }
+
+  function twoSessionsConnectedState(): AppState {
+    const s = initialState();
+    return {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          // SLOT0 must be CONNECTED too (boot default is "disconnected") —
+          // startRun refuses an unconnected session before ever reaching
+          // the wire, and the "survivor keeps working" pin needs slot-0's
+          // own stream_start to actually fire.
+          [SLOT0]: {
+            ...s.devices.sessions[SLOT0],
+            device: { ...s.devices.sessions[SLOT0].device, status: "connected" as const },
+          },
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    };
+  }
+
+  it("clears ONLY the given key's module-map entries — a survivor session keeps ingesting normally", async () => {
+    const store = new Store(twoSessionsConnectedState(), { freeze: true });
+    const { ipc, channels } = channelCapturingIpc();
+    await startRun(store, ipc, { sessionKey: SLOT0 });
+    await startRun(store, ipc, { sessionKey: "slot-1" });
+
+    disposeSession("slot-1");
+
+    // slot-0 is untouched by slot-1's dispose: its gen counter and capture
+    // memo still resolve, and a frame on its (still-live) channel lands.
+    channels.get(SLOT0)!.onmessage(wireFrame(5));
+    expect(store.get().devices.sessions[SLOT0].run.stats.frames).toBe(5);
+  });
+
+  it("after deviceLost evicts a session, a late frame on its OLD channel is INERT — no store write at all", async () => {
+    const store = new Store(twoSessionsConnectedState(), { freeze: true });
+    const { ipc, channels } = channelCapturingIpc();
+    await startRun(store, ipc, { sessionKey: "slot-1" });
+    const chan = channels.get("slot-1")!;
+
+    // Baseline: a frame delivered BEFORE eviction lands normally.
+    chan.onmessage(wireFrame(1));
+    expect(store.get().devices.sessions["slot-1"].run.stats.frames).toBe(1);
+    expect(store.get().devices.sessions["slot-1"].run.streaming).toBe(true);
+
+    // The real eviction path: disposeSession (module maps) + dropSession
+    // (store) + a re-sync of survivors — exactly what deviceLost does for
+    // a matched slot ≥ 1 session (lot E4 decision B4).
+    deviceLost(store, ipc, "usb/B");
+    expect(store.get().devices.sessions["slot-1"]).toBeUndefined();
+
+    const before = store.get();
+    // The SAME (now-dead) channel fires again — a frame draining after the
+    // eviction, exactly the race disposeSession's gen-map clearing guards.
+    chan.onmessage(wireFrame(99));
+    expect(store.get()).toBe(before); // no store write — completely inert
+    expect(store.get().devices.sessions["slot-1"]).toBeUndefined(); // not resurrected
   });
 });
