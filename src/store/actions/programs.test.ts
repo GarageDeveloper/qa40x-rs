@@ -19,15 +19,17 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../store";
-import { initialState, type AppState } from "../state";
-import { focusedRun } from "../selectors/session";
+import { initialSession, initialState, type AppState, type DeviceSession } from "../state";
+import { focusedRun, session } from "../selectors/session";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { clearAllFrames, getFrames } from "../../data/frames";
 import {
   addProgram,
   configureSweepProgram,
+  initProgramEvents,
   programLockReason,
   runProgram,
+  stopProgram,
   sweepEstimateSeconds,
   sweepLabel,
 } from "./programs";
@@ -699,5 +701,214 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
     await runProgram(store, ipc, id);
     expect(store.get().ui.toasts.some((t) => t.kind === "error")).toBe(true);
     expect(store.get().ui.toasts.some((t) => t.message.includes("stopped"))).toBe(false);
+  });
+});
+
+/**
+ * Programs are SESSION-keyed, captured once at entry (issue #25 lot F —
+ * both findings from Raphaël's F1 validation on real hardware): launching a
+ * program under one focus and finishing (or stopping) it under another used
+ * to (a) run the sweep on the DEFAULT device regardless of the selected
+ * one (arg-less invokes), and (b) release the lock on the WRONG session —
+ * `updateFocusedRun` at completion time — stranding the original session's
+ * lock forever ("Another measurement is running" with nothing running,
+ * until an app restart). Every read, update and wire call in
+ * runProgram/runSweep/runScript/stopProgram now uses the key captured at
+ * entry.
+ */
+describe("actions/programs — session-keyed programs (issue #25 lot F)", () => {
+  beforeEach(() => clearAllFrames());
+
+  /** `s` with a CONNECTED, id-adopted second session at slot 1 (device
+   * "usb/B") — the routable target the F4-era program selection will offer;
+   * here it is reached by focusing it. */
+  function withConnectedSlot1(s: AppState): AppState {
+    const sess: DeviceSession = {
+      ...initialSession(1),
+      deviceId: "usb/B",
+      device: {
+        ...initialSession(1).device,
+        status: "connected",
+        info: {
+          model: "QA402",
+          firmware_version: 55,
+          serial: "B-SERIAL",
+          product: "QA402 Audio Analyzer",
+          sample_rates: [48000],
+          supports_flash: false,
+          capabilities: {} as never,
+          is_virtual: false,
+        },
+      },
+    };
+    return {
+      ...s,
+      devices: { ...s.devices, sessions: { ...s.devices.sessions, "slot-1": sess } },
+    };
+  }
+
+  function focusOn(store: Store<AppState>, key: string): void {
+    // Direct write, test-only (production code funnels through
+    // setFocusedSession — the focus-mutator scan excludes *.test.ts): these
+    // pins need a focus move WITHOUT the mutator's own re-sync side
+    // effects, to isolate what runProgram itself keys.
+    store.update("test/focus", (s) => ({ ...s, devices: { ...s.devices, focus: key } }));
+  }
+
+  /** Recording ipc: every call's args, plus a gate holding the measure in
+   * flight so the test can move the focus mid-run. */
+  function recordingIpc(): {
+    ipc: Ipc;
+    calls: { cmd: string; args: unknown }[];
+    release: () => void;
+  } {
+    const calls: { cmd: string; args: unknown }[] = [];
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseGate = r));
+    const ipc: Ipc = {
+      async call<K extends keyof Commands>(
+        cmd: K,
+        args: Commands[K]["args"]
+      ): Promise<Commands[K]["result"]> {
+        calls.push({ cmd, args });
+        if (cmd === "measure_thd_vs_frequency") {
+          await gate;
+          return {
+            points: [
+              {
+                frequency: 1000,
+                level_dbfs: -6,
+                thd_percent: 1e-4,
+                thd_db: -120,
+                thd_n_percent: 3e-4,
+                thd_n_db: -110,
+                fundamental_dbfs: -6,
+              },
+            ],
+            swept: "frequency",
+          } as Commands[K]["result"];
+        }
+        return null as Commands[K]["result"];
+      },
+    };
+    return { ipc, calls, release: () => releaseGate() };
+  }
+
+  it("a program launched under a slot-1 focus routes every invoke with THAT session's deviceId", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    release();
+    await runProgram(store, ipc, id);
+
+    const sweep = calls.find((c) => c.cmd === "measure_thd_vs_frequency");
+    expect(sweep, "the sweep must have been invoked").toBeDefined();
+    expect((sweep!.args as { deviceId?: string }).deviceId).toBe("usb/B");
+  });
+
+  it("the lock is released on the session that RAN the program, not the one focused at completion (the stranded-lock bug)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    expect(session(store.get(), "slot-1")?.run.programLock).toBe(id);
+
+    // The user focuses the other device while the sweep is in flight.
+    focusOn(store, "slot-0");
+    release();
+    await run;
+
+    expect(session(store.get(), "slot-1")?.run.programLock).toBeNull();
+    expect(session(store.get(), "slot-0")?.run.programLock).toBeNull();
+    expect(store.get().programs.byId[id].run).toBe("idle");
+    // And a fresh program on the returned-to session is NOT refused.
+    const next = addProgram(store, "thd");
+    focusOn(store, "slot-1");
+    const second = recordingIpc();
+    second.release();
+    await runProgram(store, second.ipc, next);
+    expect(second.calls.some((c) => c.cmd === "measure_thd_vs_frequency")).toBe(true);
+  });
+
+  it("the landed capture carries the PROGRAM session's device identity, wherever the focus moved meanwhile", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    focusOn(store, "slot-0"); // slot 0 has NO device info (disconnected)
+    release();
+    await run;
+
+    const capture = store.get().traces.byId[id].capture;
+    expect(capture?.device?.serial).toBe("B-SERIAL");
+  });
+
+  it("stopProgram routes sweep_stop to the session holding the program's lock, not the focused one", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    focusOn(store, "slot-0");
+    stopProgram(store, ipc, id);
+
+    const stop = calls.find((c) => c.cmd === "sweep_stop");
+    expect(stop, "sweep_stop must have been sent").toBeDefined();
+    expect((stop!.args as { deviceId?: string }).deviceId).toBe("usb/B");
+    release();
+    await run;
+  });
+
+  it("sweep progress lands on the RUNNING program's row even when the focus moved away mid-sweep", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const progressHandler = (listen as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === "thd-sweep-progress"
+    )?.[1] as (e: { payload: { done: number; total: number } }) => void;
+    expect(progressHandler, "initProgramEvents must have mounted the listener").toBeDefined();
+
+    focusOn(store, "slot-1");
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    const run = runProgram(store, ipc, id);
+    await flush();
+    focusOn(store, "slot-0");
+
+    progressHandler({ payload: { done: 2, total: 3 } });
+    expect(store.get().programs.byId[id].progress).toBe("2/3");
+    release();
+    await run;
+  });
+
+  it("the refusal stays BENCH-global until F4's per-device surfaces: a program on slot 0 refuses one on slot 1", async () => {
+    const store = new Store(
+      withConnectedSlot1(withDevice(initialState(), { status: "connected" }))
+    );
+    const { ipc, release } = recordingIpc();
+    const a = addProgram(store, "thd");
+    const b = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, a); // focus = slot-0
+    await flush();
+    focusOn(store, "slot-1");
+    const second = recordingIpc();
+    await runProgram(store, second.ipc, b);
+    expect(store.get().programs.byId[b].run).toBe("idle");
+    expect(second.calls).toHaveLength(0);
+    expect(
+      store.get().ui.toasts.some((t) => t.message.includes("Another measurement"))
+    ).toBe(true);
+    release();
+    await run;
   });
 });

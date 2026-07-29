@@ -37,11 +37,16 @@ import type {
   TraceMeta,
   WowFlutterProgramResult,
 } from "../state";
-import { DEFAULT_SWEEP_PARAMS, liveCaptureProvenance, nextTraceColor } from "../state";
+import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
+import type { SessionKey } from "../sessionkey";
 import {
-  focusedDevice,
+  anyProgramLock,
   focusedRun,
-  updateFocusedRun,
+  isRoutable,
+  session,
+  sessionArgs,
+  sessionKeys,
+  updateRun,
 } from "../selectors/session";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncAllStreams } from "./stream";
@@ -248,9 +253,12 @@ let progSeq = 0;
 
 const sweepCancel = new Set<string>();
 
-/** The in-flight script run's resolver (`script-state` event) + trace id. */
+/** The in-flight script run's resolver (`script-state` event) + trace id
+ * + the session it runs against (progressively landed frames must stamp
+ * THAT session's identity, wherever the focus has moved meanwhile). */
 let scriptDone: ((error: string | null) => void) | null = null;
 let activeScriptId: string | null = null;
+let activeScriptKey: SessionKey | null = null;
 
 /** The capture snapshot a program result lands with (issue #40): device
  * identity, the instant, and — for a sweep — the params that produced the
@@ -261,9 +269,26 @@ let activeScriptId: string | null = null;
  * one that produced the curve; and it captures with its own fft/window,
  * not the live stream's settings. Unknown, never guessed — the frame-side
  * truths (`trace_sample_rate_hz`) keep coming from the frame. */
-function programCapture(s: AppState, capturedAt: string, params?: SweepProgramParams): CaptureProvenance {
+function programCapture(
+  s: AppState,
+  key: SessionKey,
+  capturedAt: string,
+  params?: SweepProgramParams
+): CaptureProvenance {
+  // The PROGRAM's session, never the focused one (Raphaël's lot-F1
+  // validation found programs running under a moved focus): a curve
+  // captured on device B must carry B's identity even if the user focused
+  // A meanwhile — the four-offsets bug class, in provenance form.
+  const info = session(s, key)?.device.info ?? null;
   return {
-    device: liveCaptureProvenance(s).device,
+    device: info
+      ? {
+          model: info.model,
+          serial: info.serial,
+          firmware: info.firmware_version,
+          isVirtual: info.is_virtual,
+        }
+      : null,
     sampleRateHz: null,
     inputRangeDbv: null,
     outputRangeDbv: null,
@@ -285,7 +310,8 @@ function landProgramFrames(
     fd?: ReturnType<typeof wireToFd>;
     sweep?: DecodedSweep;
   },
-  params?: SweepProgramParams
+  params?: SweepProgramParams,
+  key?: SessionKey
 ): void {
   const seq = ++progSeq;
   if (!putFrames(id, seq, frames)) return;
@@ -295,7 +321,12 @@ function landProgramFrames(
   if (frames.fd) domains.push("fd");
   if (frames.sweep) domains.push("sweep");
   // Built OUTSIDE the reducer (clock impurity stays out of store.update).
-  const capture = programCapture(store.get(), new Date().toISOString(), params);
+  const capture = programCapture(
+    store.get(),
+    key ?? store.get().devices.focus,
+    new Date().toISOString(),
+    params
+  );
   store.update("programs/land", (s) => {
     const t = s.traces.byId[id];
     if (!t) return s;
@@ -312,7 +343,12 @@ function landProgramFrames(
  * result is exactly a curve (modulation rate Hz vs % deviation), so it
  * lands through the SAME sweep-frame path as THD/FR: freezable, comparable,
  * persisted, no bespoke rendering. */
-async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<void> {
+async function runSweep(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  key: SessionKey
+): Promise<void> {
   const prog = store.get().programs.byId[id];
   if (prog?.kind !== "sweep") return;
   const p = prog.params;
@@ -346,6 +382,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
       wantRight: wantR,
       durationSecs: p.durationS,
       amplitudeDbfs: p.levelDbfs,
+      ...sessionArgs(store.get(), key),
     });
     if (traces.length === 0) throw new Error("no frequency-response trace returned");
     freqs = traces[0].data.frequencies;
@@ -365,6 +402,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
       outputChannel: outCh,
       inputChannel: inCh,
       generate: p.wowGenerate,
+      ...sessionArgs(store.get(), key),
     });
     // "rateHz", not "Hz": a DIFFERENT quantity (modulation rate, not
     // stimulus frequency) with its own axis floor (findings #3/#7) — never
@@ -401,6 +439,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
               frequencyHz: p.toneHz,
               outputChannel: ch,
               inputChannel: ch,
+              ...sessionArgs(store.get(), key),
             })
           : await ipc.call("measure_thd_vs_frequency", {
               startFreq: p.startHz,
@@ -409,6 +448,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
               amplitudeDbfs: p.levelDbfs,
               outputChannel: ch,
               inputChannel: ch,
+              ...sessionArgs(store.get(), key),
             });
       // The sweep frame's x-axis is generic (freqs field, any swept
       // quantity) — level_dbfs for a level-axis sweep, frequency otherwise.
@@ -437,7 +477,7 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
     return;
   }
   const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit, yUnit);
-  if (sweep) landProgramFrames(store, id, { sweep }, p);
+  if (sweep) landProgramFrames(store, id, { sweep }, p, key);
   if (wowResult) {
     const result = wowResult;
     patchProgram(store, "programs/wow-result", id, (prog2) =>
@@ -455,11 +495,17 @@ async function runSweep(store: Store<AppState>, ipc: Ipc, id: string): Promise<v
  * Emitted frames land progressively via `script-frame`; completion arrives
  * as `script-state` — armed BEFORE the start so a fast script can't finish
  * unobserved. */
-async function runScript(store: Store<AppState>, ipc: Ipc, id: string): Promise<void> {
+async function runScript(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  key: SessionKey
+): Promise<void> {
   const prog = store.get().programs.byId[id];
   if (prog?.kind !== "script") return;
   const label = store.get().traces.byId[id]?.label ?? id;
   activeScriptId = id;
+  activeScriptKey = key;
   scriptRunLog.append(
     `— "${label}" started ${new Date().toLocaleTimeString()} —`,
     false,
@@ -469,7 +515,11 @@ async function runScript(store: Store<AppState>, ipc: Ipc, id: string): Promise<
     const done = new Promise<string | null>((resolve) => {
       scriptDone = resolve;
     });
-    await ipc.call("script_run", { source: prog.source, role: prog.role });
+    await ipc.call("script_run", {
+      source: prog.source,
+      role: prog.role,
+      ...sessionArgs(store.get(), key),
+    });
     const error = await done;
     if (error !== null) {
       // A user-initiated Stop surfaces as a termination, not a failure.
@@ -481,6 +531,7 @@ async function runScript(store: Store<AppState>, ipc: Ipc, id: string): Promise<
   } finally {
     scriptDone = null;
     activeScriptId = null;
+    activeScriptKey = null;
   }
 }
 
@@ -492,11 +543,21 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
   const s = store.get();
   const prog = s.programs.byId[id];
   if (!prog || prog.run === "running") return;
-  if (focusedRun(s).programLock !== null) {
+  // THE program's session, captured ONCE at entry (Raphaël's lot-F1
+  // validation: launching under one focus and finishing under another
+  // stranded the lock on the wrong session forever — every keyed read,
+  // update and wire call below uses THIS key, wherever the focus moves).
+  // The refusal itself stays BENCH-global (anyProgramLock, not this
+  // session's lock): concurrent programs on different devices need the
+  // per-device surfaces (progress routing, tile overlays) of lot F4 —
+  // until then one program at a time keeps every panel honest.
+  const key = s.devices.focus;
+  if (anyProgramLock(s) !== null) {
     toast(store, "info", "Another measurement is running — try again once it finishes.");
     return;
   }
-  if (focusedDevice(s).status !== "connected") {
+  const sess = session(s, key);
+  if (sess?.device.status !== "connected" || !isRoutable(s, key)) {
     toast(store, "error", "Connect the device first — a program drives the hardware.");
     return;
   }
@@ -505,11 +566,11 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     return;
   }
 
-  const wasStreaming = focusedRun(s).streaming;
-  const wasOutputOnly = focusedRun(s).outputOnly && focusedRun(s).generatorRunning;
+  const wasStreaming = sess.run.streaming;
+  const wasOutputOnly = sess.run.outputOnly && sess.run.generatorRunning;
   sweepCancel.delete(id);
   store.update("programs/start", (st) =>
-    updateFocusedRun(
+    updateRun(
       {
         ...st,
         programs: {
@@ -525,6 +586,7 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
           },
         },
       },
+      key,
       (r) => ({ ...r, programLock: id })
     )
   );
@@ -534,15 +596,15 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     // then the stream loop — `stream_stop` returns only once it fully
     // exited (single-stream hard rule; the device wedges otherwise).
     if (wasOutputOnly) {
-      await ipc.call("stop_generator", {});
+      await ipc.call("stop_generator", sessionArgs(store.get(), key));
       store.update("programs/generator-stopped", (st) =>
-        updateFocusedRun(st, (r) => ({ ...r, generatorRunning: false }))
+        updateRun(st, key, (r) => ({ ...r, generatorRunning: false }))
       );
     }
-    if (wasStreaming || focusedRun(s).stopping) await stopRun(store, ipc);
+    if (wasStreaming || sess.run.stopping) await stopRun(store, ipc, key);
 
-    if (prog.kind === "sweep") await runSweep(store, ipc, id);
-    else await runScript(store, ipc, id);
+    if (prog.kind === "sweep") await runSweep(store, ipc, id, key);
+    else await runScript(store, ipc, id, key);
   } catch (e) {
     // A mid-capture ⏹ rejects the backend command with EXACTLY "sweep
     // cancelled" (THD/FR) or "wow & flutter measurement cancelled" — that's
@@ -557,11 +619,17 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     const isUserCancel = msg === "sweep cancelled" || msg === "wow & flutter measurement cancelled";
     const kindLabel = prog.kind === "sweep" ? sweepKindLabel(prog.params) : "Program";
     if (isUserCancel) toast(store, "info", `${kindLabel} stopped.`);
+    else if (msg.includes("A measurement program is already running on this device"))
+      // The backend's per-device gate (lot F1) — only reachable around the
+      // frontend's own bench-global refusal (REST/scripting holding the
+      // device); same friendly wording as that refusal, not "Program
+      // failed".
+      toast(store, "info", "Another measurement is running on this device — try again once it finishes.");
     else toast(store, "error", `Program failed: ${e}`);
   } finally {
     sweepCancel.delete(id);
     store.update("programs/finish", (st) =>
-      updateFocusedRun(
+      updateRun(
         {
           ...st,
           programs: {
@@ -581,13 +649,18 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
             },
           },
         },
+        key,
         (r) => ({ ...r, programLock: null })
       )
     );
     // Resume the session that ran before — the playing flags were never
     // touched, so the same mix comes back (or nothing, if nothing ran).
-    if (wasOutputOnly) syncOutputOnly(store, ipc);
-    else if (wasStreaming) void startRun(store, ipc);
+    // Output-only resume is still focus-bound (`syncOutputOnly` is keyed in
+    // lot F2): if the focus moved away from the program's session mid-run,
+    // skip it rather than arm the generator on a DIFFERENT device.
+    if (wasOutputOnly) {
+      if (store.get().devices.focus === key) syncOutputOnly(store, ipc);
+    } else if (wasStreaming) void startRun(store, ipc, { sessionKey: key });
   }
 }
 
@@ -647,8 +720,14 @@ export function stopProgram(store: Store<AppState>, ipc: Ipc, id: string): void 
     // Both halves of the stop: the flag the front checks between passes AND
     // the backend cancel that aborts the in-flight batched capture between
     // USB blocks (maintainer report: ⏹ used to let the whole batch finish).
+    // Routed to the SESSION holding this program's lock (the sweep drives
+    // that device, wherever the focus is now) — arg-less only if no session
+    // claims it (defensive; the arg-less call cancels the default runtime,
+    // today's pre-lot-F behaviour).
+    const s = store.get();
+    const key = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
     sweepCancel.add(id);
-    void ipc.call("sweep_stop", {}).catch(() => {});
+    void ipc.call("sweep_stop", key ? sessionArgs(s, key) : {}).catch(() => {});
     toast(store, "info", "Stopping…");
   } else {
     void ipc.call("script_stop", {}).catch(() => {});
@@ -666,11 +745,17 @@ function landScriptFrame(store: Store<AppState>, frame: Frame): void {
   const id = activeScriptId;
   if (!id) return;
   const existing = getFrames(id);
-  landProgramFrames(store, id, {
-    td: frame.domain === "td" ? wireToTd(frame) : existing?.td,
-    fd: frame.domain === "fd" ? wireToFd(frame) : existing?.fd,
-    sweep: frame.domain === "sweep" ? wireToSweep(frame) : existing?.sweep,
-  });
+  landProgramFrames(
+    store,
+    id,
+    {
+      td: frame.domain === "td" ? wireToTd(frame) : existing?.td,
+      fd: frame.domain === "fd" ? wireToFd(frame) : existing?.fd,
+      sweep: frame.domain === "sweep" ? wireToSweep(frame) : existing?.sweep,
+    },
+    undefined,
+    activeScriptKey ?? undefined
+  );
 }
 
 /** Mount the backend event listeners (called once from app.ts). */
@@ -692,7 +777,12 @@ export function initProgramEvents(store: Store<AppState>): void {
     // estimate until real per-point counts arrive.
     if (e.payload.done === 0) return;
     const s = store.get();
-    const id = focusedRun(s).programLock;
+    // The one running program, whichever session holds its lock — resolving
+    // through the FOCUSED session lost the progress the moment the user
+    // switched focus mid-sweep. (One program at a time bench-wide is
+    // runProgram's own refusal; per-device concurrent progress routes by
+    // the payload's device_id in lot F4.)
+    const id = anyProgramLock(s);
     if (!id || s.programs.byId[id]?.run !== "running") return;
     patchProgram(store, "programs/progress", id, (p) => ({
       ...p,
