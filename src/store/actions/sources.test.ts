@@ -5,7 +5,21 @@
  * MUST-FIX-1 gate, re-pinned from this new caller), and an unroutable
  * slot ≥ 1 target reaches no wire at all (sessionArgs never runs).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The auto-start pin below reaches the real startStream() → `new Channel()`
+// path — mocked the same way stream.test.ts does it, so no Tauri runtime
+// is required.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: unknown;
+    constructor(cb?: unknown) {
+      this.onmessage = cb;
+    }
+  },
+}));
+
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../store";
 import type { AppState, SourceMeta } from "../state";
@@ -145,6 +159,49 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     });
   });
 
+  it("routing a PLAYING source onto a connected-but-IDLE session STARTS its capture — route-then-play parity (review MUST-FIX 1)", async () => {
+    let s = twoSessionState();
+    s = withRun(s, { streaming: true }); // slot 0 carries the focus cell
+    s.sources = { order: ["a"], byId: { a: sine("a") } }; // playing: true
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourceTargetRoute(store, ipc, "a", 1, "left");
+    await flush();
+    expect(
+      calls.some((c) => c.cmd === "stream_start" && c.args.deviceId === "usb/B")
+    ).toBe(true);
+    expect(store.get().devices.sessions["slot-1"].run.streaming).toBe(true);
+  });
+
+  it("…but a PAUSED source never starts anything on a retarget", async () => {
+    const s = twoSessionState();
+    s.sources = { order: ["a"], byId: { a: sine("a", { playing: false }) } };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourceTargetRoute(store, ipc, "a", 1, "left");
+    await flush();
+    expect(calls.filter((c) => c.cmd === "stream_start")).toEqual([]);
+  });
+
+  it("the play guard ignores a STALE lock on a disconnected session — the enabled button must not click into a silent refusal (review #2)", async () => {
+    let s = twoSessionState();
+    // An unplug mid-sweep keeps programLock set until the in-flight command
+    // rejects (runStoppedByDisconnect leaves it) — the focused session can
+    // be disconnected AND locked at once.
+    s = withDevice(s, { status: "disconnected" });
+    s = withRun(s, { programLock: "stale-prog" });
+    s = withRun(s, { streaming: true }, "slot-1");
+    s.sources = {
+      order: ["a"],
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "right" }] }) },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc } = recordingIpc();
+    setSourcePlaying(store, ipc, "a", true);
+    await flush();
+    expect(store.get().sources.byId["a"].playing).toBe(true);
+  });
+
   it("the play guard is scoped to the source's LIVE TARGETS (step 8): a lock on the FOCUSED device no longer blocks a source pinned elsewhere", async () => {
     let s = twoSessionState();
     s = withRun(s, { programLock: "prog-on-A" }); // slot 0, the focus
@@ -196,6 +253,9 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     const { ipc, calls } = recordingIpc();
     expect(() => setSourceTargetRoute(store, ipc, "a", 1, "left")).not.toThrow();
     await flush();
-    expect(calls.filter((c) => c.cmd !== "stream_update" || c.args.deviceId)).toEqual([]);
+    // Nothing may be ROUTED to the unadopted slot-1 (sessionArgs never
+    // runs); the arg-less calls that do happen belong to slot 0 — the
+    // playing source's focus cell legitimately auto-starts its capture.
+    expect(calls.filter((c) => c.args.deviceId !== undefined)).toEqual([]);
   });
 });

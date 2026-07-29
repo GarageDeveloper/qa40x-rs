@@ -285,6 +285,30 @@ export function setSourceTargetRoute(
     ...writeTarget(src, slot, route, MAX_SOURCE_TARGETS),
   }));
   syncSourcesEverywhere(store, ipc);
+  // Route-then-play parity (F3 review MUST-FIX 1): a PLAYING source routed
+  // onto a connected-but-idle capture session must be audible without a
+  // second gesture — exactly setSourcePlaying's rule, which only covers the
+  // play-then-route ordering. Without this, the editor prints a confident
+  // per-device grid value while the target's DAC stays silent until its
+  // group Run. Output-only sessions are already handled (the fan-out's
+  // generator branch), and startRun re-checks every gate (routable, lock,
+  // connected) itself.
+  const s = store.get();
+  const src = s.sources.byId[id];
+  if (src?.playing) {
+    for (const key of sessionsForSource(s, id)) {
+      const sess = session(s, key);
+      if (
+        sess &&
+        !sess.run.outputOnly &&
+        !sess.run.streaming &&
+        sess.device.status === "connected" &&
+        sess.run.programLock === null
+      ) {
+        void startRun(store, ipc, { sessionKey: key });
+      }
+    }
+  }
 }
 
 /** Remove one cell (the row editor's ✕) — the matrix re-canonicalizes per
@@ -314,8 +338,14 @@ export function setSourcePlaying(
   // on A must not block a source pinned to B; with no live target the
   // focused lock applies, exactly matching the row's greyed button (v1
   // invariant C: display and guard must agree, no enabled-and-refusing).
+  // CONNECTED sessions only, like the row's own filter (F3 review #2: a
+  // disconnected focused session can hold a stale lock — an unplug
+  // mid-sweep keeps `programLock` until the in-flight command rejects —
+  // and the enabled button must not click into a silent refusal).
   const s0 = store.get();
-  const targetKeys = sessionsForSource(s0, id);
+  const targetKeys = sessionsForSource(s0, id).filter(
+    (k) => session(s0, k)?.device.status === "connected"
+  );
   const locked = targetKeys.length
     ? targetKeys.some((k) => session(s0, k)?.run.programLock !== null)
     : focusedRun(s0).programLock !== null;

@@ -79,10 +79,14 @@ interface RowVM {
    * the rows (issue #14). Legacy mode only — matrix rows read `snapped`
    * (per-target, on each TARGET session's rate). */
   played: number | null;
-  /* Matrix mode only (empty/null in legacy): */
+  /* Matrix mode only (empty in legacy): */
   targets: SourceTargetVM[];
-  summary: { text: string; title: string } | null;
-  snapped: { text: string; title: string } | null;
+  /** ≥ 2 live sessions (error prefixes). Scalar here; the derived STRINGS
+   * (routing summary, snapped readout, error badge) are built in updateRow
+   * from `targets` — long prose in the JSON-compared value would serialize
+   * at every store notification for nothing (F3 review #3, the C10 cost
+   * rule). */
+  multi: boolean;
   noLiveTarget: boolean;
 }
 
@@ -404,7 +408,7 @@ export function mountSourcesPanel(
     const errBadge = el("span.sources__err", { "data-testid": `src-error-${id}` });
     const row = el(
       "div.sources__row",
-      vm.mode === "matrix" ? { "data-routing-mode": "matrix" } : {},
+      {},
       head,
       el("div.sources__params", {}, ...params),
       errBadge
@@ -478,7 +482,6 @@ export function mountSourcesPanel(
         "button.btn.btn--small",
         {
           "data-testid": `src-tgt-del-${srcId}-${t.tag}`,
-          title: "Remove this device from the source's routing",
           onclick: () => removeSourceTarget(store, ipc, srcId, slot),
           "aria-label": "Remove routing target",
         },
@@ -531,6 +534,10 @@ export function mountSourcesPanel(
         `[data-testid="src-tgt-del-${srcId}-${t.tag}"]`
       )!;
       del.disabled = !t.present;
+      // Disabled-with-reason, never silently inert (the F2 standard).
+      del.title = t.present
+        ? "Remove this device from the source's routing"
+        : "Nothing routed here — check L or R first";
     },
   });
 
@@ -552,12 +559,15 @@ export function mountSourcesPanel(
     if (snapped && "frequencyHz" in src) {
       // Always shown, both toggle states: an appearing/disappearing hint
       // would shift the whole params line on every toggle flip.
-      if (vm.mode === "matrix" && vm.snapped) {
+      if (vm.mode === "matrix") {
         // Per-target grids (issue #25 lot F3): the shared value when every
         // live target agrees, a count when they disagree, — when nothing
         // connected plays this source. Byte-identical wording at one value.
-        snapped.textContent = vm.snapped.text;
-        snapped.title = vm.snapped.title;
+        // Built here, not in the VM (review #3: no long prose in the
+        // JSON-compared selection).
+        const r = snappedReadout(vm.targets, src.frequencyHz);
+        snapped.textContent = r.text;
+        snapped.title = r.title;
       } else if (vm.played !== null) {
         const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
         snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
@@ -587,10 +597,9 @@ export function mountSourcesPanel(
       const sum = node.querySelector<HTMLButtonElement>(
         `[data-testid="src-routing-${id}"]`
       )!;
-      if (vm.summary) {
-        sum.textContent = vm.summary.text;
-        sum.title = vm.summary.title;
-      }
+      const summary = routingSummary(vm.targets);
+      sum.textContent = summary.text;
+      sum.title = summary.title;
       const panel = node.querySelector<HTMLElement>(
         `[data-testid="src-routing-panel-${id}"]`
       )!;
@@ -623,8 +632,10 @@ export function mountSourcesPanel(
           : "Play this source");
 
     const err = node.querySelector<HTMLElement>(`[data-testid="src-error-${id}"]`)!;
-    err.textContent = vm.error ?? "";
-    err.classList.toggle("sources__err--on", vm.error !== null);
+    const errText =
+      vm.mode === "legacy" ? vm.error : rowErrorText(vm.targets, vm.multi);
+    err.textContent = errText ?? "";
+    err.classList.toggle("sources__err--on", errText !== null);
 
     const detail = node.querySelector<HTMLElement>(
       ".sources__detail:not(.sources__routing)"
@@ -733,8 +744,7 @@ export function mountSourcesPanel(
               lock,
               played: hasFreq ? playedFrequencyHz(s, src.frequencyHz) : null,
               targets: [],
-              summary: null,
-              snapped: null,
+              multi,
               noLiveTarget: false,
             };
           }
@@ -753,18 +763,22 @@ export function mountSourcesPanel(
           return {
             src,
             mode,
-            error: rowErrorText(targets, multi),
+            error: null, // matrix errors derive from `targets` in updateRow
             lock: rowLock,
             played: null,
             targets,
-            summary: routingSummary(targets),
-            snapped: hasFreq ? snappedReadout(targets, src.frequencyHz) : null,
+            multi,
             noLiveTarget: !hasLiveTarget(targets),
           };
         });
     },
     (rows) => {
       lastRows = rows;
+      // Editor-open entries for sources that left the pool: drop them, so
+      // a future source re-minting the id never renders pre-opened.
+      for (const id of [...routingOpen]) {
+        if (!rows.some((vm) => vm.src.id === id)) routingOpen.delete(id);
+      }
       render();
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)

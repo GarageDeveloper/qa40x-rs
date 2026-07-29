@@ -179,6 +179,21 @@ describe("sourceTargetVMs — row list and per-target state", () => {
     for (const v of sourceTargetVMs(t, "b")) expect(v.sameAsFocus).toBe(false);
   });
 
+  it("a routing edit held by a program lock says so (review #4: accepted-but-deferred, never a silent claim)", () => {
+    let s = bench(
+      [sine("a", { targets: [{ slot: 1, route: "both" }] })],
+      [{ slot: 1, rate: 48000 }]
+    );
+    s = withRun(s, { programLock: "prog-trace" }, "slot-1");
+    const slot1 = sourceTargetVMs(s, "a").find((v) => v.tag === "1")!;
+    expect(slot1.note).toBe('measurement "program" is running — applies when it finishes');
+    expect(slot1.noteErr).toBe(false);
+    // A row with NO cell on the locked session carries no note — nothing
+    // is supposed to play there.
+    const focus = sourceTargetVMs(s, "a").find((v) => v.tag === "focus")!;
+    expect(focus.note).toBe("");
+  });
+
   it("an off cell on a connected target reads 'off (no channel)'", () => {
     const s = bench([sine("a", { targets: [{ slot: 0, route: "off" }] })]);
     const slot0 = sourceTargetVMs(s, "a").find((v) => v.tag === "0")!;
@@ -212,6 +227,26 @@ describe("routingSummary", () => {
   it("an off-routed focus cell still summarizes (– glyph), an empty matrix cannot occur", () => {
     const s = bench([sine("a", { route: "off" })]);
     expect(routingSummary(sourceTargetVMs(s, "a")).text).toBe("→ focus –");
+  });
+
+  it("a connected-but-UNADOPTED target gets the ⚠ too — every transport verb refuses it (review #5)", () => {
+    let s = bench(
+      [sine("a", { targets: [{ slot: 1, route: "right" }] })],
+      [{ slot: 1, rate: 48000 }]
+    );
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...s.devices.sessions["slot-1"], deviceId: null },
+        },
+      },
+    };
+    const { text, title } = routingSummary(sourceTargetVMs(s, "a"));
+    expect(text).toBe("→ #2 R ⚠");
+    expect(title).toMatch(/device id not adopted yet/);
   });
 });
 
@@ -307,5 +342,18 @@ describe("rowErrorText", () => {
     expect(rowErrorText(vms, false)).toBe("unknown waveform");
     expect(rowErrorText(vms, true)).toBe("#1: unknown waveform");
     expect(rowErrorText(sourceTargetVMs(bench([sine("b")]), "b"), false)).toBeNull();
+  });
+
+  it("dedupes by SESSION: the coalesced focus + focused-slot pair reads ONE error line, not two (review note)", () => {
+    let s = bench([
+      sine("a", {
+        targets: [
+          { slot: null, route: "left" },
+          { slot: 0, route: "right" },
+        ],
+      }),
+    ]);
+    s = withRun(s, { slotErrors: [{ id: "a", error: "script failed" }] });
+    expect(rowErrorText(sourceTargetVMs(s, "a"), true)).toBe("#1: script failed");
   });
 });

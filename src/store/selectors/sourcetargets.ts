@@ -138,6 +138,7 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
         ? sess.run.slotErrors.find((e) => e.id === srcId)?.error ?? null
         : null;
     const sameAsFocus = combined && (slot === null || key === s.devices.focus);
+    const lockId = sess?.run.programLock ?? null;
     let note = "";
     let noteErr = false;
     if (status === "absent" || status === "disconnected") note = "not connected";
@@ -146,6 +147,13 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
     else if (error !== null) {
       note = error;
       noteErr = true;
+    } else if (present && lockId !== null) {
+      // A routing edit on a program-locked session is ACCEPTED but deferred
+      // (outputonly's gate refuses the DAC touch mid-sweep; the program's
+      // keyed resume applies it) — say so instead of letting the summary
+      // claim a mix the device is not playing yet (F3 review #4).
+      const label = s.traces.byId[lockId]?.label ?? "program";
+      note = `measurement "${label}" is running — applies when it finishes`;
     } else if (sameAsFocus) note = COMBINED_NOTE;
     else if (present && route === "off") note = "off (no channel)";
     return {
@@ -178,14 +186,17 @@ export function routingSummary(vms: SourceTargetVM[]): { text: string; title: st
   const present = vms
     .filter((v) => v.present)
     .sort((a, b) => (a.slot === null ? -1 : b.slot === null ? 1 : a.slot - b.slot));
+  // ⚠ = "this cell's target cannot play right now" — dead session OR a
+  // connected-but-unadopted slot ≥ 1 (every transport verb refuses it too,
+  // F3 review #5).
   const tokens = present.map((v) => {
     const tagText = v.slot === null ? "focus" : `#${v.n}`;
-    return `${tagText} ${routeGlyph(v.route)}${v.live ? "" : " ⚠"}`;
+    return `${tagText} ${routeGlyph(v.route)}${v.live && v.routable ? "" : " ⚠"}`;
   });
   const lines = present.map((v) => {
     if (!v.live) return `#${v.n}: not connected — nothing plays there`;
     const name = v.slot === null ? `Focused device (${v.deviceName})` : `#${v.n} ${v.deviceName}`;
-    return `${name}: ${routeLong(v.route)}`;
+    return `${name}: ${routeLong(v.route)}${v.routable ? "" : " (device id not adopted yet)"}`;
   });
   return {
     text: tokens.length ? `→ ${tokens.join(" · ")}` : "→ off",
@@ -242,9 +253,16 @@ export function hasLiveTarget(vms: SourceTargetVM[]): boolean {
 
 /** The row's error badge: each error attributed to ITS target session —
  * prefixed with the device number once several sessions are live, bare (the
- * pre-F3 byte-identical form) otherwise. Null when no target errs. */
+ * pre-F3 byte-identical form) otherwise. Deduped by SESSION (the coalesced
+ * focus + focused-slot pair reads the same slotErrors entry — one line, not
+ * two). Null when no target errs. */
 export function rowErrorText(vms: SourceTargetVM[], multi: boolean): string | null {
-  const errs = vms.filter((v) => v.error !== null);
+  const seen = new Set<string>();
+  const errs = vms.filter((v) => {
+    if (v.error === null || seen.has(v.key)) return false;
+    seen.add(v.key);
+    return true;
+  });
   if (errs.length === 0) return null;
   return errs.map((v) => (multi ? `#${v.n}: ${v.error}` : (v.error as string))).join("\n");
 }

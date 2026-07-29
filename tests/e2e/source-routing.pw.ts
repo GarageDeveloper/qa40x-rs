@@ -214,6 +214,30 @@ test("a routing matrix survives a save → reload, dormant until its device retu
   ]);
 });
 
+test("routing an ALREADY-PLAYING source onto B starts B's capture — no second gesture (review MUST-FIX 1)", async ({
+  app,
+}) => {
+  await addUnitB(app);
+
+  // Play first (slot 0 auto-starts, the pre-F3 story)…
+  const id = await app.addSine();
+  await app.playSine(id);
+  await expect.poll(() => app.unitFrameCount(0)).toBeGreaterThan(0);
+  expect((await app.sessions()).byKey["slot-1"].streaming).toBe(false);
+
+  // …then route: the pinned cell must be audible without touching B's Run.
+  await app.openSourceRouting(id);
+  await app.setSourceTargetRoute(id, "1", "right");
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-1"].streaming)
+    .toBe(true);
+  await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(0);
+  expect(await app.unitStreamSlots(1)).toEqual([
+    { id, route: "right", frequencyHz: expect.any(Number) },
+  ]);
+  expect(await app.toastCount("Unknown device")).toBe(0);
+});
+
 test("screenshot: the routing editor at two devices", async ({ app }) => {
   await addUnitB(app);
   const id = await app.addSine();
