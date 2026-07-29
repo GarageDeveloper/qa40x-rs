@@ -16,10 +16,12 @@ import type {
   RunState,
   SessionKey,
   SourceMeta,
+  SourceRoute,
   TraceMeta,
 } from "../state";
 import { captureBenchSignature, hwTraceIds } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
+import { sourcesForSession } from "../selectors/sources";
 import { measureRequest } from "../selectors/measures";
 import {
   isRoutable,
@@ -57,10 +59,16 @@ export function levelToAmplitude(levelDbv: number): number {
  * - multitone / noise / chirp carry only their level;
  * - a script carries its source text (the backend compiles per slot and
  *   reports failures as named errors).
+ *
+ * `route` (issue #25 lot F2): the route THIS session receives — a matrix
+ * cell's coalesced route (selectors/sources.ts), not necessarily the
+ * source's legacy field. Defaults to `src.route` for direct callers (the
+ * pre-matrix behavior, and the pinned single-device path).
  */
 export function slotFromSource(
   src: SourceMeta,
-  snap: (hz: number) => number
+  snap: (hz: number) => number,
+  route: SourceRoute = src.route
 ): MixerSlotDesc {
   let source: MixerSlotDesc["source"];
   switch (src.kind) {
@@ -106,7 +114,7 @@ export function slotFromSource(
       source = { kind: "script", source: src.source };
       break;
   }
-  return { id: src.id, source, route: src.route, enabled: true };
+  return { id: src.id, source, route, enabled: true };
 }
 
 /** The frequency the mixer actually plays for an asked `hz`: clamped to
@@ -134,14 +142,15 @@ export function playedFrequencyHz(
     : clamped;
 }
 
-/** The slot declarations for the currently playing sources, snapped to
- * `sessionKey`'s converter grid (default: the focused session's). */
+/** The slot declarations `sessionKey`'s session receives (default: the
+ * focused one) — the playing sources whose routing matrix resolves onto it
+ * (issue #25 lot F2, selectors/sources.ts), each snapped to THAT session's
+ * converter grid. At one device with default targets this is exactly the
+ * pre-F2 "every playing source, with its own route", element for element. */
 export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlotDesc[] {
-  const snap = (hz: number): number => playedFrequencyHz(s, hz, sessionKey);
-  return s.sources.order
-    .map((id) => s.sources.byId[id])
-    .filter((src): src is SourceMeta => !!src && src.playing)
-    .map((src) => slotFromSource(src, snap));
+  const key = sessionKey ?? s.devices.focus;
+  const snap = (hz: number): number => playedFrequencyHz(s, hz, key);
+  return sourcesForSession(s, key).map(({ src, route }) => slotFromSource(src, snap, route));
 }
 
 /** The stream config is a pure projection of the state tree. The spectra
@@ -153,10 +162,13 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
  * — the slot dimension lives outside them, one config per device).
  * Acquisition and the display budget stay bench-global by design.
  *
- * `slots` (the DAC program) is emitted for the FOCUSED session only
- * (Raphaël decision 1, 2026-07-28: sources = focused device; added devices
- * capture in monitor mode — an empty slot set). Per-device source routing
- * is lot F. */
+ * `slots` (the DAC program): every session's config is computed by the SAME
+ * expression since lot F2 — the sources whose routing matrix resolves onto
+ * this session (selectors/sources.ts). The focus survives only as the
+ * default target VALUE (`slot: null`), not as a privilege in this
+ * projection: with default targets a non-focused session still gets `[]`
+ * (monitor mode, decision 1 of 2026-07-28), and a pinned target drives its
+ * device whatever the focus is (Raphaël R1, 2026-07-29). */
 export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamConfig {
   const key = sessionKey ?? s.devices.focus;
   const slot = session(s, key)?.slot ?? 0;
@@ -165,7 +177,7 @@ export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamC
   const fdShown = fdShownTraceIds(s);
   return {
     buffer_size: s.acquisition.fftSize,
-    slots: key === s.devices.focus ? slotsFromSources(s, key) : [],
+    slots: slotsFromSources(s, key),
     window: s.acquisition.window,
     averaging: {
       coherent: mode === "coherent",

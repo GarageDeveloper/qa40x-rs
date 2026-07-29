@@ -28,6 +28,7 @@ import type { AppState, PeriodicSource, ScriptSource, SourceMeta } from "../stat
 import { initialSession, initialState, SLOT0 } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { focusedRun } from "../selectors/session";
+import { sourcesForSession } from "../selectors/sources";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { reconcileHwTraces } from "./traces";
 import { deviceLost } from "./device";
@@ -392,13 +393,132 @@ describe("buildStreamConfig — per-slot projections (issue #25 lot E3)", () => 
     });
   });
 
-  it("`slots` (the DAC program) is emitted for the FOCUSED session only (Raphaël decision 1, 2026-07-28)", () => {
+  it("`slots` (the DAC program) with DEFAULT targets is emitted for the FOCUSED session only (decision 1, 2026-07-28 — the lot F2 default keeps it verbatim)", () => {
     const s = addSlot1(initialState());
     s.sources = { order: ["a"], byId: { a: sineSource("a") } };
     expect(s.devices.focus).toBe(SLOT0); // still focused on slot-0
     expect(buildStreamConfig(s, SLOT0).slots).toHaveLength(1); // focused: its sources play
     expect(buildStreamConfig(s, "slot-1").slots).toEqual([]); // non-focused: empty (monitor mode)
     expect(buildStreamConfig(s).slots).toHaveLength(1); // arg-less default == the focused session
+  });
+});
+
+describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)", () => {
+  it("a source pinned to slot 1 drives slot 1 whatever the focus — and leaves the focused session", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a"],
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    expect(s.devices.focus).toBe(SLOT0);
+    expect(buildStreamConfig(s, SLOT0).slots).toEqual([]); // focused, but not targeted
+    const slots = buildStreamConfig(s, "slot-1").slots;
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({ id: "a", route: "both" });
+  });
+
+  it("two targets drive two sessions, each with its OWN route", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: 0, route: "left" },
+            { slot: 1, route: "right" },
+          ],
+        }),
+      },
+    };
+    expect(buildStreamConfig(s, SLOT0).slots[0]).toMatchObject({ id: "a", route: "left" });
+    expect(buildStreamConfig(s, "slot-1").slots[0]).toMatchObject({ id: "a", route: "right" });
+  });
+
+  it("a source resolving twice onto one session coalesces into ONE slot with the union route — never two summed slots (+6 dB)", () => {
+    // Implicit focus target (slot: null) + an explicit target naming the
+    // focused slot: one MixerSlotDesc, routes OR-ed.
+    const s = initialState();
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: null, route: "left" },
+            { slot: 0, route: "right" },
+          ],
+        }),
+      },
+    };
+    const slots = buildStreamConfig(s, SLOT0).slots;
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({ id: "a", route: "both" });
+  });
+
+  it("slot ids are unique within one config (the mixer-sum hazard, property form)", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a", "b"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: null, route: "both" },
+            { slot: 0, route: "both" },
+            { slot: 1, route: "left" },
+          ],
+        }),
+        b: sineSource("b"),
+      },
+    };
+    for (const key of [SLOT0, "slot-1"]) {
+      const ids = buildStreamConfig(s, key).slots.map((x) => x.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+
+  it("a target pinned to a slot with no live session resolves nowhere — silent (lot-F recorded default)", () => {
+    const s = initialState(); // slot 1 has NO session
+    s.sources = {
+      order: ["a"],
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    expect(buildStreamConfig(s, SLOT0).slots).toEqual([]);
+    expect(sourcesForSession(s, "slot-1")).toHaveLength(1); // structural: it WOULD play there
+  });
+
+  it("each target's tone is bin-snapped against ITS session's sample rate (the #14 coherence class)", () => {
+    const s = addSlot1(initialState());
+    const slot1 = s.devices.sessions["slot-1"];
+    s.devices.sessions = {
+      ...s.devices.sessions,
+      "slot-1": {
+        ...slot1,
+        device: {
+          ...slot1.device,
+          config: { sample_rate: 192000, input_gain: 0, output_gain: 8 },
+        },
+      },
+    };
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: 0, route: "left" },
+            { slot: 1, route: "left" },
+          ],
+        }),
+      },
+    };
+    const freq = (key: string): number => {
+      const slot = buildStreamConfig(s, key).slots[0];
+      const src = slot.source;
+      if (src.kind !== "waveform") throw new Error("expected waveform");
+      return src.frequency_hz;
+    };
+    // Slot 0 has no config → 48 kHz default grid; slot 1 snaps on 192 kHz.
+    expect(freq(SLOT0)).toBeCloseTo(snapToBin(1000, 32768, 48000), 9);
+    expect(freq("slot-1")).toBeCloseTo(snapToBin(1000, 32768, 192000), 9);
+    expect(freq(SLOT0)).not.toBeCloseTo(freq("slot-1"), 6);
   });
 });
 
