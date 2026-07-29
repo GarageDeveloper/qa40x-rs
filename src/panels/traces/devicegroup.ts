@@ -21,6 +21,7 @@ import type { SessionKey } from "../../store/sessionkey";
 import { setDeviceAlias } from "../../store/actions/devices";
 import {
   addDevice,
+  connect,
   removeDevice,
   setInputRange,
   setOutputRange,
@@ -154,9 +155,16 @@ export function createDeviceGroup(
         }
         // Revive gesture (dormant group, or a disconnected session): the
         // capture provenance names the unit — re-open it on THIS slot so
-        // the group's rows come back to life.
+        // the group's rows come back to life. Slot 0 routes through the
+        // top-bar connect flow (the E1 contract: connect_device owns the
+        // default runtime; connect_additional_device only opens slots ≥ 1)
+        // with the EXPLICIT id — a P3 pick, so the auto-connect tick's
+        // first-physical fallback never decides for the user.
         const reviveId = reviveCandidateId(s, slot);
-        if (reviveId !== null) void addDevice(store, ipc, reviveId, { slot });
+        if (reviveId !== null) {
+          if (slot === 0) void connect(store, ipc, { deviceId: reviveId });
+          else void addDevice(store, ipc, reviveId, { slot });
+        }
       },
     },
     "Run"
@@ -254,14 +262,19 @@ export function createDeviceGroup(
       alias.value = vm.alias;
     }
 
-    // Revive mode (a slot ≥ 1 group that is dormant, or whose session's
-    // device dropped): the transport button becomes "Connect" and reopens
-    // the provenance-matched unit on THIS slot — one click, no + device
-    // trip (Raphaël 2026-07-28). Same button, same place in the header: no
-    // layout shift. Never slot 0 — the default device connects from the
-    // top bar.
+    // Revive mode (a group that is dormant, or whose session's device
+    // dropped): the transport button becomes "Connect" and reopens the
+    // provenance-matched unit on THIS slot — one click, no + device trip
+    // (Raphaël 2026-07-28). Same button, same place in the header: no
+    // layout shift. Slot 0 joins only when a candidate is NAMED (Raphaël
+    // 2026-07-29: a disconnected QA402 next to live devices left only the
+    // anonymous top-bar Connect — "on ne sait pas ce qu'on connecte");
+    // with no identity the slot-0 button stays the boot-familiar disabled
+    // "Run" and the top bar keeps the generic connect.
     const reviveMode =
-      vm.slot !== 0 && (!vm.live || vm.status === "disconnected");
+      vm.slot !== 0
+        ? !vm.live || vm.status === "disconnected"
+        : vm.status === "disconnected" && vm.reviveId !== null;
     runBtn.textContent = reviveMode ? "Connect" : vm.streaming ? "Stop" : "Run";
     const runBlocked = reviveMode
       ? vm.reviveId === null

@@ -105,6 +105,12 @@ export async function connect(
     store.update("device/connected", (s) =>
       updateDevice(s, SLOT0, (d) => ({ ...d, status: "connected", present: true, info }))
     );
+    // Identity from the OPEN, slot-0 flavor (lot F, Raphaël's validation):
+    // a connected-then-disconnected unit that never streamed must still
+    // leave its name on its endpoint rows — the disconnected header/focus
+    // option and the slot-0 header Connect read it. In-session only:
+    // slot-0 captures are deliberately not persisted.
+    if (info) stampSlotEndpointIdentity(store, 0, info);
     // An explicit pick can open the VIRTUAL unit through this path too
     // (review #4): seed the demo hand-over baseline exactly like
     // connectVirtual, or a stale `false` baseline would read the existing

@@ -147,9 +147,15 @@ export function addableEntries(s: AppState): DeviceEntry[] {
  * doc) — matched here against the current enumeration. Null when the
  * group never captured, or its unit is not enumerable right now: the
  * generic + device menu stays the fallback.
+ *
+ * Slot 0 qualifies too (Raphaël 2026-07-29: a disconnected default device
+ * left only the anonymous top-bar Connect) — its candidate feeds the same
+ * header button, routed through the slot-0 connect flow by the caller.
+ * In-session only by construction: slot-0 captures are deliberately not
+ * persisted, so at boot this stays null and the top bar keeps the generic
+ * connect.
  */
 export function reviveCandidateId(s: AppState, slot: number): string | null {
-  if (slot === 0) return null;
   const addable = addableEntries(s);
   if (addable.length === 0) return null;
   for (const id of Object.values(hwTraceIds(slot))) {
@@ -181,8 +187,11 @@ export function dormantGroupLabel(s: AppState, slot: number): string | null {
 
 /** A session's display name for group headers and the focus selector:
  * alias-aware unit label when the registry entry is known, else the
- * session's own DeviceMeta identity, else a slot-derived placeholder
- * (`Device #2` — never another unit's name, item 8). */
+ * session's own DeviceMeta identity, else the identity its endpoint
+ * captures persist (a DISCONNECTED session keeps its name — Raphaël
+ * 2026-07-29: "Device #1" next to the focus selector said nothing about
+ * what Connect would reopen), else a slot-derived placeholder (`Device #2`
+ * — never another unit's name, item 8). */
 export function sessionLabel(s: AppState, key: SessionKey): string {
   const sess = session(s, key);
   const id = sess?.deviceId ?? null;
@@ -192,7 +201,8 @@ export function sessionLabel(s: AppState, key: SessionKey): string {
   if (info) {
     return `${info.model} · ${info.serial}${info.is_virtual ? " (virtual)" : ""}`;
   }
-  return `Device #${(sess?.slot ?? slotOfSessionKey(key)) + 1}`;
+  const slot = sess?.slot ?? slotOfSessionKey(key);
+  return dormantGroupLabel(s, slot) ?? `Device #${slot + 1}`;
 }
 
 /** The registry entry a session's unit maps to (null while unadopted). */

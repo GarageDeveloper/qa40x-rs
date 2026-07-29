@@ -358,11 +358,48 @@ describe("reviveCandidateId — one-click dormant-group revival (issue #25 lot E
     expect(reviveCandidateId(wrongModel, 1)).toBeNull();
   });
 
-  it("null when the rows never captured (no provenance), and always null for slot 0", () => {
+  it("null when the rows never captured (no provenance) — slot 0 included", () => {
     const noProvenance = dormantSlot1(fakeEntry("usb/B"), null);
     expect(reviveCandidateId(noProvenance, 1)).toBeNull();
+    // Slot 0's rows carry no capture in this state (and never do at boot —
+    // slot-0 captures are deliberately not persisted): no candidate.
     const s = dormantSlot1(fakeEntry("usb/B"), { model: "QA402", serial: "B" });
     expect(reviveCandidateId(s, 0)).toBeNull();
+  });
+
+  it("slot 0 QUALIFIES once its rows carry an identity (issue #25 lot F, Raphaël 2026-07-29 — the E4 'never slot 0' rule reversed: a disconnected default device left only the anonymous top-bar Connect)", () => {
+    // usb/A was slot 0's unit, now disconnected (not open, not held) but
+    // still enumerated; its identity sits on slot 0's endpoint rows (the
+    // in-session connect stamp).
+    const base = withDevices(fakeEntry("usb/A"), fakeEntry("usb/B"));
+    const meta = hwTraceMetas(0)[0];
+    const s: AppState = {
+      ...base,
+      traces: {
+        ...base.traces,
+        byId: {
+          ...base.traces.byId,
+          [meta.id]: {
+            ...base.traces.byId[meta.id],
+            capture: {
+              device: { model: "QA402", serial: "A", firmware: 60, isVirtual: false },
+              sampleRateHz: null,
+              inputRangeDbv: null,
+              outputRangeDbv: null,
+              offsets: null,
+              fftSize: null,
+              window: null,
+              averaging: null,
+              capturedAt: null,
+            },
+          },
+        },
+      },
+    };
+    expect(reviveCandidateId(s, 0)).toBe("usb/A");
+    // And the disconnected session's label names the same unit instead of
+    // the anonymous placeholder (the focus selector reads sessionLabel).
+    expect(sessionLabel(s, "slot-0")).toBe("QA402 · A");
   });
 
   it("null when the matched unit is not ADDABLE (already open — a stale doc must not offer stealing an open unit)", () => {
