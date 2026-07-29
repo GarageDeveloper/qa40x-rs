@@ -308,11 +308,18 @@ export function setSourcePlaying(
   id: string,
   playing: boolean
 ): void {
-  // A running measurement program owns the device: the UI greys the
-  // transports with the reason, and the action refuses as backstop.
-  // Focus-based on purpose (lot F2 decision D7 — matches the greyed
-  // button); per-target lock display is lot F4.
-  if (focusedRun(store.get()).programLock !== null) return;
+  // A running measurement program owns ITS device: the UI greys the
+  // transports with the reason, and the action refuses as backstop. Scoped
+  // to the source's LIVE target sessions since lot F3 (step 8) — a sweep
+  // on A must not block a source pinned to B; with no live target the
+  // focused lock applies, exactly matching the row's greyed button (v1
+  // invariant C: display and guard must agree, no enabled-and-refusing).
+  const s0 = store.get();
+  const targetKeys = sessionsForSource(s0, id);
+  const locked = targetKeys.length
+    ? targetKeys.some((k) => session(s0, k)?.run.programLock !== null)
+    : focusedRun(s0).programLock !== null;
+  if (locked) return;
   patch(store, playing ? "sources/play" : "sources/pause", id, (src) => ({
     ...src,
     playing,

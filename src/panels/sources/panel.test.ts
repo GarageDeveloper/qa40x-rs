@@ -267,6 +267,42 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     expect(panel.classList.contains("sources__detail--open")).toBe(false);
   });
 
+  it("the row lock follows the source's TARGETS (step 8): a program on the focused A never greys a source pinned to B — a program on B does", async () => {
+    const s = twoSessionState();
+    s.sources.byId[SRC_ID] = {
+      ...s.sources.byId[SRC_ID],
+      targets: [{ slot: 1, route: "left" }],
+    };
+    s.devices.sessions["slot-0"] = {
+      ...s.devices.sessions["slot-0"],
+      run: { ...s.devices.sessions["slot-0"].run, programLock: "prog-A" },
+    };
+    const { host, store } = mount(s);
+    await flush();
+    const play = host.querySelector<HTMLButtonElement>(
+      `[data-testid="src-play-${SRC_ID}"]`
+    )!;
+    expect(play.disabled).toBe(false);
+    expect(play.title).toBe("Play this source");
+
+    store.update("test/lock-B", (st) => ({
+      ...st,
+      devices: {
+        ...st.devices,
+        sessions: {
+          ...st.devices.sessions,
+          "slot-1": {
+            ...st.devices.sessions["slot-1"],
+            run: { ...st.devices.sessions["slot-1"].run, programLock: "prog-B" },
+          },
+        },
+      },
+    }));
+    await flush();
+    expect(play.disabled).toBe(true);
+    expect(play.title).toMatch(/measurement .* is running/);
+  });
+
   it("the footer names the focused device at ≥ 2 sessions, empty (hidden) at one, and follows the focus", async () => {
     const { host: one } = mount();
     await flush();

@@ -41,7 +41,6 @@ import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
 import type { SessionKey } from "../sessionkey";
 import {
   anyProgramLock,
-  focusedRun,
   isRoutable,
   session,
   sessionArgs,
@@ -235,9 +234,13 @@ export function configureScriptProgram(
 }
 
 /** Why the transports are locked right now, or null. Names the running
- * program so panels grey their controls with a reason (v1 Phase H). */
-export function programLockReason(s: AppState): string | null {
-  const id = focusedRun(s).programLock;
+ * program so panels grey their controls with a reason (v1 Phase H).
+ * `key` scopes the question to one SESSION (issue #25 lot F3 — a program
+ * on A must not grey a source pinned to B); defaults to the focused one,
+ * so every historical caller reads unchanged. F4's per-device program rows
+ * inherit this helper (the F1 bookkeeping). */
+export function programLockReason(s: AppState, key?: SessionKey): string | null {
+  const id = session(s, key ?? s.devices.focus)?.run.programLock ?? null;
   if (id === null) return null;
   const label = s.traces.byId[id]?.label ?? "program";
   return `measurement "${label}" is running`;

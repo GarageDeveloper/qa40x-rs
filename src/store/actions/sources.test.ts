@@ -11,7 +11,7 @@ import { Store } from "../store";
 import type { AppState, SourceMeta } from "../state";
 import { initialSession, initialState } from "../state";
 import { withDevice, withRun } from "./sessions.fixtures";
-import { removeSourceTarget, setSourceTargetRoute } from "./sources";
+import { removeSourceTarget, setSourcePlaying, setSourceTargetRoute } from "./sources";
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
@@ -143,6 +143,39 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
       slot: 1,
       route: "both",
     });
+  });
+
+  it("the play guard is scoped to the source's LIVE TARGETS (step 8): a lock on the FOCUSED device no longer blocks a source pinned elsewhere", async () => {
+    let s = twoSessionState();
+    s = withRun(s, { programLock: "prog-on-A" }); // slot 0, the focus
+    s = withRun(s, { streaming: true }, "slot-1");
+    s.sources = {
+      order: ["a"],
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left" }] }) },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourcePlaying(store, ipc, "a", true);
+    await flush();
+    expect(store.get().sources.byId["a"].playing).toBe(true);
+    expect(calls.some((c) => c.cmd === "stream_update" && c.args.deviceId === "usb/B")).toBe(
+      true
+    );
+  });
+
+  it("…while a lock on the TARGET's own session still refuses (display and guard agree)", async () => {
+    let s = twoSessionState();
+    s = withRun(s, { streaming: true, programLock: "prog-on-B" }, "slot-1");
+    s.sources = {
+      order: ["a"],
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left" }] }) },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourcePlaying(store, ipc, "a", true);
+    await flush();
+    expect(store.get().sources.byId["a"].playing).toBe(false);
+    expect(calls).toEqual([]);
   });
 
   it("an unroutable slot ≥ 1 target reaches no wire call and throws nothing", async () => {

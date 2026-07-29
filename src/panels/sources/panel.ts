@@ -739,13 +739,22 @@ export function mountSourcesPanel(
             };
           }
           // Matrix mode: readouts and errors are PER TARGET (each on its
-          // own session's grid/errors — sourcetargets.ts).
+          // own session's grid/errors — sourcetargets.ts), and so is the
+          // program lock (step 8): a sweep on A must not grey a source
+          // pinned to B. No live target ⇒ the focused lock (display and
+          // action guard stay identical — no enabled-and-refusing button).
           const targets = sourceTargetVMs(s, src.id);
+          const liveTargets = targets.filter((v) => v.present && v.live);
+          const rowLock = liveTargets.length
+            ? liveTargets
+                .map((v) => programLockReason(s, v.key))
+                .find((x) => x !== null) ?? null
+            : lock;
           return {
             src,
             mode,
             error: rowErrorText(targets, multi),
-            lock,
+            lock: rowLock,
             played: null,
             targets,
             summary: routingSummary(targets),
