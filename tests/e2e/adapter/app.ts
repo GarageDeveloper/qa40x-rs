@@ -203,6 +203,8 @@ export class AppV2 {
         status: string;
         streaming: boolean;
         frames: number;
+        outputOnly: boolean;
+        generatorRunning: boolean;
       }
     >;
   }> {

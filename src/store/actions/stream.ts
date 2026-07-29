@@ -16,10 +16,12 @@ import type {
   RunState,
   SessionKey,
   SourceMeta,
+  SourceRoute,
   TraceMeta,
 } from "../state";
 import { captureBenchSignature, hwTraceIds } from "../state";
 import { fdShownTraceIds } from "../selectors/layout";
+import { sourcesForSession } from "../selectors/sources";
 import { measureRequest } from "../selectors/measures";
 import {
   isRoutable,
@@ -57,10 +59,17 @@ export function levelToAmplitude(levelDbv: number): number {
  * - multitone / noise / chirp carry only their level;
  * - a script carries its source text (the backend compiles per slot and
  *   reports failures as named errors).
+ *
+ * `route` (issue #25 lot F2): the route THIS session receives — a matrix
+ * cell's coalesced route (selectors/sources.ts), not necessarily the
+ * source's legacy field. REQUIRED (review note #11): a defaulted read of
+ * `src.route` would be a second live read path beside `sourceRouting`,
+ * waiting for a caller that forgets the argument.
  */
 export function slotFromSource(
   src: SourceMeta,
-  snap: (hz: number) => number
+  snap: (hz: number) => number,
+  route: SourceRoute
 ): MixerSlotDesc {
   let source: MixerSlotDesc["source"];
   switch (src.kind) {
@@ -106,7 +115,7 @@ export function slotFromSource(
       source = { kind: "script", source: src.source };
       break;
   }
-  return { id: src.id, source, route: src.route, enabled: true };
+  return { id: src.id, source, route, enabled: true };
 }
 
 /** The frequency the mixer actually plays for an asked `hz`: clamped to
@@ -134,14 +143,15 @@ export function playedFrequencyHz(
     : clamped;
 }
 
-/** The slot declarations for the currently playing sources, snapped to
- * `sessionKey`'s converter grid (default: the focused session's). */
+/** The slot declarations `sessionKey`'s session receives (default: the
+ * focused one) — the playing sources whose routing matrix resolves onto it
+ * (issue #25 lot F2, selectors/sources.ts), each snapped to THAT session's
+ * converter grid. At one device with default targets this is exactly the
+ * pre-F2 "every playing source, with its own route", element for element. */
 export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlotDesc[] {
-  const snap = (hz: number): number => playedFrequencyHz(s, hz, sessionKey);
-  return s.sources.order
-    .map((id) => s.sources.byId[id])
-    .filter((src): src is SourceMeta => !!src && src.playing)
-    .map((src) => slotFromSource(src, snap));
+  const key = sessionKey ?? s.devices.focus;
+  const snap = (hz: number): number => playedFrequencyHz(s, hz, key);
+  return sourcesForSession(s, key).map(({ src, route }) => slotFromSource(src, snap, route));
 }
 
 /** The stream config is a pure projection of the state tree. The spectra
@@ -153,10 +163,13 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
  * — the slot dimension lives outside them, one config per device).
  * Acquisition and the display budget stay bench-global by design.
  *
- * `slots` (the DAC program) is emitted for the FOCUSED session only
- * (Raphaël decision 1, 2026-07-28: sources = focused device; added devices
- * capture in monitor mode — an empty slot set). Per-device source routing
- * is lot F. */
+ * `slots` (the DAC program): every session's config is computed by the SAME
+ * expression since lot F2 — the sources whose routing matrix resolves onto
+ * this session (selectors/sources.ts). The focus survives only as the
+ * default target VALUE (`slot: null`), not as a privilege in this
+ * projection: with default targets a non-focused session still gets `[]`
+ * (monitor mode, decision 1 of 2026-07-28), and a pinned target drives its
+ * device whatever the focus is (Raphaël R1, 2026-07-29). */
 export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamConfig {
   const key = sessionKey ?? s.devices.focus;
   const slot = session(s, key)?.slot ?? 0;
@@ -165,7 +178,7 @@ export function buildStreamConfig(s: AppState, sessionKey?: SessionKey): StreamC
   const fdShown = fdShownTraceIds(s);
   return {
     buffer_size: s.acquisition.fftSize,
-    slots: key === s.devices.focus ? slotsFromSources(s, key) : [],
+    slots: slotsFromSources(s, key),
     window: s.acquisition.window,
     averaging: {
       coherent: mode === "coherent",
@@ -493,6 +506,14 @@ export function __resetSessionGlobals(): void {
   warnedFrameMismatches.clear();
 }
 
+/** Extra per-session teardown hooks from modules stream.ts must not
+ * import (lot F2: outputonly.ts registers its rebuild-chain cleanup here —
+ * the import edge runs outputonly → stream, never the reverse). */
+const sessionDisposers: Array<(key: SessionKey) => void> = [];
+export function registerSessionDisposer(fn: (key: SessionKey) => void): void {
+  sessionDisposers.push(fn);
+}
+
 /**
  * Drop every per-session module entry for an EVICTED session (issue #25
  * lot E4 — the teardown twin of the maps above): the capture memo has no
@@ -516,6 +537,7 @@ export function disposeSession(key: SessionKey): void {
   for (const sig of [...warnedFrameMismatches]) {
     if (sig.startsWith(`${key}|`)) warnedFrameMismatches.delete(sig);
   }
+  for (const dispose of sessionDisposers) dispose(key);
 }
 
 export async function startRun(
@@ -568,6 +590,17 @@ export async function startRun(
     }));
     s = store.get();
     sess = session(s, key)!; // re-read past our own update (hygiene)
+    // The flip changed EVERY source's playing flag, so every OTHER
+    // streaming session's mix moved too — a doc-pinned target on a
+    // monitoring device must not keep its previously-pushed empty slot
+    // set until some unrelated edit syncs it (F2 review SHOULD-FIX #4).
+    // This session's own config is built below. Known limit: another
+    // session sitting in output-only mode with everything paused is not
+    // re-armed from here (stream.ts cannot import the generator module
+    // without a cycle) — its generator starts on the next source gesture.
+    for (const other of sessionKeys(s)) {
+      if (other !== key) syncStream(store, ipc, other);
+    }
   }
   if (sess.run.outputOnly || sess.run.generatorRunning) {
     // Run is an explicit ask for capture: it takes the DAC back (stream_start

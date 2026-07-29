@@ -274,6 +274,13 @@ function recordingIpc(devices: DeviceList): { ipc: Ipc; calls: [string, unknown]
         case "get_input_dbv_offset":
         case "get_output_dbv_offset":
           return Promise.resolve({ offset_db: 0, calibrated: true } as never);
+        case "output_only_start":
+          return Promise.resolve({
+            sigma_peak_dbv: -12,
+            clipped: false,
+            fitted_output_range_dbv: 8,
+            errors: [],
+          } as never);
         default:
           return Promise.resolve(null as never);
       }
@@ -655,9 +662,9 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
     expect(calls).toHaveLength(0);
   });
 
-  it("refuses a focus change while a gap-free generator runs (E4 review #2b) — the generator plays a FIXED buffer for the focused session and does not follow a focus move", () => {
-    const base = twoSessions({ slot0: false, slot1: false });
-    const store = new Store(
+  it("a focus switch under a running generator MOVES the stimulus in the same gesture (lot F2 — replaces the E4 refusal): old focus's generator stops, the new focus's stream picks up the sources, D3 clears the stranded output-only flag with one info toast", async () => {
+    const base = twoSessions({ slot0: false, slot1: true });
+    const store = new Store<AppState>(
       {
         ...base,
         devices: {
@@ -674,16 +681,136 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
             },
           },
         },
+        sources: {
+          order: ["src-sine-1"],
+          byId: {
+            "src-sine-1": {
+              ...base.sources.byId["src-sine-1"],
+              playing: true, // default target: follows the focus
+            },
+          },
+        },
       },
       { freeze: true }
     );
     const { ipc, calls } = recordingIpc(list());
     setFocusedSession(store, ipc, "slot-1");
-    expect(store.get().devices.focus).toBe(SLOT0);
-    expect(calls.filter(([m]) => m === "stream_update")).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 0));
+    // The move happened — no refusal.
+    expect(store.get().devices.focus).toBe("slot-1");
+    // Old focus: generator stopped (arg-less — slot 0), mode cleared (D3).
+    expect(calls.some(([m]) => m === "stop_generator")).toBe(true);
+    const slot0 = store.get().devices.sessions[SLOT0].run;
+    expect(slot0.generatorRunning).toBe(false);
+    expect(slot0.outputOnly).toBe(false);
     expect(
-      store.get().ui.toasts.some((t) => t.message.includes("output-only"))
+      store.get().ui.toasts.some(
+        (t) => t.kind === "info" && t.message.includes("Output only")
+      )
     ).toBe(true);
+    // New focus: its running stream re-synced WITH the sources aboard.
+    const upd = calls.find(([m]) => m === "stream_update");
+    expect(upd).toBeDefined();
+    const args = upd![1] as { deviceId?: string; config: { slots: unknown[] } };
+    expect(args.deviceId).toBe("usb/B");
+    expect(args.config.slots).toHaveLength(1);
+  });
+
+  it("D3 leaves output-only ALONE when a pinned target keeps feeding the outgoing session", async () => {
+    const base = twoSessions({ slot0: false, slot1: false });
+    const store = new Store<AppState>(
+      {
+        ...base,
+        devices: {
+          ...base.devices,
+          sessions: {
+            ...base.devices.sessions,
+            [SLOT0]: {
+              ...base.devices.sessions[SLOT0],
+              run: {
+                ...base.devices.sessions[SLOT0].run,
+                outputOnly: true,
+                generatorRunning: true,
+              },
+            },
+          },
+        },
+        sources: {
+          order: ["src-sine-1"],
+          byId: {
+            "src-sine-1": {
+              ...base.sources.byId["src-sine-1"],
+              playing: true,
+              targets: [{ slot: 0, route: "left" }], // pinned to slot 0
+            },
+          },
+        },
+      },
+      { freeze: true }
+    );
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.get().devices.focus).toBe("slot-1");
+    const slot0 = store.get().devices.sessions[SLOT0].run;
+    expect(slot0.outputOnly).toBe(true); // pinned stimulus: mode survives
+    expect(calls.some(([m]) => m === "stop_generator")).toBe(false);
+    // The generator REBUILDS on slot 0 (still its owner) rather than stop.
+    expect(calls.some(([m]) => m === "output_only_start")).toBe(true);
+    expect(store.get().ui.toasts).toHaveLength(0);
+  });
+
+  it("the fan-out never touches a LOCKED session elsewhere (F2 review MUST-FIX #1, reached through syncAllDacOwners) — a program owns that device exclusively, even when a pinned target routes a playing source onto it", async () => {
+    const base = twoSessions({ slot0: false, slot1: false });
+    const store = new Store<AppState>(
+      {
+        ...base,
+        devices: {
+          ...base.devices,
+          sessions: {
+            ...base.devices.sessions,
+            // slot-2: a THIRD session, output-only and LOCKED by a running
+            // program — output_only_start's own MUST-FIX #1 gate refuses a
+            // rebuild queued against it directly (outputonly.test.ts pins
+            // that unit). This test proves the same refusal holds when the
+            // rebuild arrives via a focus change's bench-global fan-out.
+            "slot-2": {
+              ...initialSession(2),
+              deviceId: "usb/C",
+              device: { ...initialSession(2).device, status: "connected" as const },
+              run: {
+                ...initialSession(2).run,
+                outputOnly: true,
+                generatorRunning: false,
+                programLock: "prog-1",
+              },
+            },
+          },
+        },
+        sources: {
+          order: ["src-sine-1"],
+          byId: {
+            "src-sine-1": {
+              ...base.sources.byId["src-sine-1"],
+              playing: true,
+              targets: [{ slot: 2, route: "both" }], // pinned onto the LOCKED device
+            },
+          },
+        },
+      },
+      { freeze: true }
+    );
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.get().devices.focus).toBe("slot-1");
+    // No wire call of ANY kind named the locked device's id — not a rebuild
+    // (output_only_start), not a stop, nothing.
+    expect(calls.some(([, a]) => (a as { deviceId?: string } | undefined)?.deviceId === "usb/C")).toBe(
+      false
+    );
+    // Store-side: the locked session's generator never flipped on.
+    expect(store.get().devices.sessions["slot-2"].run.generatorRunning).toBe(false);
   });
 });
 

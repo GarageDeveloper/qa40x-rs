@@ -15,6 +15,7 @@ import {
   isQuotaExceeded,
   migrate,
   sanitizeCapture,
+  sanitizeSourceTargets,
   snapshotWorkspace,
   WS_VERSION,
 } from "./persist";
@@ -827,5 +828,112 @@ describe("sanitizeCapture — a hand-edited/corrupted snapshot degrades, never c
       device: null,
       sampleRateHz: 96000,
     });
+  });
+});
+
+describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () => {
+  it("a doc predating `targets` loads with [] — the focus-following default", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    for (const src of Object.values(doc.sources.byId) as { targets?: unknown }[]) {
+      delete src.targets;
+    }
+    const migrated = migrate(doc)!;
+    for (const src of Object.values(migrated.sources.byId)) {
+      expect(src.targets).toEqual([]);
+    }
+  });
+
+  it("junk targets degrade entry-by-entry without throwing (string, negative slot, bad route, duplicates, flood)", () => {
+    expect(sanitizeSourceTargets("garbage")).toEqual([]);
+    expect(sanitizeSourceTargets(42)).toEqual([]);
+    expect(sanitizeSourceTargets(undefined)).toEqual([]);
+    expect(
+      sanitizeSourceTargets([
+        "junk",
+        null,
+        { slot: -1, route: "left" },
+        { slot: 1.5, route: "left" },
+        { slot: 1, route: "up" },
+        { slot: 1, route: "left" },
+        { slot: 1, route: "right" }, // duplicate slot: FIRST wins
+        { slot: null, route: "both" },
+        { slot: null, route: "off" }, // duplicate focus target: first wins
+      ])
+    ).toEqual([
+      { slot: 1, route: "left" },
+      { slot: null, route: "both" },
+    ]);
+    // A hand-edited flood is capped, never an unbounded matrix.
+    const flood = Array.from({ length: 40 }, (_, i) => ({ slot: i, route: "left" as const }));
+    expect(sanitizeSourceTargets(flood)).toHaveLength(9);
+  });
+
+  it("a doc with pinned targets survives save → JSON → migrate → apply with SLOTS intact", () => {
+    const store = freshStore();
+    store.update("test/pin-targets", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": {
+            ...s.sources.byId["src-sine-1"],
+            targets: [
+              { slot: 1, route: "both" },
+              { slot: null, route: "left" },
+            ],
+          },
+        },
+      },
+    }));
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(store.get()))))!;
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([
+      { slot: 1, route: "both" },
+      { slot: null, route: "left" },
+    ]);
+    // Stability: the reloaded bench re-snapshots to the same document.
+    expect(snapshotWorkspace(dest.get())).toEqual(doc);
+  });
+
+  it("the document carries no device id anywhere — the matrix is SLOT-keyed (bench portability)", () => {
+    const store = freshStore();
+    store.update("test/bench-with-ids", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...initialSession(1), deviceId: "usb/SERIAL-1234" },
+        },
+        aliases: { "usb/SERIAL-1234": "Bench B" },
+      },
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": {
+            ...s.sources.byId["src-sine-1"],
+            targets: [{ slot: 1, route: "both" }],
+          },
+        },
+      },
+    }));
+    const json = JSON.stringify(snapshotWorkspace(store.get()));
+    expect(json).not.toContain("SERIAL-1234");
+    expect(json).not.toContain("deviceId");
+    expect(json).not.toContain("usb/");
+  });
+
+  it("applyWorkspaceDoc sanitizes targets itself — a template-style doc that never saw migrate()", () => {
+    const doc = snapshotWorkspace(freshStore().get());
+    (doc.sources.byId["src-sine-1"] as { targets: unknown }).targets = [
+      { slot: 2, route: "right" },
+      { slot: "two", route: "right" },
+    ];
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right" }]);
   });
 });

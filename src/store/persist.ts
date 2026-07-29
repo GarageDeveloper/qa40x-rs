@@ -36,6 +36,7 @@ import type {
   ProgramsState,
   SourceMeta,
   SourcesState,
+  SourceTarget,
   SweepProgramParams,
   TileConfig,
   TraceMeta,
@@ -49,6 +50,7 @@ import {
   hwSlotOfTraceId,
   initialState,
   initialTraces,
+  MAX_SOURCE_TARGETS,
   nextTraceColor,
   patternTileCount,
 } from "./state";
@@ -168,7 +170,10 @@ export function docToFrames(p: PersistedFrames): {
 export function snapshotWorkspace(s: AppState): WorkspaceDoc {
   const sourcesById: Record<string, SourceMeta> = {};
   for (const [id, src] of Object.entries(s.sources.byId)) {
-    sourcesById[id] = { ...src, playing: false };
+    // Targets deep-copied: the doc persists the routing matrix SLOT-keyed
+    // (issue #25 lot F2 — never a device id; a doc carried to another bench
+    // must not be bench-bound), and the snapshot must not alias live state.
+    sourcesById[id] = { ...src, playing: false, targets: src.targets.map((t) => ({ ...t })) };
   }
 
   const tracesById: Record<string, TraceMeta> = {};
@@ -340,7 +345,8 @@ function importGenerator(id: string, label: string, params: Record<string, unkno
     return o === "left" || o === "right" || o === "off" ? o : "both";
   })();
   const levelDbv = num(params.level, -12);
-  const base = { id, label, route, playing: false };
+  // Every legacy source was bench-global, i.e. focus-following (lot F2).
+  const base = { id, label, route, targets: [] as SourceTarget[], playing: false };
   switch (waveform) {
     case "sine":
     case "square":
@@ -497,6 +503,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
               const o = str(params.output, "both");
               return o === "left" || o === "right" || o === "off" ? o : "both";
             })(),
+            targets: [],
             playing: false,
             kind: "script",
             source: text,
@@ -689,6 +696,38 @@ export function importV4(ws: RawV4): WorkspaceDoc {
 }
 
 /**
+ * Validate a loaded source-routing matrix (issue #25 lot F2) entry by
+ * entry: a non-array degrades to `[]` (the focus-following default), a
+ * malformed entry is dropped, duplicate slots keep the FIRST entry (the
+ * read path would otherwise resolve one source onto one session twice),
+ * and the list is capped at MAX_SOURCE_TARGETS. Never throws — the same
+ * contract as `sanitizeCapture`/`sanitizeUserCurve`.
+ */
+export function sanitizeSourceTargets(raw: unknown): SourceTarget[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SourceTarget[] = [];
+  const seen = new Set<number | null>();
+  for (const entry of raw) {
+    if (out.length >= MAX_SOURCE_TARGETS) break;
+    if (!entry || typeof entry !== "object") continue;
+    const t = entry as Record<string, unknown>;
+    const slot =
+      t.slot === null
+        ? null
+        : typeof t.slot === "number" && Number.isInteger(t.slot) && t.slot >= 0
+          ? t.slot
+          : undefined;
+    if (slot === undefined) continue;
+    const route = t.route;
+    if (route !== "left" && route !== "right" && route !== "both" && route !== "off") continue;
+    if (seen.has(slot)) continue;
+    seen.add(slot);
+    out.push({ slot, route });
+  }
+  return out;
+}
+
+/**
  * Validate a loaded capture snapshot (issue #40) field by field: every
  * malformed field degrades to its "unknown" value (null / absent marker), a
  * non-object degrades to no snapshot at all. Never throws — the same
@@ -784,6 +823,12 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   // Older v5 documents predating a field pick up its default here (the v5
   // in-version hook — bump WS_VERSION for shape CHANGES, not additions).
   if (!Array.isArray(doc.collapsed)) doc.collapsed = [];
+  // Issue #25 lot F2: a doc predating the per-source routing matrix gets
+  // `[]` (focus-following, the pre-F2 behavior); any doc's matrix degrades
+  // entry-by-entry rather than crash the read path.
+  for (const src of Object.values(doc.sources.byId)) {
+    src.targets = sanitizeSourceTargets(src.targets);
+  }
   if (!doc.refFrames || typeof doc.refFrames !== "object") doc.refFrames = {};
   if (doc.acquisition && typeof doc.acquisition.coherentGen !== "boolean") {
     doc.acquisition.coherentGen = true;

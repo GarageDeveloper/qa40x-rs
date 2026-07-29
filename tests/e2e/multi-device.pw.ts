@@ -300,3 +300,44 @@ test("a disconnected DEFAULT device stays named — list suffix, header identity
   expect((await app.sessions()).byKey["slot-1"].status).toBe("connected");
   await expect.poll(() => app.openSlots()).toEqual([0, 1]);
 });
+
+test("a focus switch with the gap-free generator running MOVES the stimulus instead of refusing (lot F2 — replaces the E4 refusal)", async ({
+  app,
+}) => {
+  await addUnitB(app);
+
+  // Arm the generator on the focused device (slot 0): play a sine, then
+  // hand the DAC to the gap-free loop.
+  const id = await app.addSine();
+  await app.playSine(id);
+  await app.setOutputOnly(true);
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-0"].generatorRunning)
+    .toBe(true);
+
+  await app.pickFocus("slot-1");
+
+  // The focus MOVED — no refusal toast, no stranded generator: the old
+  // focus's loop stops in the same gesture and D3 clears its now-invisible
+  // output-only flag (the footer checkbox is focus-bound), with one info
+  // toast naming the change.
+  await expect
+    .poll(async () => (await app.sessions()).focused)
+    .toBe("slot-1");
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-0"].generatorRunning)
+    .toBe(false);
+  expect((await app.sessions()).byKey["slot-0"].outputOnly).toBe(false);
+  await expect.poll(() => app.toastCount("Output only turned off")).toBe(1);
+  expect(await app.toastCount("Stop the output-only generator")).toBe(0);
+
+  // The sources now belong to the NEW focus: its next capture carries them,
+  // while unit A stays fully silent — no stream, no generator. (Not asserted
+  // via unitStreamSlotCount(0): that is the LAST config unit A ever received,
+  // and its stream is STOPPED, not reconfigured.)
+  await app.clickRun();
+  await expect.poll(() => app.unitStreamSlotCount(1)).toBeGreaterThan(0);
+  const after = await app.sessions();
+  expect(after.byKey["slot-0"].streaming).toBe(false);
+  expect(after.byKey["slot-0"].generatorRunning).toBe(false);
+});

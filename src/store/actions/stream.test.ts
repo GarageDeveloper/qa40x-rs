@@ -28,6 +28,7 @@ import type { AppState, PeriodicSource, ScriptSource, SourceMeta } from "../stat
 import { initialSession, initialState, SLOT0 } from "../state";
 import { HW_TRACE_IDS } from "../state";
 import { focusedRun } from "../selectors/session";
+import { sourcesForSession } from "../selectors/sources";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { reconcileHwTraces } from "./traces";
 import { deviceLost } from "./device";
@@ -58,6 +59,7 @@ function sineSource(id: string, over: Partial<PeriodicSource> = {}): SourceMeta 
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    targets: [],
     playing: true,
     ...over,
   } as SourceMeta;
@@ -212,7 +214,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("a plain sine keeps the classic waveform slot, bin-snapped", () => {
     const snap = (hz: number): number => Math.round(hz / 100) * 100;
-    const slot = slotFromSource(sineSource("s", { frequencyHz: 997 }), snap);
+    const slot = slotFromSource(sineSource("s", { frequencyHz: 997 }), snap, "left");
     expect(slot).toEqual({
       id: "s",
       source: {
@@ -228,7 +230,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("routes follow the source's declared route — including off (muted)", () => {
     for (const route of ["left", "right", "both", "off"] as const) {
-      const slot = slotFromSource(sineSource("s", { route }), noSnap);
+      const slot = slotFromSource(sineSource("s", { route }), noSnap, route);
       expect(slot.route).toBe(route);
       expect(slot.enabled).toBe(true);
     }
@@ -244,7 +246,8 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
           { enabled: false, frequencyHz: 5000, levelDbv: -6, phaseDeg: 0 }, // skipped
         ],
       }),
-      snap
+      snap,
+      "left"
     );
     // The primary {frequency, level} tone rides at phase 0; each enabled
     // extra is bin-snapped and converted dBV → Vrms at this boundary.
@@ -272,7 +275,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     // measurement was pinned on — it must not silently reroute.
     const disabled = [{ enabled: false, frequencyHz: 2000, levelDbv: -6, phaseDeg: 0 }];
     for (const extraTones of [[], disabled]) {
-      const slot = slotFromSource(sineSource("g", { extraTones }), noSnap);
+      const slot = slotFromSource(sineSource("g", { extraTones }), noSnap, "left");
       expect(slot.source.kind).toBe("waveform");
     }
   });
@@ -281,7 +284,8 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     for (const kind of ["square", "triangle", "sawtooth"] as const) {
       const slot = slotFromSource(
         sineSource("g", { kind, frequencyHz: 440, levelDbv: -20 }),
-        noSnap
+        noSnap,
+        "left"
       );
       expect(slot.source).toEqual({
         kind: "waveform",
@@ -294,15 +298,16 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("extra tones apply to sine only — a square with tones stays a square", () => {
     const extraTones = [{ enabled: true, frequencyHz: 2000, levelDbv: -6, phaseDeg: 0 }];
-    const slot = slotFromSource(sineSource("g", { kind: "square", extraTones }), noSnap);
+    const slot = slotFromSource(sineSource("g", { kind: "square", extraTones }), noSnap, "left");
     expect(slot.source.kind).toBe("waveform");
   });
 
   it("multitone / noise / chirp carry only their level", () => {
     for (const kind of ["multitone", "noise", "chirp"] as const) {
       const slot = slotFromSource(
-        { id: "b", label: kind, kind, levelDbv: -12, route: "both", playing: true },
-        noSnap
+        { id: "b", label: kind, kind, levelDbv: -12, route: "both", targets: [], playing: true },
+        noSnap,
+        "both"
       );
       expect(slot.source).toEqual({ kind, amplitude: levelToAmplitude(-12) });
     }
@@ -315,9 +320,10 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
       kind: "script",
       source: "fn render(ctx) { [] }",
       route: "both",
+      targets: [],
       playing: true,
     };
-    const slot = slotFromSource(script, noSnap);
+    const slot = slotFromSource(script, noSnap, script.route);
     expect(slot.source).toEqual({ kind: "script", source: "fn render(ctx) { [] }" });
     expect(slot.route).toBe("both");
   });
@@ -390,13 +396,132 @@ describe("buildStreamConfig — per-slot projections (issue #25 lot E3)", () => 
     });
   });
 
-  it("`slots` (the DAC program) is emitted for the FOCUSED session only (Raphaël decision 1, 2026-07-28)", () => {
+  it("`slots` (the DAC program) with DEFAULT targets is emitted for the FOCUSED session only (decision 1, 2026-07-28 — the lot F2 default keeps it verbatim)", () => {
     const s = addSlot1(initialState());
     s.sources = { order: ["a"], byId: { a: sineSource("a") } };
     expect(s.devices.focus).toBe(SLOT0); // still focused on slot-0
     expect(buildStreamConfig(s, SLOT0).slots).toHaveLength(1); // focused: its sources play
     expect(buildStreamConfig(s, "slot-1").slots).toEqual([]); // non-focused: empty (monitor mode)
     expect(buildStreamConfig(s).slots).toHaveLength(1); // arg-less default == the focused session
+  });
+});
+
+describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)", () => {
+  it("a source pinned to slot 1 drives slot 1 whatever the focus — and leaves the focused session", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a"],
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    expect(s.devices.focus).toBe(SLOT0);
+    expect(buildStreamConfig(s, SLOT0).slots).toEqual([]); // focused, but not targeted
+    const slots = buildStreamConfig(s, "slot-1").slots;
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({ id: "a", route: "both" });
+  });
+
+  it("two targets drive two sessions, each with its OWN route", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: 0, route: "left" },
+            { slot: 1, route: "right" },
+          ],
+        }),
+      },
+    };
+    expect(buildStreamConfig(s, SLOT0).slots[0]).toMatchObject({ id: "a", route: "left" });
+    expect(buildStreamConfig(s, "slot-1").slots[0]).toMatchObject({ id: "a", route: "right" });
+  });
+
+  it("a source resolving twice onto one session coalesces into ONE slot with the union route — never two summed slots (+6 dB)", () => {
+    // Implicit focus target (slot: null) + an explicit target naming the
+    // focused slot: one MixerSlotDesc, routes OR-ed.
+    const s = initialState();
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: null, route: "left" },
+            { slot: 0, route: "right" },
+          ],
+        }),
+      },
+    };
+    const slots = buildStreamConfig(s, SLOT0).slots;
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({ id: "a", route: "both" });
+  });
+
+  it("slot ids are unique within one config (the mixer-sum hazard, property form)", () => {
+    const s = addSlot1(initialState());
+    s.sources = {
+      order: ["a", "b"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: null, route: "both" },
+            { slot: 0, route: "both" },
+            { slot: 1, route: "left" },
+          ],
+        }),
+        b: sineSource("b"),
+      },
+    };
+    for (const key of [SLOT0, "slot-1"]) {
+      const ids = buildStreamConfig(s, key).slots.map((x) => x.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+
+  it("a target pinned to a slot with no live session resolves nowhere — silent (lot-F recorded default)", () => {
+    const s = initialState(); // slot 1 has NO session
+    s.sources = {
+      order: ["a"],
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    expect(buildStreamConfig(s, SLOT0).slots).toEqual([]);
+    expect(sourcesForSession(s, "slot-1")).toHaveLength(1); // structural: it WOULD play there
+  });
+
+  it("each target's tone is bin-snapped against ITS session's sample rate (the #14 coherence class)", () => {
+    const s = addSlot1(initialState());
+    const slot1 = s.devices.sessions["slot-1"];
+    s.devices.sessions = {
+      ...s.devices.sessions,
+      "slot-1": {
+        ...slot1,
+        device: {
+          ...slot1.device,
+          config: { sample_rate: 192000, input_gain: 0, output_gain: 8 },
+        },
+      },
+    };
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sineSource("a", {
+          targets: [
+            { slot: 0, route: "left" },
+            { slot: 1, route: "left" },
+          ],
+        }),
+      },
+    };
+    const freq = (key: string): number => {
+      const slot = buildStreamConfig(s, key).slots[0];
+      const src = slot.source;
+      if (src.kind !== "waveform") throw new Error("expected waveform");
+      return src.frequency_hz;
+    };
+    // Slot 0 has no config → 48 kHz default grid; slot 1 snaps on 192 kHz.
+    expect(freq(SLOT0)).toBeCloseTo(snapToBin(1000, 32768, 48000), 9);
+    expect(freq("slot-1")).toBeCloseTo(snapToBin(1000, 32768, 192000), 9);
+    expect(freq(SLOT0)).not.toBeCloseTo(freq("slot-1"), 6);
   });
 });
 
@@ -1083,6 +1208,104 @@ describe("startRun/stopRun — per-session sequencing (issue #25 lot E2)", () =>
     };
     await stopRun(store, ipc, "slot-99");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("startRun's playAllIfIdle fan-out reaches OTHER sessions (F2 review SHOULD-FIX #4)", () => {
+  beforeEach(() => __resetSessionGlobals());
+
+  it("flipping EVERY source's playing flag re-syncs another already-streaming session whose doc-pinned target just started playing — a monitoring device must not keep an empty slot set until some unrelated edit syncs it", async () => {
+    let s = initialState();
+    s = withDevice(s, { status: "connected" }); // slot 0: about to Run, idle
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+            run: { ...initialSession(1).run, streaming: true }, // ALREADY streaming
+          },
+        },
+      },
+      sources: {
+        order: ["a"],
+        byId: {
+          // Paused, pinned to slot 1 only — NOT the session Run is about to
+          // start (slot 0), so this source's own play/pause fan-out
+          // (sources.ts::setSourcePlaying) never runs; only startRun's
+          // playAllIfIdle sweep flips it.
+          a: sineSource("a", { playing: false, targets: [{ slot: 1, route: "both" }] }),
+        },
+      },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const calls: [string, unknown][] = [];
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        return Promise.resolve(null as never);
+      },
+    };
+
+    await startRun(store, ipc, { sessionKey: SLOT0, playAllIfIdle: true });
+
+    // The idle-bench guard played every source, including the one pinned
+    // to the OTHER device.
+    expect(store.get().sources.byId["a"].playing).toBe(true);
+
+    // slot-1's running stream re-synced WITH the newly-playing source
+    // aboard — not left showing the stale (empty, pre-flip) slot set.
+    const upd = calls.find(([m]) => m === "stream_update");
+    expect(upd).toBeDefined();
+    const args = upd![1] as { deviceId?: string; config: { slots: unknown[] } };
+    expect(args.deviceId).toBe("usb/B");
+    expect(args.config.slots).toHaveLength(1);
+  });
+
+  it("a session with NOTHING routed onto it stays untouched by the sweep (no stream_update for an unaffected device)", async () => {
+    let s = initialState();
+    s = withDevice(s, { status: "connected" });
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+            run: { ...initialSession(1).run, streaming: true },
+          },
+        },
+      },
+      sources: {
+        // Default target only — resolves onto the FOCUSED session (slot 0),
+        // never onto slot-1.
+        order: ["a"],
+        byId: { a: sineSource("a", { playing: false }) },
+      },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const calls: [string, unknown][] = [];
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        return Promise.resolve(null as never);
+      },
+    };
+
+    await startRun(store, ipc, { sessionKey: SLOT0, playAllIfIdle: true });
+
+    const upd = calls.find(([m]) => m === "stream_update");
+    expect(upd).toBeDefined();
+    const args = upd![1] as { deviceId?: string; config: { slots: unknown[] } };
+    expect(args.deviceId).toBe("usb/B");
+    expect(args.config.slots).toEqual([]); // still nothing routed here
   });
 });
 

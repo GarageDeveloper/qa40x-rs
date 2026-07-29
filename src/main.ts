@@ -71,6 +71,10 @@ const wsStore = createWorkspaceStore();
             status: x.device.status,
             streaming: x.run.streaming,
             frames: x.run.stats.frames,
+            // Lot F2 (per-session generator ownership): the focus×generator
+            // e2e needs to see WHICH session owns a running generator.
+            outputOnly: x.run.outputOnly,
+            generatorRunning: x.run.generatorRunning,
           },
         ])
       ),

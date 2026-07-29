@@ -128,9 +128,13 @@ describe("sessionArgs — the wire deviceId projection (E4's flip point)", () =>
     expect(sessionArgs(s, "slot-1")).toEqual({ deviceId: "usb/B" });
   });
 
-  it("a slot-1 session with deviceId still null stays arg-less too (pre-E4 fallback — watched here so E4's flip to id-routing is a visible diff)", () => {
+  it("a slot-1 session with deviceId still null THROWS (lot F2 hardening — the pre-F2 `{}` fallback silently drove the DEFAULT runtime)", () => {
     const s = withSlot1(initialState()); // deviceId defaults to null via initialSession
-    expect(sessionArgs(s, "slot-1")).toEqual({});
+    expect(() => sessionArgs(s, "slot-1")).toThrow(/no routable device id/);
+  });
+
+  it("an absent session throws the same way — never a phantom arg-less command", () => {
+    expect(() => sessionArgs(initialState(), "slot-7")).toThrow(/no routable device id/);
   });
 });
 
