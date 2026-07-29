@@ -267,6 +267,23 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     expect(panel.classList.contains("sources__detail--open")).toBe(false);
   });
 
+  it("the footer names the focused device at ≥ 2 sessions, empty (hidden) at one, and follows the focus", async () => {
+    const { host: one } = mount();
+    await flush();
+    expect(one.querySelector('[data-testid="sources-footer-device"]')!.textContent).toBe("");
+
+    const { host, store } = mount(twoSessionState());
+    await flush();
+    const footDev = host.querySelector('[data-testid="sources-footer-device"]')!;
+    expect(footDev.textContent).toBe("#1 Device #1");
+    store.update("test/focus", (st) => ({
+      ...st,
+      devices: { ...st.devices, focus: "slot-1" },
+    }));
+    await flush();
+    expect(footDev.textContent).toBe("#2 Device #2");
+  });
+
   it("errors are attributed to their target's session and #n-prefixed at ≥ 2 sessions", async () => {
     const s = twoSessionState();
     s.sources.byId[SRC_ID] = {

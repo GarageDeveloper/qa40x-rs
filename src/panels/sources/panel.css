@@ -289,6 +289,21 @@
   color: var(--ink-2);
 }
 
+/* Which device the footer describes (issue #25 lot F3) — present only at
+   ≥ 2 live sessions; :empty keeps the single-device footer pixel-identical
+   (the .sources__params:empty precedent). */
+.sources__footdev {
+  max-width: 34%;
+  overflow: hidden;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__footdev:empty {
+  display: none;
+}
+
 .sources__clip {
   width: 9px;
   height: 9px;

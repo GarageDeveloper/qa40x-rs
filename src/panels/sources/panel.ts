@@ -45,7 +45,8 @@ import { setCoherentGen } from "../../store/actions/acquisition";
 import { playedFrequencyHz } from "../../store/actions/stream";
 import { programLockReason } from "../../store/actions/programs";
 import { focusedDevice, focusedRun } from "../../store/selectors/session";
-import { liveSessionCount } from "../../store/selectors/devices";
+import { liveSessionCount, sessionLabel } from "../../store/selectors/devices";
+import { slotOfSessionKey } from "../../store/sessionkey";
 import {
   hasLiveTarget,
   routingSummary,
@@ -184,6 +185,11 @@ export function mountSourcesPanel(
   const list = el("div.sources__list", { "data-testid": "sources-list" });
   const lockNote = el("div.sources__lock", { "data-testid": "sources-lock" });
   lockNote.hidden = true;
+  // The footer describes the FOCUSED session (R3: output-only stays the
+  // single focus-bound checkbox) — at ≥ 2 live sessions it says WHICH
+  // device that is (issue #25 lot F3); empty (and display: none) at one,
+  // so the single-device footer stays pixel-identical.
+  const footDev = el("span.sources__footdev", { "data-testid": "sources-footer-device" });
   const sigma = el("span.sources__sigma", { "data-testid": "sigma-peak" }, "Σ —");
   const clipDot = el("span.sources__clip", { "data-testid": "out-clip-dot" });
   const rangeReadout = el("span.sources__range", { "data-testid": "out-range-readout" });
@@ -191,6 +197,17 @@ export function mountSourcesPanel(
   outOnly.addEventListener("change", () => setOutputOnly(store, ipc, outOnly.checked));
   const coherent = el("input", { type: "checkbox", "data-testid": "coherent-gen" });
   coherent.addEventListener("change", () => setCoherentGen(store, ipc, coherent.checked));
+
+  const OUT_ONLY_TITLE =
+    "Drive the DAC gap-free from the playing sources, with no " +
+    "capture (for feeding an external DUT). Analysis resumes when " +
+    "unchecked.";
+  const outOnlyLabel = el(
+    "label.sources__outonly",
+    { title: OUT_ONLY_TITLE },
+    outOnly,
+    "Output only"
+  );
 
   const head = el(
     "div.sources__head",
@@ -207,6 +224,7 @@ export function mountSourcesPanel(
       el(
         "div.sources__footer",
         {},
+        footDev,
         sigma,
         clipDot,
         rangeReadout,
@@ -223,17 +241,7 @@ export function mountSourcesPanel(
           coherent,
           "Round to bin"
         ),
-        el(
-          "label.sources__outonly",
-          {
-            title:
-              "Drive the DAC gap-free from the playing sources, with no " +
-              "capture (for feeding an external DUT). Analysis resumes when " +
-              "unchecked.",
-          },
-          outOnly,
-          "Output only"
-        )
+        outOnlyLabel
       )
   );
   host.append(section);
@@ -789,5 +797,23 @@ export function mountSourcesPanel(
     (on) => {
       coherent.checked = on;
     }
+  );
+
+  // Footer device prefix (issue #25 lot F3): scalar-only selection so
+  // shallowEq stays valid — the label moves only with focus/identity, the
+  // flag with the session count.
+  store.select(
+    (s) => ({
+      multi: liveSessionCount(s) >= 2,
+      label: `#${slotOfSessionKey(s.devices.focus) + 1} ${sessionLabel(s, s.devices.focus)}`,
+    }),
+    ({ multi, label }) => {
+      footDev.textContent = multi ? label : "";
+      // R3 keeps the one checkbox; at ≥ 2 devices its scope deserves words.
+      outOnlyLabel.title = multi
+        ? `${OUT_ONLY_TITLE} Applies to the focused device.`
+        : OUT_ONLY_TITLE;
+    },
+    shallowEq
   );
 }
