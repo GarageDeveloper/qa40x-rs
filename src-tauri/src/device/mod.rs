@@ -81,7 +81,7 @@ pub use id::{DeviceDescriptor, DeviceId, DeviceIdentity, SourceId, SourceKind, T
 pub use registry::{DeviceRegistry, OpenDevice};
 pub use runtime::{
     spawn_liveness_monitor, DeviceLost, DeviceRuntime, GeneratorFlags, OpenGeneration,
-    OpenUnitCell,
+    OpenUnitCell, ProgramGuard,
 };
 pub use source::{DeviceHandle, DeviceSource};
 pub use wire::{AddedDevice, DeviceEntry, DeviceList};

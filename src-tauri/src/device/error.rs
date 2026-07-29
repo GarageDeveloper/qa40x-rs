@@ -28,6 +28,14 @@ pub enum DeviceError {
     #[error("All device slots are in use")]
     NoFreeSlot,
 
+    /// The device's exclusive program gate is held (issue #25 lot F): a
+    /// measurement program is already running on THIS device. Fail-fast by
+    /// design — the frontend refuses a second program with a toast, so a
+    /// queued invoke parked behind a minutes-long sweep would read as a
+    /// hang, never as a refusal.
+    #[error("a measurement program is already running on this device")]
+    ProgramBusy,
+
     /// A source failed to enumerate or open (bus scan error, simulator
     /// already attached, ...).
     #[error("{0}")]
@@ -59,9 +67,9 @@ impl From<DeviceError> for QA40xError {
             DeviceError::UnknownDevice(id) => {
                 QA40xError::DeviceError(format!("Unknown device: {id}"))
             }
-            e @ (DeviceError::AlreadyOpen(_) | DeviceError::NoFreeSlot) => {
-                QA40xError::DeviceError(e.to_string())
-            }
+            e @ (DeviceError::AlreadyOpen(_)
+            | DeviceError::NoFreeSlot
+            | DeviceError::ProgramBusy) => QA40xError::DeviceError(e.to_string()),
             DeviceError::Source(s) => QA40xError::DeviceError(s),
             DeviceError::Device(e) => e,
         }

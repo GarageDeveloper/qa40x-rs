@@ -42,8 +42,10 @@ pub struct AppState {
     /// Bound localhost-only by default; the UI can expose it on the network.
     rest: Arc<Mutex<rest::RestControl>>,
     /// In-app Rhai scripting (task #22) — the scripting counterpart to the
-    /// REST server, sharing the default runtime's device handle (per-device
-    /// script selection is lot F).
+    /// REST server. Device-agnostic since issue #25 lot F: `script_run`
+    /// resolves its optional `device_id` to a runtime and hands the control
+    /// a session built from it (`None` ⇒ the default device, as
+    /// everywhere); only the bench-wide run/cancel flags live here.
     script: script::ScriptControl,
 }
 
@@ -54,16 +56,13 @@ impl AppState {
         // capture Arcs out of it at construction — sound because the
         // runtime is created once and never replaced.
         let devices = device::DeviceRegistry::new();
-        let rt = devices.default_runtime();
-        let device = rt.handle();
+        let device = devices.default_runtime().handle();
         Self {
             firmware_images: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            rest: Arc::new(Mutex::new(rest::RestControl::new(device.clone()))),
-            script: script::ScriptControl::new(
-                device,
-                rt.generator().running_flag().clone(),
-                rt.generator().stop_flag().clone(),
-            ),
+            rest: Arc::new(Mutex::new(rest::RestControl::new(device))),
+            // Holds no device (issue #25 lot F): `script_run` builds the
+            // session from the runtime its `device_id` resolves to.
+            script: script::ScriptControl::new(),
             devices,
         }
     }
@@ -441,19 +440,28 @@ async fn rest_set_token(
 }
 
 /// Run a Rhai automation script (task #22). Returns immediately; the run
-/// streams `script-log` / `script-state` events. One script at a time. The
-/// `role` selects the family (Traces V2 Phase E): a "source" script produces
-/// a signal (no device access); a "measurement" script (the default, for old
-/// callers) drives the instrument through an exclusive session.
+/// streams `script-log` / `script-state` events. One script at a time,
+/// bench-wide. The `role` selects the family (Traces V2 Phase E): a "source"
+/// script produces a signal (no device access); a "measurement" script (the
+/// default, for old callers) drives the instrument through an exclusive
+/// session — built here from the runtime `device_id` resolves to (issue #25
+/// lot F; `None` ⇒ the default device, every pre-lot-F caller unchanged).
 #[tauri::command]
 async fn script_run(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     source: String,
     role: Option<dashboard::ScriptRole>,
+    device_id: Option<String>,
 ) -> Result<(), String> {
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    let session = measurement::Session::new(
+        rt.handle(),
+        rt.generator().running_flag().clone(),
+        rt.generator().stop_flag().clone(),
+    );
     let ctl = { state.lock().await.script.clone() };
-    ctl.start(app, source, role.unwrap_or_default())
+    ctl.start(app, session, source, role.unwrap_or_default())
 }
 
 /// Request the running script to stop (takes effect at its next operation).
@@ -932,6 +940,9 @@ async fn measure_frequency_response_multi(
 ) -> Result<Vec<qa40x::FrequencyResponseTrace>, String> {
     use measurement::MeasurementProgram;
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F) — held to the end
+    // of the command, fail-fast on contention.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let mut session = measurement::Session::new(
         rt.handle(),
         rt.generator().running_flag().clone(),
@@ -972,6 +983,12 @@ async fn run_thd_batch(
     input_channel: qa40x::Channel,
     swept: &str,
     cancel: &Arc<AtomicBool>,
+    // The swept unit's id, stamped into every progress payload (issue #25
+    // lot F): with programs running concurrently on different devices, the
+    // frontend routes each event to ITS program. Additive JSON field — an
+    // old frontend ignores it. `None` only for a device opened outside the
+    // registry.
+    device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     // A fresh batch consumes any stale stop click from a previous run.
     cancel.store(false, Ordering::SeqCst);
@@ -983,7 +1000,7 @@ async fn run_thd_batch(
     let total = pts_spec.len();
     let _ = app.emit(
         "thd-sweep-progress",
-        serde_json::json!({ "done": 0, "total": total }),
+        serde_json::json!({ "done": 0, "total": total, "device_id": device_id }),
     );
 
     // Build one concatenated tone buffer of coherent (bin-snapped) segments.
@@ -1035,7 +1052,7 @@ async fn run_thd_batch(
         });
         let _ = app.emit(
             "thd-sweep-progress",
-            serde_json::json!({ "done": i + 1, "total": total, "frequency": *f_bin, "level": *dbfs }),
+            serde_json::json!({ "done": i + 1, "total": total, "frequency": *f_bin, "level": *dbfs, "device_id": device_id }),
         );
     }
 
@@ -1060,6 +1077,10 @@ async fn measure_thd_vs_frequency(
     device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F): claimed BEFORE the
+    // batch's sweep_cancel clear, so a stale-Stop consume can never wipe a
+    // Stop meant for another program in flight on this device.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -1094,6 +1115,7 @@ async fn measure_thd_vs_frequency(
         input_channel,
         "frequency",
         &sweep_cancel,
+        rt.device_id().map(|id| id.as_str().to_string()),
     )
     .await
 }
@@ -1117,6 +1139,9 @@ async fn measure_thd_vs_level(
     device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F) — same rationale as
+    // measure_thd_vs_frequency.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -1148,6 +1173,7 @@ async fn measure_thd_vs_level(
         input_channel,
         "level",
         &sweep_cancel,
+        rt.device_id().map(|id| id.as_str().to_string()),
     )
     .await
 }
@@ -1171,6 +1197,12 @@ async fn measure_wow_flutter(
     device_id: Option<String>,
 ) -> Result<audio::WowFlutterResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F): the gate is
+    // claimed BEFORE the stale-Stop consume below, closing the lot-C
+    // soundness caveat — a W&F invoke arriving while a THD batch holds the
+    // device is refused here and can no longer wipe the batch's pending
+    // Stop.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     // A fresh call consumes any stale Stop click from a previous run (same
@@ -1213,6 +1245,8 @@ async fn measure_levels(
     device_id: Option<String>,
 ) -> Result<audio::LevelResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F).
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
     let device = device.lock().await;
@@ -1536,6 +1570,54 @@ mod command_arg_tests {
         assert!(
             format!("{err:?}").contains("Unknown device: usb/NOPE"),
             "unexpected error payload: {err:?}"
+        );
+    }
+
+    /// The lot-C soundness caveat, closed by lot F's program gate and pinned
+    /// through the REAL IPC layer: `measure_wow_flutter` clears the shared
+    /// `sweep_cancel` on entry ("a fresh call consumes any stale Stop
+    /// click"), so before the gate existed, a W&F invoke landing while a THD
+    /// batch held the device WIPED the batch's pending Stop. Now the gate is
+    /// claimed BEFORE the clear: the invoke is refused (`ProgramBusy`,
+    /// fail-fast — never queued behind a minutes-long sweep) and the pending
+    /// Stop survives for the program that owns it.
+    #[test]
+    fn a_program_invoke_cannot_wipe_a_pending_stop_while_another_program_holds_the_device() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let rt = state.blocking_lock().devices.default_runtime();
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![measure_wow_flutter])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        // A THD batch is in flight on this device: it holds the program gate
+        // and the user has clicked Stop (the pending cooperative cancel).
+        let _batch = rt.try_program_lock().expect("the gate starts free");
+        rt.cancel_sweep();
+
+        let err = invoke(
+            &webview,
+            "measure_wow_flutter",
+            serde_json::json!({
+                "referenceFreq": 3150.0,
+                "durationSecs": 1.0,
+                "outputChannel": "Left",
+                "inputChannel": "Left",
+                "generate": true,
+            }),
+        )
+        .expect_err("a second program on the same device must be refused");
+        assert!(
+            format!("{err:?}").contains("a measurement program is already running on this device"),
+            "unexpected error payload: {err:?}"
+        );
+        assert!(
+            rt.sweep_cancel().load(Ordering::SeqCst),
+            "the refused invoke must not have consumed the batch's pending Stop"
         );
     }
 

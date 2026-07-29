@@ -106,14 +106,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position, AST};
 use tauri::Emitter;
-use tokio::sync::Mutex;
 
 use crate::audio::{FftProcessor, WindowFunction};
 use crate::dashboard::{Frame, ScriptRole, SweepCurve};
 use crate::measurement::{
     Band, CancelToken, Fundamental, LeftRight, MeasurementProgram, Session, SessionConfig,
 };
-use crate::qa40x::{AudioData, InputGain, OutputGain, QA40xDevice, SampleRate};
+use crate::qa40x::{AudioData, InputGain, OutputGain, SampleRate};
 use crate::rest;
 use crate::sources::{route_stimulus, Route, Waveform};
 
@@ -1025,28 +1024,21 @@ pub fn run_transform(source: &str, frame: &Frame) -> Result<Frame, String> {
 /// Owns the run/cancel flags and launches script runs. Cloneable (all shared
 /// state is behind `Arc`s) so Tauri commands can grab it without holding the
 /// AppState lock.
-#[derive(Clone)]
+///
+/// Holds NO device (issue #25 lot F): the caller builds the [`Session`] from
+/// the runtime its `device_id` resolved to and hands it to [`Self::start`] —
+/// so scripting is no longer hard-wired to slot 0's handle. The run/cancel
+/// flags stay bench-wide: one script at a time across all devices, by
+/// design.
+#[derive(Clone, Default)]
 pub struct ScriptControl {
-    device: Arc<Mutex<QA40xDevice>>,
-    generator_running: Arc<AtomicBool>,
-    generator_stop: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 }
 
 impl ScriptControl {
-    pub fn new(
-        device: Arc<Mutex<QA40xDevice>>,
-        generator_running: Arc<AtomicBool>,
-        generator_stop: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            device,
-            generator_running,
-            generator_stop,
-            running: Arc::new(AtomicBool::new(false)),
-            cancel: Arc::new(AtomicBool::new(false)),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn is_running(&self) -> bool {
@@ -1062,12 +1054,16 @@ impl ScriptControl {
 
     /// Start `source` in its family: a *source* script runs on a blocking
     /// thread with the device-free engine; a *measurement* script runs as a
-    /// [`MeasurementScript`] program against an exclusive session. Output,
-    /// emitted frames, and completion stream to the frontend as `script-log` /
-    /// `script-frame` / `script-state` events. One script at a time.
+    /// [`MeasurementScript`] program against `session` — the exclusive
+    /// device session the CALLER built from its resolved runtime (issue #25
+    /// lot F: device selection lives at the command layer). Output, emitted
+    /// frames, and completion stream to the frontend as `script-log` /
+    /// `script-frame` / `script-state` events. One script at a time,
+    /// bench-wide.
     pub fn start(
         &self,
         app: tauri::AppHandle,
+        session: Session,
         source: String,
         role: ScriptRole,
     ) -> Result<(), String> {
@@ -1091,12 +1087,6 @@ impl ScriptControl {
         let capture_sink: CaptureSink = Arc::new(move |cap: &ScriptCapture| {
             let _ = capture_app.emit("script-acquire", cap);
         });
-        let session = Session::new(
-            self.device.clone(),
-            self.generator_running.clone(),
-            self.generator_stop.clone(),
-        );
-
         let _ = app.emit("script-state", ScriptState { running: true, error: None });
         let running = self.running.clone();
         match role {
@@ -1152,6 +1142,8 @@ fn finish_run(app: &tauri::AppHandle, running: &Arc<AtomicBool>, res: Result<(),
 mod tests {
     use super::*;
     use crate::measurement::GenConfig;
+    use crate::qa40x::QA40xDevice;
+    use tokio::sync::Mutex;
 
     /// Captured output lines + emitted frames + the environment. The runtime
     /// must outlive the env (device calls are driven through its handle), so it
