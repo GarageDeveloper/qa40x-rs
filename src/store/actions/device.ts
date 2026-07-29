@@ -6,7 +6,7 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, LevelOffsetsDb, RunState, SessionKey } from "../state";
-import { SLOT0, sessionKeyForSlot, slotOfSessionKey } from "../state";
+import { SLOT0, hwTraceIds, sessionKeyForSlot, slotOfSessionKey } from "../state";
 import { addableEntries, autoConnectDeviceId } from "../selectors/devices";
 import {
   isRoutable,
@@ -16,7 +16,9 @@ import {
   updateRun,
 } from "../selectors/session";
 import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
-import { disposeSession, syncAllStreams, syncStream } from "./stream";
+import { syncAllDacOwners } from "./outputonly";
+import { dropSourceTargetsForSlot } from "./sources";
+import { disposeSession, syncStream } from "./stream";
 import {
   purgeSlotEndpointTraces,
   reconcileHwTraces,
@@ -249,6 +251,14 @@ export async function disconnect(
   // OTHER device (E4 review #1). Refuse the whole gesture; the id is one
   // enumeration away.
   if (!isRoutable(store.get(), sessionKey)) return;
+  // Program-lock guard (lot F2, the F1 bookkeeping item): the UI disables
+  // its Disconnect affordances under the session's lock, but REST/debug
+  // callers reach this action directly — an eviction mid-program releases
+  // anyProgramLock early and strands the orphaned invoke (F1 review #5).
+  if (session(store.get(), sessionKey)?.run.programLock) {
+    toast(store, "info", "A measurement is running on this device — stop it first.");
+    return;
+  }
   try {
     // The backend stops the stream loop / generator BEFORE closing the
     // device (a clean Stopped reaches the channel — no capture error).
@@ -256,24 +266,53 @@ export async function disconnect(
     // Disconnect); E4's group headers pass their own session key.
     await ipc.call("disconnect_device", sessionArgs(store.get(), sessionKey));
   } finally {
-    store.update("device/disconnected", (s) =>
-      updateRun(
-        updateDevice(s, sessionKey, (d) => ({
-          ...d,
-          status: "disconnected",
-          // Manual disconnect: hold off auto-reconnect until a manual connect.
-          userDisconnected: true,
-          info: null,
-          config: null,
-          telemetry: null,
-          offsets: null,
-        })),
-        sessionKey,
-        runStoppedByDisconnect
-      )
-    );
+    if (sessionKey === SLOT0) {
+      store.update("device/disconnected", (s) =>
+        updateRun(
+          updateDevice(s, sessionKey, (d) => ({
+            ...d,
+            status: "disconnected",
+            // Manual disconnect: hold off auto-reconnect until a manual connect.
+            userDisconnected: true,
+            info: null,
+            config: null,
+            telemetry: null,
+            offsets: null,
+          })),
+          sessionKey,
+          runStoppedByDisconnect
+        )
+      );
+    } else {
+      // Evict-on-disconnect for slot ≥ 1 (lot F2): a disconnected added
+      // device renders exactly like a disconnected slot-0 one — a dormant,
+      // named group with its rows intact and a one-click revive — instead
+      // of a live-but-dead session with different chrome. Traces stay
+      // (D1), source targets stay (the revive reopens the same unit on the
+      // same slot); the module maps and the session go.
+      disposeSession(sessionKey);
+      store.update("device/disconnect-evicted", (s) => dropSession(s, sessionKey));
+      // A focus that sat on this key fell back — wire-visible for BOTH
+      // DAC-owner kinds (the F2 focus-atomicity rule).
+      syncAllDacOwners(store, ipc);
+    }
   }
   void refreshDevices(store, ipc);
+}
+
+/** The model+serial a slot's endpoint rows persist (their capture
+ * snapshot — stamped at add and at every ingest), or null when no row
+ * carries one. The add flow compares it against the unit it just opened
+ * (lot F2, decision D5). */
+function slotEndpointIdentity(
+  s: AppState,
+  slot: number
+): { model: string; serial: string } | null {
+  for (const id of Object.values(hwTraceIds(slot))) {
+    const d = s.traces.byId[id]?.capture?.device;
+    if (d) return { model: d.model, serial: d.serial };
+  }
+  return null;
 }
 
 /** Run-state mirror of a disconnect: nothing drives the DAC anymore, and
@@ -324,6 +363,10 @@ export async function addDevice(
       ...(opts.slot !== undefined ? { slot: opts.slot } : {}),
     });
     const key = sessionKeyForSlot(slot);
+    // The slot's PERSISTED identity, read before the fresh slate zeroes it:
+    // compared against the opened unit below (lot F2, decision D5) — a
+    // doc-pinned stimulus must not re-bind onto a different converter.
+    const prior = slotEndpointIdentity(store.get(), slot);
     store.update("devices/mint-session", (s) => mintSession(s, slot, device_id));
     store.update("traces/reconcile-hw", reconcileHwTraces);
     resetSlotEndpointTraces(store, slot);
@@ -336,6 +379,21 @@ export async function addDevice(
     // save/restart must still leave its model+serial on its endpoint rows,
     // or the dormant group's one-click revive has nothing to match.
     if (info) stampSlotEndpointIdentity(store, slot, info);
+    // A DIFFERENT unit landed on a slot whose doc pinned a stimulus to the
+    // previous tenant (lot F2, decision D5): drop that slot's source
+    // targets — the evict→re-add path is reachable via a loaded doc even
+    // before F3 ships a target-editing UI. Same model+serial (the revive
+    // path) keeps them.
+    if (
+      info &&
+      prior &&
+      (prior.model !== info.model || prior.serial !== info.serial)
+    ) {
+      store.update("sources/drop-slot-targets", (s) =>
+        dropSourceTargetsForSlot(s, slot)
+      );
+      syncAllDacOwners(store, ipc);
+    }
     // EXPLICIT scope, not the session-keyed read (review #5): a stale
     // enumeration landing mid-add can transiently clear the adopted id,
     // and the gated read would then silently skip — leaving config and
@@ -368,6 +426,14 @@ export async function removeDevice(
   key: SessionKey
 ): Promise<void> {
   if (key === SLOT0) return;
+  // Program-lock guard (lot F2, the F1 bookkeeping item): the E4 group-✕
+  // button is disabled under the session's lock, but REST/debug callers
+  // reach the action directly — see disconnect() for the F1-review-#5
+  // hazard this closes.
+  if (session(store.get(), key)?.run.programLock) {
+    toast(store, "info", "A measurement is running on this device — stop it first.");
+    return;
+  }
   const slot = slotOfSessionKey(key);
   const sess = session(store.get(), key);
   if (sess) {
@@ -383,12 +449,17 @@ export async function removeDevice(
     }
     disposeSession(key);
     store.update("devices/drop-session", (s) => dropSession(s, key));
-    // A focus that sat on the dropped key fell back to another session —
-    // wire-visible (the DAC program follows the focus): re-sync every
-    // running stream in this same gesture, like setFocusedSession does.
-    syncAllStreams(store, ipc);
   }
   purgeSlotEndpointTraces(store, ipc, slot);
+  // The stimulus twin of the trace purge (lot F2, decision D5): targets
+  // pinned to a REMOVED slot go with it — the slot's next tenant may be a
+  // physically different converter/DUT. Applies to the dormant-group purge
+  // too (no session, just dead rows and a doc-pinned route).
+  store.update("sources/drop-slot-targets", (s) => dropSourceTargetsForSlot(s, slot));
+  // A focus that sat on the dropped key fell back, and the target drop can
+  // have emptied a running loop's slot set — wire-visible for BOTH DAC-owner
+  // kinds (the F2 focus-atomicity rule), like setFocusedSession.
+  syncAllDacOwners(store, ipc);
   void refreshDevices(store, ipc);
 }
 
@@ -443,11 +514,14 @@ export function deviceLost(
   if (key !== SLOT0) {
     // Eviction (E4): teardown of the module maps first (a late frame from
     // the dead channel must find its gen counter gone), then the store
-    // drop. A focus on the lost key fell back — wire-visible, so every
-    // surviving stream re-syncs in this same gesture.
+    // drop. A focus on the lost key fell back — wire-visible for BOTH
+    // DAC-owner kinds since lot F2 (a surviving session's generator can
+    // inherit the default-target sources), so streams AND generators
+    // re-sync in this same gesture. Traces and source targets stay (D1):
+    // a replug revives the same unit on the same slot.
     disposeSession(key);
     store.update("device/lost-evicted", (s) => dropSession(s, key));
-    syncAllStreams(store, ipc);
+    syncAllDacOwners(store, ipc);
     toast(store, "info", "Device disconnected");
     return;
   }

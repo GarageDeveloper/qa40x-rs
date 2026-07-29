@@ -30,7 +30,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { AddedDevice } from "../../gen";
 import { hwTraceIds } from "../hwtraces";
 import { fakeEntry } from "./devices.fixtures";
-import { addDevice, removeDevice } from "./device";
+import { addDevice, disconnect, removeDevice } from "./device";
 import { reconcileHwTraces, stampSlotEndpointIdentity } from "./traces";
 import { snapshotWorkspace } from "../persist";
 import { applyWorkspaceDoc } from "./workspace";
@@ -433,5 +433,193 @@ describe("addDevice — a never-streamed device's identity survives for the revi
 
     expect(reviveCandidateId(boot.get(), 1)).toBe(VIRT_ID);
     expect(dormantGroupLabel(boot.get(), 1)).toBe("QA403 · 0DE0_0002 (virtual)");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Lot F2 (issue #25): evict-on-disconnect, program-lock guards, and    */
+/* the source-target drops (decision D5).                              */
+/* ------------------------------------------------------------------ */
+
+function withSlot1Target(s: AppState): AppState {
+  return {
+    ...s,
+    sources: {
+      ...s.sources,
+      byId: {
+        ...s.sources.byId,
+        "src-sine-1": {
+          ...s.sources.byId["src-sine-1"],
+          targets: [
+            { slot: 1, route: "both" as const },
+            { slot: null, route: "left" as const },
+          ],
+        },
+      },
+    },
+  };
+}
+
+describe("disconnect of a slot ≥ 1 session EVICTS it (issue #25 lot F2) — one lifecycle for every slot", () => {
+  const info = {
+    model: "QA403",
+    firmware_version: 60,
+    serial: "0DE0_0002",
+    product: "QA403 Audio Analyzer (virtual)",
+    sample_rates: [48000, 96000, 192000, 384000],
+    supports_flash: false,
+    capabilities: {} as never,
+    is_virtual: true,
+  };
+
+  it("evicts the session, keeps the dormant rows WITH their revive identity, keeps the slot's source targets", async () => {
+    const store = slot1Store();
+    stampSlotEndpointIdentity(store, 1, info);
+    store.update("test/pin-target", withSlot1Target);
+    const { ipc, calls } = fakeIpc();
+    await disconnect(store, ipc, "slot-1");
+    const s = store.get();
+    // Session gone — the group renders dormant, like a disconnected slot 0.
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(calls).toContainEqual(["disconnect_device", { deviceId: "usb/B" }]);
+    // Rows survive with their identity: the one-click revive still matches.
+    expect(s.traces.byId["hw-in-left@1"]).toBeDefined();
+    expect(s.traces.byId["hw-in-left@1"].capture?.device?.serial).toBe("0DE0_0002");
+    // Targets survive too: the revive reopens the SAME unit on the SAME slot.
+    expect(s.sources.byId["src-sine-1"].targets).toContainEqual({ slot: 1, route: "both" });
+  });
+
+  it("slot 0 keeps the historic mark-disconnected shape (session stays, status flips)", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/slot0-connected", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          [SLOT0]: {
+            ...s.devices.sessions[SLOT0],
+            device: { ...s.devices.sessions[SLOT0].device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+    const { ipc } = fakeIpc();
+    await disconnect(store, ipc, SLOT0);
+    const sess = store.get().devices.sessions[SLOT0];
+    expect(sess).toBeDefined();
+    expect(sess.device.status).toBe("disconnected");
+    expect(sess.device.userDisconnected).toBe(true);
+  });
+});
+
+describe("program-lock guards on the deliberate teardown paths (issue #25 lot F2 — F1 review #5)", () => {
+  function lockedSlot1Store() {
+    const store = slot1Store();
+    store.update("test/lock-slot1", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...s.devices.sessions["slot-1"],
+            run: { ...s.devices.sessions["slot-1"].run, programLock: "prog-1" },
+          },
+        },
+      },
+    }));
+    return store;
+  }
+
+  it("disconnect refuses under the session's own lock — no wire call, session intact, info toast", async () => {
+    const store = lockedSlot1Store();
+    const { ipc, calls } = fakeIpc();
+    await disconnect(store, ipc, "slot-1");
+    expect(calls).toEqual([]);
+    expect(store.get().devices.sessions["slot-1"]).toBeDefined();
+    expect(
+      store.get().ui.toasts.some((t) => t.kind === "info" && /measurement is running/.test(t.message))
+    ).toBe(true);
+  });
+
+  it("removeDevice refuses the same way — the E4 ✕ is disabled, but REST/debug callers reach the action directly", async () => {
+    const store = lockedSlot1Store();
+    const { ipc, calls } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(calls).toEqual([]);
+    expect(store.get().devices.sessions["slot-1"]).toBeDefined();
+    expect(store.get().traces.byId["hw-in-left@1"]).toBeDefined(); // no purge either
+  });
+});
+
+describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus twin of the trace purge", () => {
+  it("removeDevice drops the slot's pinned targets and leaves the rest of the matrix alone", async () => {
+    const store = slot1Store();
+    store.update("test/pin-target", withSlot1Target);
+    const { ipc } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
+      { slot: null, route: "left" },
+    ]);
+  });
+
+  const oldUnit = {
+    model: "QA403",
+    firmware_version: 60,
+    serial: "OLD-0001",
+    product: "QA403 Audio Analyzer",
+    sample_rates: [48000, 96000, 192000, 384000],
+    supports_flash: false,
+    capabilities: {} as never,
+    is_virtual: false,
+  };
+
+  /** Dormant slot-1 rows carrying OLD-0001's identity + a target pinned to
+   * slot 1, no live slot-1 session — the "doc loaded, then add" shape. */
+  function dormantWithIdentity(): Store<AppState> {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/dormant-slot1", (s) =>
+      reconcileHwTraces({
+        ...s,
+        devices: {
+          ...s.devices,
+          sessions: { ...s.devices.sessions, "slot-1": initialSession(1) },
+        },
+      })
+    );
+    stampSlotEndpointIdentity(store, 1, oldUnit);
+    store.update("test/drop-session-only", (s) => {
+      const sessions = { ...s.devices.sessions };
+      delete sessions["slot-1"];
+      return withSlot1Target({ ...s, devices: { ...s.devices, sessions } });
+    });
+    return store;
+  }
+
+  it("addDevice onto a slot whose persisted identity names a DIFFERENT unit drops that slot's targets", async () => {
+    const store = dormantWithIdentity();
+    const { ipc } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/NEW", slot: 1 }) as AddedDevice,
+      get_device_info: () => ({ ...oldUnit, serial: "NEW-0002" }),
+    });
+    await addDevice(store, ipc, "usb/NEW", { slot: 1 });
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
+      { slot: null, route: "left" },
+    ]);
+  });
+
+  it("the revive path — SAME model+serial — keeps the pinned targets", async () => {
+    const store = dormantWithIdentity();
+    const { ipc } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/OLD", slot: 1 }) as AddedDevice,
+      get_device_info: () => oldUnit,
+    });
+    await addDevice(store, ipc, "usb/OLD", { slot: 1 });
+    expect(store.get().sources.byId["src-sine-1"].targets).toContainEqual({
+      slot: 1,
+      route: "both",
+    });
   });
 });

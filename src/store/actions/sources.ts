@@ -106,6 +106,27 @@ function syncSourcesEverywhere(store: Store<AppState>, ipc: Ipc): void {
   }
 }
 
+/**
+ * Drop every source target pinned to `slot` — PURE, the stimulus twin of
+ * the endpoint-trace purge (issue #25 lot F2, decision D5): when a slot's
+ * device is removed (group ✕) or the slot is re-minted for a unit whose
+ * identity differs from the doc's, a pinned stimulus silently re-binding
+ * onto a physically different converter/DUT is worse than the display
+ * re-bind the trace purge (B5) already refuses. Callers own the DAC
+ * re-sync (the drop can silence a running loop's slot set).
+ */
+export function dropSourceTargetsForSlot(s: AppState, slot: number): AppState {
+  let byId: Record<string, SourceMeta> | null = null;
+  for (const [id, src] of Object.entries(s.sources.byId)) {
+    if (!src.targets.some((t) => t.slot === slot)) continue;
+    (byId ??= { ...s.sources.byId })[id] = {
+      ...src,
+      targets: src.targets.filter((t) => t.slot !== slot),
+    };
+  }
+  return byId ? { ...s, sources: { ...s.sources, byId } } : s;
+}
+
 export function addSource(store: Store<AppState>, ipc: Ipc, kind: SourceKind): string {
   // The counter is module state but ids may come back from a LOADED
   // workspace (M5) — skip past any id already in the pool.
