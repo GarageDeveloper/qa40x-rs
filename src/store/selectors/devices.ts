@@ -163,6 +163,22 @@ export function reviveCandidateId(s: AppState, slot: number): string | null {
   return null;
 }
 
+/**
+ * A DORMANT group's display identity, from its endpoints' persisted capture
+ * (issue #25 lot F, Raphaël's F1-validation round): the unit that produced
+ * the rows — `"QA403 · 0DE0_0002 (virtual)"` — instead of the anonymous
+ * `Device #2` placeholder, so a restart leaves the group recognizable next
+ * to its enabled revive. Null when the group never had an identity (the
+ * slot-derived placeholder stays — never another unit's name).
+ */
+export function dormantGroupLabel(s: AppState, slot: number): string | null {
+  for (const id of Object.values(hwTraceIds(slot))) {
+    const dev = s.traces.byId[id]?.capture?.device;
+    if (dev) return `${dev.model} · ${dev.serial}${dev.isVirtual ? " (virtual)" : ""}`;
+  }
+  return null;
+}
+
 /** A session's display name for group headers and the focus selector:
  * alias-aware unit label when the registry entry is known, else the
  * session's own DeviceMeta identity, else a slot-derived placeholder

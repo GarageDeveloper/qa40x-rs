@@ -21,6 +21,7 @@ import {
   purgeSlotEndpointTraces,
   reconcileHwTraces,
   resetSlotEndpointTraces,
+  stampSlotEndpointIdentity,
 } from "./traces";
 import { toast } from "./ui";
 
@@ -324,6 +325,11 @@ export async function addDevice(
     store.update("device/added", (s) =>
       updateDevice(s, key, (d) => ({ ...d, status: "connected", present: true, info }))
     );
+    // Identity from the OPEN, not just from frames (lot F, Raphaël's
+    // validation): an added device that never streams before the next
+    // save/restart must still leave its model+serial on its endpoint rows,
+    // or the dormant group's one-click revive has nothing to match.
+    if (info) stampSlotEndpointIdentity(store, slot, info);
     // EXPLICIT scope, not the session-keyed read (review #5): a stale
     // enumeration landing mid-add can transiently clear the adopted id,
     // and the gated read would then silently skip — leaving config and

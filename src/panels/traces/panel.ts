@@ -23,6 +23,7 @@ import { deviceGroups, ungroupedTraceIds } from "../../store/selectors/traces";
 import {
   addableEntries,
   deviceLabel,
+  dormantGroupLabel,
   reviveCandidateId,
   sessionInputRanges,
   sessionLabel,
@@ -142,7 +143,12 @@ export function mountTracesPanel(
             slot: g.slot,
             live: g.live,
             deviceId: g.deviceId,
-            label: sessionLabel(s, g.key),
+            // A dormant group (no session) names the unit its persisted
+            // capture identifies — never the anonymous "Device #N" while
+            // the revive knows exactly which unit it would reopen.
+            label: g.live
+              ? sessionLabel(s, g.key)
+              : dormantGroupLabel(s, g.slot) ?? sessionLabel(s, g.key),
             alias: g.deviceId !== null ? s.devices.aliases[g.deviceId] ?? "" : "",
             status: sess?.device.status ?? "disconnected",
             // Deliberately NO per-frame field here (run.stats, telemetry):
