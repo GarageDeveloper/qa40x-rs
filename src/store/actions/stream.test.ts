@@ -1211,6 +1211,104 @@ describe("startRun/stopRun — per-session sequencing (issue #25 lot E2)", () =>
   });
 });
 
+describe("startRun's playAllIfIdle fan-out reaches OTHER sessions (F2 review SHOULD-FIX #4)", () => {
+  beforeEach(() => __resetSessionGlobals());
+
+  it("flipping EVERY source's playing flag re-syncs another already-streaming session whose doc-pinned target just started playing — a monitoring device must not keep an empty slot set until some unrelated edit syncs it", async () => {
+    let s = initialState();
+    s = withDevice(s, { status: "connected" }); // slot 0: about to Run, idle
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+            run: { ...initialSession(1).run, streaming: true }, // ALREADY streaming
+          },
+        },
+      },
+      sources: {
+        order: ["a"],
+        byId: {
+          // Paused, pinned to slot 1 only — NOT the session Run is about to
+          // start (slot 0), so this source's own play/pause fan-out
+          // (sources.ts::setSourcePlaying) never runs; only startRun's
+          // playAllIfIdle sweep flips it.
+          a: sineSource("a", { playing: false, targets: [{ slot: 1, route: "both" }] }),
+        },
+      },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const calls: [string, unknown][] = [];
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        return Promise.resolve(null as never);
+      },
+    };
+
+    await startRun(store, ipc, { sessionKey: SLOT0, playAllIfIdle: true });
+
+    // The idle-bench guard played every source, including the one pinned
+    // to the OTHER device.
+    expect(store.get().sources.byId["a"].playing).toBe(true);
+
+    // slot-1's running stream re-synced WITH the newly-playing source
+    // aboard — not left showing the stale (empty, pre-flip) slot set.
+    const upd = calls.find(([m]) => m === "stream_update");
+    expect(upd).toBeDefined();
+    const args = upd![1] as { deviceId?: string; config: { slots: unknown[] } };
+    expect(args.deviceId).toBe("usb/B");
+    expect(args.config.slots).toHaveLength(1);
+  });
+
+  it("a session with NOTHING routed onto it stays untouched by the sweep (no stream_update for an unaffected device)", async () => {
+    let s = initialState();
+    s = withDevice(s, { status: "connected" });
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            deviceId: "usb/B",
+            device: { ...initialSession(1).device, status: "connected" as const },
+            run: { ...initialSession(1).run, streaming: true },
+          },
+        },
+      },
+      sources: {
+        // Default target only — resolves onto the FOCUSED session (slot 0),
+        // never onto slot-1.
+        order: ["a"],
+        byId: { a: sineSource("a", { playing: false }) },
+      },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const calls: [string, unknown][] = [];
+    const ipc: Ipc = {
+      call: (method: string, args?: unknown) => {
+        calls.push([method, args]);
+        return Promise.resolve(null as never);
+      },
+    };
+
+    await startRun(store, ipc, { sessionKey: SLOT0, playAllIfIdle: true });
+
+    const upd = calls.find(([m]) => m === "stream_update");
+    expect(upd).toBeDefined();
+    const args = upd![1] as { deviceId?: string; config: { slots: unknown[] } };
+    expect(args.deviceId).toBe("usb/B");
+    expect(args.config.slots).toEqual([]); // still nothing routed here
+  });
+});
+
 describe("stopRun — F8: 'Unknown device' rejection is swallowed, not toasted (issue #25 lot E2)", () => {
   beforeEach(() => __resetSessionGlobals());
 

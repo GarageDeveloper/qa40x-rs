@@ -759,6 +759,59 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
     expect(calls.some(([m]) => m === "output_only_start")).toBe(true);
     expect(store.get().ui.toasts).toHaveLength(0);
   });
+
+  it("the fan-out never touches a LOCKED session elsewhere (F2 review MUST-FIX #1, reached through syncAllDacOwners) — a program owns that device exclusively, even when a pinned target routes a playing source onto it", async () => {
+    const base = twoSessions({ slot0: false, slot1: false });
+    const store = new Store<AppState>(
+      {
+        ...base,
+        devices: {
+          ...base.devices,
+          sessions: {
+            ...base.devices.sessions,
+            // slot-2: a THIRD session, output-only and LOCKED by a running
+            // program — output_only_start's own MUST-FIX #1 gate refuses a
+            // rebuild queued against it directly (outputonly.test.ts pins
+            // that unit). This test proves the same refusal holds when the
+            // rebuild arrives via a focus change's bench-global fan-out.
+            "slot-2": {
+              ...initialSession(2),
+              deviceId: "usb/C",
+              device: { ...initialSession(2).device, status: "connected" as const },
+              run: {
+                ...initialSession(2).run,
+                outputOnly: true,
+                generatorRunning: false,
+                programLock: "prog-1",
+              },
+            },
+          },
+        },
+        sources: {
+          order: ["src-sine-1"],
+          byId: {
+            "src-sine-1": {
+              ...base.sources.byId["src-sine-1"],
+              playing: true,
+              targets: [{ slot: 2, route: "both" }], // pinned onto the LOCKED device
+            },
+          },
+        },
+      },
+      { freeze: true }
+    );
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.get().devices.focus).toBe("slot-1");
+    // No wire call of ANY kind named the locked device's id — not a rebuild
+    // (output_only_start), not a stop, nothing.
+    expect(calls.some(([, a]) => (a as { deviceId?: string } | undefined)?.deviceId === "usb/C")).toBe(
+      false
+    );
+    // Store-side: the locked session's generator never flipped on.
+    expect(store.get().devices.sessions["slot-2"].run.generatorRunning).toBe(false);
+  });
 });
 
 describe("wire-verb isRoutable gates (E4 review #1) — an unroutable slot ≥ 1 key must never fall through to the default runtime", () => {

@@ -14,6 +14,7 @@ import { initialSession, initialState, SLOT0 } from "../state";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { setOutputOnly, syncAllOutputOnly, syncOutputOnly } from "./outputonly";
 import { setSourceLevel } from "./sources";
+import { disposeSession } from "./stream";
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
@@ -251,6 +252,36 @@ describe("program lock vs the generator path (F2 review MUST-FIX #1)", () => {
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();
     syncOutputOnly(store, ipc, "slot-1");
+    await flush();
+    expect(calls.map((c) => c.cmd)).toEqual(["output_only_start"]);
+  });
+});
+
+describe("disposeSession clears THIS module's rebuild-chain entry (issue #25 lot F2 review note #8 — the 'per-session module maps get disposed' rule)", () => {
+  it("a session re-minted on the SAME key starts its OWN fresh chain — it is not queued behind the evicted session's still-pending rebuild", async () => {
+    let s = twoSessionState();
+    s = withRun(s, { outputOnly: true }, SLOT0);
+    s.sources = { order: ["a"], byId: { a: sine("a") } }; // default target -> SLOT0
+
+    const store = new Store<AppState>(s, { freeze: true });
+
+    // A rebuild whose wire call never settles — simulates an in-flight
+    // output_only_start still on the wire the instant the session is torn
+    // down (device removed / lost mid-rebuild). Without the disposer this
+    // chain entry lives forever, and every future syncOutputOnly(SLOT0)
+    // would queue silently behind it.
+    const hangingIpc: Ipc = { call: () => new Promise(() => {}) };
+    syncOutputOnly(store, hangingIpc, SLOT0);
+    await flush(); // the chain now holds a promise that will NEVER resolve
+
+    disposeSession(SLOT0);
+
+    // The re-mint's first rebuild, on a NORMAL (resolving) ipc — if the
+    // disposer had not cleared the chain entry, this would queue behind the
+    // hanging promise above and never fire; it must complete within one
+    // flush.
+    const { ipc, calls } = recordingIpc();
+    syncOutputOnly(store, ipc, SLOT0);
     await flush();
     expect(calls.map((c) => c.cmd)).toEqual(["output_only_start"]);
   });

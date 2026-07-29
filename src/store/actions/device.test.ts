@@ -622,6 +622,19 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
       route: "both",
     });
   });
+
+  it("get_device_info answering null (identity UNKNOWN, not merely different) also drops the slot's targets — fail CLOSED per review SHOULD-FIX #5: an unproven identity must never let a pinned stimulus re-bind onto whatever unit took the slot", async () => {
+    const store = dormantWithIdentity();
+    const { ipc } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/UNKNOWN", slot: 1 }) as AddedDevice,
+      get_device_info: () => null,
+    });
+    await addDevice(store, ipc, "usb/UNKNOWN", { slot: 1 });
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
+      { slot: null, route: "left" },
+    ]);
+  });
 });
 
 describe("slot-0 disconnect stays the wedged-sweep escape hatch (F2 review MUST-FIX #2)", () => {
