@@ -19,6 +19,7 @@ import type {
   SourceKind,
   SourceMeta,
   SourceRoute,
+  SourceTarget,
 } from "../state";
 import { focusedDevice, focusedRun } from "../selectors/session";
 import { startRun, syncStream } from "./stream";
@@ -68,7 +69,13 @@ fn render(ctx) {
 `;
 
 function defaultSource(kind: SourceKind, id: string, label: string): SourceMeta {
-  const base = { id, label, route: "left" as SourceRoute, playing: false };
+  const base = {
+    id,
+    label,
+    route: "left" as SourceRoute,
+    targets: [] as SourceTarget[],
+    playing: false,
+  };
   switch (kind) {
     case "sine":
     case "square":
@@ -158,7 +165,14 @@ export function setSourceKind(
     const label = src.label.startsWith(old)
       ? KIND_LABELS[kind] + src.label.slice(old.length)
       : src.label;
-    const base = { id: src.id, label, route: src.route, playing: src.playing };
+    // The routing matrix survives a waveform switch, exactly like `route`.
+    const base = {
+      id: src.id,
+      label,
+      route: src.route,
+      targets: src.targets,
+      playing: src.playing,
+    };
     if (kind === "sine" || kind === "square" || kind === "triangle" || kind === "sawtooth") {
       return {
         ...base,

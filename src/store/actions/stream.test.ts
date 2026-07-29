@@ -58,6 +58,7 @@ function sineSource(id: string, over: Partial<PeriodicSource> = {}): SourceMeta 
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    targets: [],
     playing: true,
     ...over,
   } as SourceMeta;
@@ -301,7 +302,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
   it("multitone / noise / chirp carry only their level", () => {
     for (const kind of ["multitone", "noise", "chirp"] as const) {
       const slot = slotFromSource(
-        { id: "b", label: kind, kind, levelDbv: -12, route: "both", playing: true },
+        { id: "b", label: kind, kind, levelDbv: -12, route: "both", targets: [], playing: true },
         noSnap
       );
       expect(slot.source).toEqual({ kind, amplitude: levelToAmplitude(-12) });
@@ -315,6 +316,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
       kind: "script",
       source: "fn render(ctx) { [] }",
       route: "both",
+      targets: [],
       playing: true,
     };
     const slot = slotFromSource(script, noSnap);

@@ -22,6 +22,7 @@ import {
   isQuotaExceeded,
   loadLegacyCurrent,
   loadLegacyNamed,
+  sanitizeSourceTargets,
   snapshotWorkspace,
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
@@ -80,7 +81,18 @@ export function applyWorkspaceDoc(
       byId: Object.fromEntries(
         doc.sources.order
           .filter((id) => doc.sources.byId[id])
-          .map((id) => [id, { ...doc.sources.byId[id], playing: false }])
+          // Targets sanitized again here (not just trusting `migrate()` ran)
+          // for the same reason as the weighting curve below: templates and
+          // debug callers hand this docs that never passed through migrate,
+          // and the routing matrix drives a DAC (issue #25 lot F2).
+          .map((id) => [
+            id,
+            {
+              ...doc.sources.byId[id],
+              playing: false,
+              targets: sanitizeSourceTargets(doc.sources.byId[id].targets),
+            },
+          ])
       ),
     },
     traces: doc.traces,

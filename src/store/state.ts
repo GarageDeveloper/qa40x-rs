@@ -303,6 +303,25 @@ export interface TracesState {
 
 export type SourceRoute = "left" | "right" | "both" | "off";
 
+/**
+ * One cell of a source's device × channel routing matrix (issue #25 lot F2,
+ * Raphaël decision R1 2026-07-29: a source can drive SEVERAL devices at
+ * once, each with its own channel routing). `slot` is the backend runtime
+ * SLOT — never a device id: the workspace doc stays bench-portable (the
+ * same rule that put the slot in the endpoint trace ids, lot E3). `null`
+ * means "the FOCUSED session" — the default that keeps a single-device
+ * bench following the focus exactly as before.
+ */
+export interface SourceTarget {
+  slot: number | null;
+  route: SourceRoute;
+}
+
+/** Cap on one source's explicit targets, mirroring the registry's slot cap
+ * (lot E1: 8 runtimes) plus the focus pseudo-target — a hand-edited doc
+ * must not build an unbounded matrix (persist.ts::sanitizeSourceTargets). */
+export const MAX_SOURCE_TARGETS = 9;
+
 export type SourceKind = SourceMeta["kind"];
 
 /** One extra tone riding on a sine source: the sine then plays as a phased
@@ -317,7 +336,17 @@ export interface ExtraTone {
 interface SourceBase {
   id: string;
   label: string;
+  /** The route used while `targets` is EMPTY — the implicit, focus-following
+   * target (single-device behavior, byte-identical to pre-F2). NEVER read
+   * when `targets` is non-empty: `core/routing.ts::sourceRouting` is the one
+   * read path, and `targets.length` is the tag of this two-state union. */
   route: SourceRoute;
+  /** The explicit device × channel matrix (issue #25 lot F2, decision R1).
+   * `[]` — the default everywhere — is equivalent to the implicit
+   * `[{ slot: null, route }]`: the source follows the focus. Required (not
+   * optional) so tsc forces every construction site to be explicit and
+   * `migrate()` stays the ONE normalization point. */
+  targets: SourceTarget[];
   playing: boolean;
 }
 
@@ -865,6 +894,7 @@ export function initialSources(): SourcesState {
     id: "src-sine-1",
     label: "Sine 1",
     route: "left",
+    targets: [],
     playing: false,
     kind: "sine",
     frequencyHz: 1000,
