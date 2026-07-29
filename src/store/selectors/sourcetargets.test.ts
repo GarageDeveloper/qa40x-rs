@@ -246,6 +246,29 @@ describe("snappedReadout", () => {
     expect(r.text).toBe("→ —");
     expect(r.title).toBe("Not routed to any connected device");
   });
+
+  it("coherent-gen OFF: two rates below both Nyquists play the SAME unsnapped ask — the single-value form, not '2 values'", () => {
+    let s = bench(
+      [
+        sine("a", {
+          targets: [
+            { slot: null, route: "left" },
+            { slot: 1, route: "right" },
+          ],
+        }),
+      ],
+      [{ slot: 1, rate: 192000 }]
+    );
+    s = { ...s, acquisition: { ...s.acquisition, coherentGen: false } };
+    const vms = sourceTargetVMs(s, "a");
+    // Both targets play the bare ask verbatim (no per-rate bin grid to
+    // disagree over): 1000 Hz at 48 k and at 192 k are the identical number.
+    expect(vms.find((v) => v.tag === "focus")!.playedHz).toBe(1000);
+    expect(vms.find((v) => v.tag === "1")!.playedHz).toBe(1000);
+    const r = snappedReadout(vms, 1000);
+    expect(r.text).toBe("→ 1000.0000 Hz");
+    expect(r.title).toBe("Actually-played frequency (the ask, played verbatim)");
+  });
 });
 
 describe("sourceRowMode", () => {

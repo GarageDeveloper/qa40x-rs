@@ -141,6 +141,80 @@ describe("writeTarget — the matrix's one write path (issue #25 lot F3)", () =>
     // Updating an EXISTING cell at the cap still works.
     expect(writeTarget(full, 0, "both", 9).targets[0]).toEqual({ slot: 0, route: "both" });
   });
+
+  describe("canonical-form invariants over an exhaustive small matrix (create/update/remove × {null,0,1,2} × every route)", () => {
+    // Every reachable op from every reachable start: a lone focus cell never
+    // survives as an explicit target, an empty cell set is never stored as
+    // `targets: []` alongside a stale non-off `route` remnant of another
+    // path, and no two cells ever name the same slot (dedupe holds under
+    // repeated updates in place).
+    const SLOTS: (number | null)[] = [null, 0, 1, 2];
+    const ROUTES: SourceRoute[] = ["left", "right", "both", "off"];
+    const WRITES: (SourceRoute | null)[] = [...ROUTES, null];
+
+    function assertCanonical(out: { route: SourceRoute; targets: SourceTarget[] }): void {
+      // Never a lone focus cell in explicit targets — it must have compacted.
+      expect(
+        out.targets.length === 1 && out.targets[0].slot === null
+      ).toBe(false);
+      // Never a non-empty length with every cell somehow absent (structural
+      // sanity: every entry is a real, present cell object).
+      for (const t of out.targets) {
+        expect(t).toHaveProperty("slot");
+        expect(ROUTES).toContain(t.route);
+      }
+      // Dedupe: no two cells claim the same slot.
+      const slots = out.targets.map((t) => t.slot);
+      expect(new Set(slots).size).toBe(slots.length);
+    }
+
+    it("every single-op result from the empty legacy start is canonical", () => {
+      for (const route of ROUTES) {
+        for (const slot of SLOTS) {
+          for (const write of WRITES) {
+            const start = { route, targets: [] as SourceTarget[] };
+            assertCanonical(writeTarget(start, slot, write, 9));
+          }
+        }
+      }
+    });
+
+    it("every op composed onto a 2-cell matrix (focus + slot 1) stays canonical, incl. the all-removed case", () => {
+      const base: { route: SourceRoute; targets: SourceTarget[] } = {
+        route: "left",
+        targets: [
+          { slot: null, route: "left" },
+          { slot: 1, route: "right" },
+        ],
+      };
+      for (const slot of SLOTS) {
+        for (const write of WRITES) {
+          assertCanonical(writeTarget(base, slot, write, 9));
+        }
+      }
+      // Removing BOTH cells in sequence lands on the fully-silent compact
+      // form, never a stray `targets: []` with a leftover truthy route.
+      const oneGone = writeTarget(base, null, null, 9);
+      const allGone = writeTarget(oneGone, 1, null, 9);
+      expect(allGone).toEqual({ route: "off", targets: [] });
+    });
+
+    it("updating a cell in place never changes the slot set (no accidental duplicate)", () => {
+      const base: { route: SourceRoute; targets: SourceTarget[] } = {
+        route: "left",
+        targets: [
+          { slot: 0, route: "left" },
+          { slot: 2, route: "both" },
+        ],
+      };
+      for (const slot of [0, 2]) {
+        for (const route of ROUTES) {
+          const out = writeTarget(base, slot, route, 9);
+          expect(out.targets.map((t) => t.slot).sort()).toEqual([0, 2]);
+        }
+      }
+    });
+  });
 });
 
 describe("unionRoutes — cell-wise OR (the coalescing rule for one source resolving twice onto one session)", () => {

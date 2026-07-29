@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../../store/store";
 import { initialSession, initialState, type AppState } from "../../store/state";
+import { withDevice } from "../../store/actions/sessions.fixtures";
 import { mountSourcesPanel } from "./panel";
 
 const noopIpc: Ipc = {
@@ -318,6 +319,104 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     }));
     await flush();
     expect(footDev.textContent).toBe("#2 Device #2");
+  });
+
+  it("a focus change re-labels and re-checks the 'focus' row IN PLACE (same key, new session)", async () => {
+    const s = twoSessionState();
+    s.sources.byId[SRC_ID] = {
+      ...s.sources.byId[SRC_ID],
+      route: "left",
+      targets: [], // implicit focus-following cell only
+    };
+    const { host, store } = mount(s);
+    await flush();
+    // Focused on slot-0 (48 k): the focus row's played readout is the 48 k grid.
+    expect(q(host, `src-tgt-played-${SRC_ID}-focus`)!.textContent).toBe("1000.4883 Hz");
+    const focusNode = q<HTMLElement>(host, `src-tgt-l-${SRC_ID}-focus`)!.closest(
+      ".sources__tgt"
+    )!;
+
+    store.update("test/focus-to-1", (st) => ({
+      ...st,
+      devices: { ...st.devices, focus: "slot-1" },
+    }));
+    await flush();
+    // Same DOM node (keyed-list "focus" tag never changes) — the row was
+    // updated, not torn down and rebuilt.
+    const focusNodeAfter = q<HTMLElement>(host, `src-tgt-l-${SRC_ID}-focus`)!.closest(
+      ".sources__tgt"
+    )!;
+    expect(focusNodeAfter).toBe(focusNode);
+    // The readout now follows slot-1's 192 k grid — the focus row tracks
+    // whichever session is CURRENTLY focused, not whichever it was at mount.
+    expect(q(host, `src-tgt-played-${SRC_ID}-focus`)!.textContent).toBe("1001.9531 Hz");
+    expect(q(host, `src-tgt-l-${SRC_ID}-focus`)).not.toBeNull();
+  });
+
+  it("a focus change onto an explicitly-pinned slot COALESCES: both rows flag combined and the summary shows one union cell", async () => {
+    const s = twoSessionState();
+    s.sources.byId[SRC_ID] = {
+      ...s.sources.byId[SRC_ID],
+      targets: [
+        { slot: null, route: "left" },
+        { slot: 1, route: "right" },
+      ],
+    };
+    const { host, store } = mount(s);
+    await flush();
+    // Focused on slot-0: the two cells target DIFFERENT sessions — no note.
+    expect(q(host, `src-tgt-note-${SRC_ID}-focus`)!.textContent).toBe("");
+    expect(q(host, `src-tgt-note-${SRC_ID}-1`)!.textContent).toBe("");
+
+    store.update("test/focus-to-1", (st) => ({
+      ...st,
+      devices: { ...st.devices, focus: "slot-1" },
+    }));
+    await flush();
+    // Focus now resolves onto slot-1 TOO: the focus cell and the explicit
+    // slot-1 cell coalesce onto the one session — both rows say so.
+    expect(q(host, `src-tgt-note-${SRC_ID}-focus`)!.textContent).toMatch(
+      /channels are combined/
+    );
+    expect(q(host, `src-tgt-note-${SRC_ID}-1`)!.textContent).toMatch(/channels are combined/);
+  });
+
+  it("an OFF-only live cell is a startable silent program — Play stays enabled", async () => {
+    let s = initialState();
+    s.sources.byId[SRC_ID] = {
+      ...s.sources.byId[SRC_ID],
+      targets: [{ slot: 0, route: "off" }],
+    };
+    s = withDevice(s, { status: "connected" });
+    const { host } = mount(s);
+    await flush();
+    const play = q<HTMLButtonElement>(host, `src-play-${SRC_ID}`)!;
+    expect(play.disabled).toBe(false);
+    expect(play.title).toBe("Play this source");
+  });
+
+  it("editing the frequency while the routing editor is open does not close it (row not rebuilt)", async () => {
+    const { host, store } = mount(twoSessionState());
+    await flush();
+    const panel = q<HTMLElement>(host, `src-routing-panel-${SRC_ID}`)!;
+    q<HTMLButtonElement>(host, `src-routing-${SRC_ID}`)!.click();
+    await flush();
+    expect(panel.classList.contains("sources__detail--open")).toBe(true);
+
+    store.update("test/set-freq", (st) => ({
+      ...st,
+      sources: {
+        ...st.sources,
+        byId: {
+          ...st.sources.byId,
+          [SRC_ID]: { ...st.sources.byId[SRC_ID], frequencyHz: 2000 },
+        },
+      },
+    }));
+    await flush();
+    // Still open — a frequency edit doesn't touch the row's key (id:kind:mode).
+    expect(panel.classList.contains("sources__detail--open")).toBe(true);
+    expect(q<HTMLInputElement>(host, `src-freq-${SRC_ID}`)!.value).toBe("2000");
   });
 
   it("errors are attributed to their target's session and #n-prefixed at ≥ 2 sessions", async () => {
