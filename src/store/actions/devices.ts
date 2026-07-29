@@ -8,7 +8,10 @@ import type { DeviceList } from "../../gen";
 import type { Store } from "../store";
 import type { AppState, DevicesState, SessionKey } from "../state";
 import { SLOT0, initialSession, sessionKeyForSlot, slotOfSessionKey } from "../state";
-import { syncAllStreams } from "./stream";
+import { sessionLabel } from "../selectors/devices";
+import { sessionHasSources } from "../selectors/sources";
+import { updateRun } from "../selectors/session";
+import { syncAllDacOwners } from "./outputonly";
 import { toast } from "./ui";
 
 /**
@@ -17,13 +20,22 @@ import { toast } from "./ui";
  * E4's focus selector / group headers call this; dormant in E3 (nothing
  * changes the boot focus while only slot 0 exists).
  *
- * The focus is a WIRE-VISIBLE input: `buildStreamConfig` emits the DAC
- * slot program for the focused session only, so every running stream must
- * re-sync IN THIS GESTURE (E3 review #1) — without it, the old focus keeps
- * generating until some unrelated bench edit fires a sync and the stimulus
- * silently migrates mid-capture, garbling whatever reading straddles it.
+ * The focus is a WIRE-VISIBLE input: every source whose matrix keeps the
+ * default focus-following target (`slot: null` — selectors/sources.ts)
+ * resolves onto the focused session, so BOTH DAC-owner kinds must re-sync
+ * IN THIS GESTURE (E3 review #1, extended to generators by lot F2) —
+ * running streams re-push their config AND every session's gap-free
+ * generator rebuilds or stops (`syncAllDacOwners`): the stimulus moves
+ * atomically with the focus, never strands on the old device (the E4
+ * refusal this replaces), and pinned targets don't move at all (R1).
  * `primary` is re-derived for the same reason it is at every refresh: the
  * chrome must describe the unit the transport now acts on (P1a).
+ *
+ * D3 (lot F2): a session LOSING the focus with output-only on and nothing
+ * routed onto it afterwards has the mode cleared in the same update, with
+ * one info toast — the footer checkbox is focus-bound, so a set flag on a
+ * non-focused session would be invisible chrome silently re-arming a DAC
+ * on the next source edit.
  */
 export function setFocusedSession(
   store: Store<AppState>,
@@ -32,25 +44,33 @@ export function setFocusedSession(
 ): void {
   const s = store.get();
   if (s.devices.focus === key || !s.devices.sessions[key]) return;
-  // The gap-free generator (output-only, M2) plays a FIXED buffer for the
-  // focused session and does NOT follow a focus move the way streams do —
-  // syncAllStreams below re-syncs capture loops, not the generator. A
-  // focus change under a running generator would strand the old device
-  // looping a mix the UI no longer describes, uneditable and unstoppable
-  // from the new focus (E4 review #2b). Refused until per-device sources
-  // land (lot F); stop output-only first.
-  for (const sess of Object.values(s.devices.sessions)) {
-    if (sess.run.generatorRunning) {
-      toast(store, "info", "Stop the output-only generator before switching focus");
-      return;
-    }
-  }
+  const outgoing = s.devices.focus;
+  let clearedOutputOnly = false;
   store.update("devices/focus", (st) => {
     if (!st.devices.sessions[key]) return st;
     const devices = { ...st.devices, focus: key };
-    return { ...st, devices: { ...devices, primary: derivePrimary(devices) } };
+    let next: AppState = {
+      ...st,
+      devices: { ...devices, primary: derivePrimary(devices) },
+    };
+    if (
+      next.devices.sessions[outgoing]?.run.outputOnly &&
+      !sessionHasSources(next, outgoing)
+    ) {
+      next = updateRun(next, outgoing, (r) => ({ ...r, outputOnly: false }));
+      clearedOutputOnly = true;
+    }
+    return next;
   });
-  syncAllStreams(store, ipc);
+  if (clearedOutputOnly) {
+    toast(
+      store,
+      "info",
+      `Output only turned off on ${sessionLabel(store.get(), outgoing)} — ` +
+        "no source routes to it anymore."
+    );
+  }
+  syncAllDacOwners(store, ipc);
 }
 
 /**
