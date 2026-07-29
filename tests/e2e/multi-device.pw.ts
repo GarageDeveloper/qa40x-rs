@@ -260,3 +260,43 @@ test("a second virtual unit (the real-app shape) adds, and an alias renames its 
   const rows = await app.poolRows();
   expect(rows.find((r) => r.id === "hw-in-left@1")?.label).toBe("Input L #2");
 });
+
+test("a disconnected DEFAULT device stays named — list suffix, header identity, named header Connect (lot F validation rounds 3–4)", async ({
+  app,
+}) => {
+  await addUnitB(app);
+
+  // Top-bar Disconnect (focus is slot 0 — the default device).
+  await app.clickConnect();
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-0"].status)
+    .toBe("disconnected");
+
+  // The group-0 header keeps the unit's NAME (identity stamped at connect,
+  // read back through the capture fallback) and offers the named Connect —
+  // the E4 "never slot 0" revive rule, reversed on Raphaël's feedback.
+  await expect.poll(() => app.groupTitle(0)).toContain("E2E-FAKE-0001");
+  await expect.poll(() => app.groupRunLabel(0)).toBe("Connect");
+  // Enabled once the idle tick re-enumerates unit A as addable (≤ 2 s).
+  await expect
+    .poll(() => app.groupRunDisabled(0), { timeout: 15_000 })
+    .toBe(false);
+
+  // The focus selector SAYS which entry is disconnected — with the
+  // identity fallback the name alone no longer distinguishes it.
+  const labels = await app.deviceOptionLabels();
+  expect(
+    labels.some(
+      (l) => l.includes("E2E-FAKE-0001") && l.includes("not connected")
+    )
+  ).toBe(true);
+
+  // One click reconnects THAT unit on slot 0 — an explicit P3 pick, and
+  // unit B's session is untouched throughout.
+  await app.groupRun(0);
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-0"].status)
+    .toBe("connected");
+  expect((await app.sessions()).byKey["slot-1"].status).toBe("connected");
+  await expect.poll(() => app.openSlots()).toEqual([0, 1]);
+});

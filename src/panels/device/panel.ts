@@ -23,7 +23,7 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
-import { focusedDevice, sessionKeys } from "../../store/selectors/session";
+import { focusedDevice, session, sessionKeys } from "../../store/selectors/session";
 import { pickDevice, setFocusedSession } from "../../store/actions/devices";
 import {
   availableEntries,
@@ -41,6 +41,19 @@ import { el, keyedList } from "../../ui/dom";
 
 function fmtRate(hz: number): string {
   return `${hz / 1000} kHz`;
+}
+
+/** A focus-selector option's text: the session label PLUS its connection
+ * state (Raphaël 2026-07-29: with the identity fallback a disconnected
+ * QA402 reads exactly like a connected one — the list must say which is
+ * which). Same wording family as the group headers. Used in the rebuild
+ * signature too: a disconnect changes the STATE, not the name, so a
+ * label-only signature would never refresh the suffix. */
+function focusOptionLabel(s: AppState, k: SessionKey): string {
+  const status = session(s, k)?.device.status;
+  if (status === "connected") return sessionLabel(s, k);
+  if (status === "connecting") return `${sessionLabel(s, k)} — connecting…`;
+  return `${sessionLabel(s, k)} — not connected`;
 }
 
 function fmtFft(n: number): string {
@@ -323,7 +336,7 @@ export function mountDevicePanel(
         // (the captureBenchSignature rule, state.ts).
         sig:
           mode === "focus"
-            ? JSON.stringify(sessionKeys(s).map((k) => [k, sessionLabel(s, k)]))
+            ? JSON.stringify(sessionKeys(s).map((k) => [k, focusOptionLabel(s, k)]))
             : JSON.stringify(
                 s.devices.available.map((id) => [id, s.devices.aliases[id] ?? null])
               ),
@@ -360,7 +373,7 @@ export function mountDevicePanel(
         unitSel.replaceChildren(
           ...(mode === "focus"
             ? sessionKeys(s).map((k) =>
-                el("option", { value: k }, sessionLabel(s, k))
+                el("option", { value: k }, focusOptionLabel(s, k))
               )
             : availableEntries(s).map((u) =>
                 el("option", { value: u.id }, deviceLabel(s, u))
