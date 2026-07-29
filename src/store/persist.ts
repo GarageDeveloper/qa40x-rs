@@ -46,6 +46,7 @@ import {
   defaultTile,
   DEFAULT_SWEEP_PARAMS,
   HW_TRACE_IDS,
+  hwSlotOfTraceId,
   initialState,
   initialTraces,
   nextTraceColor,
@@ -181,7 +182,25 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
       // Live/derived traces re-acquire or recompute on load — their capture
       // snapshot (issue #40) is zeroed with their data, like offsetDb; only
       // the ❄ memory traces above keep theirs (it rides the meta spread).
-      tracesById[id] = { ...t, seq: 0, domains: [], offsetDb: null, capture: null };
+      //
+      // EXCEPTION (lot E4): a slot ≥ 1 ENDPOINT keeps its snapshot. On the
+      // next boot its group loads DORMANT (no session exists until an
+      // explicit add), and the snapshot's model+serial is precisely what
+      // the one-click revive matches against the enumeration
+      // (reviveCandidateId — without this, "Connect" stayed greyed after a
+      // restart). Harmless staleness: with domains/frames zeroed nothing
+      // exports or reads it, and the revive's own mint fresh-slates it
+      // (decision B6). Slot 0 keeps the zeroing — its session lives
+      // immediately and a stale snapshot could leak into an export in the
+      // window before the first frame re-stamps it.
+      const dormantIdentity = (hwSlotOfTraceId(id) ?? 0) >= 1 ? t.capture : null;
+      tracesById[id] = {
+        ...t,
+        seq: 0,
+        domains: [],
+        offsetDb: null,
+        capture: dormantIdentity,
+      };
     }
   }
 

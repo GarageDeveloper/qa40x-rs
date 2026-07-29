@@ -350,17 +350,31 @@ impl DeviceRegistry {
     /// finding F2). The first free slot is reused (slot indices stay
     /// stable); a fresh runtime is allocated only when every slot is
     /// occupied, up to [`MAX_DEVICES`].
-    pub async fn open_additional(&self, id: &DeviceId) -> Result<DeviceDescriptor, DeviceError> {
+    ///
+    /// `preferred_slot` (lot E4, the revive-a-dormant-group gesture): a
+    /// NON-DEFAULT slot to reuse if it is free — slot-keyed trace ids make
+    /// "which slot" user-visible, and reviving `Input L #2`'s group must
+    /// land its unit back on slot 1, not on whatever happens to be free
+    /// first. A hint that is occupied, slot 0, or out of range falls back
+    /// to the normal first-free allocation (the answered slot is
+    /// authoritative either way); a hint beyond the current vector grows it
+    /// with idle runtimes (indices are stable, the vector never shrinks).
+    pub async fn open_additional(
+        &self,
+        id: &DeviceId,
+        preferred_slot: Option<usize>,
+    ) -> Result<DeviceDescriptor, DeviceError> {
         let _open_gate = self.inner.open_gate.lock().await;
         if self.slot_of(id.as_str()).is_some() {
             return Err(DeviceError::AlreadyOpen(id.as_str().to_string()));
         }
-        let rt = self.free_or_new_runtime()?;
+        let rt = self.free_or_new_runtime(preferred_slot)?;
         let _gate = rt.lifecycle_gate().lock().await;
         self.open_locked(&rt, id).await
     }
 
-    /// The first NON-DEFAULT runtime with nothing open, else a freshly
+    /// The preferred free slot when hinted (see [`Self::open_additional`]),
+    /// else the first NON-DEFAULT runtime with nothing open, else a freshly
     /// allocated slot. Additional devices never occupy slot 0 (adversarial
     /// review #5): the default slot belongs to the connect/demo flows —
     /// REST, scripting and every unrouted command drive it, and
@@ -369,8 +383,22 @@ impl DeviceRegistry {
     /// supersedable by the auto-connect tick. Only ever called under the
     /// open gate, so two concurrent opens cannot race onto the same free
     /// slot.
-    fn free_or_new_runtime(&self) -> Result<DeviceRuntime, DeviceError> {
+    fn free_or_new_runtime(
+        &self,
+        preferred_slot: Option<usize>,
+    ) -> Result<DeviceRuntime, DeviceError> {
         let mut slots = self.inner.runtimes.lock().expect("runtimes lock");
+        if let Some(p) = preferred_slot {
+            if p >= 1 && p < MAX_DEVICES {
+                while slots.len() <= p {
+                    slots.push(DeviceRuntime::new());
+                }
+                if slots[p].current().is_none() {
+                    return Ok(slots[p].clone());
+                }
+                // Occupied hint: fall through to the normal allocation.
+            }
+        }
         if let Some(rt) = slots.iter().skip(1).find(|rt| rt.current().is_none()) {
             return Ok(rt.clone());
         }
@@ -1007,7 +1035,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("open A on slot 0");
-        reg.open_additional(&b).await.expect("open B on a fresh slot");
+        reg.open_additional(&b, None).await.expect("open B on a fresh slot");
 
         assert_eq!(reg.slot_of("usb/A"), Some(0));
         assert_eq!(reg.slot_of("usb/B"), Some(1));
@@ -1025,6 +1053,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_add_answer_slot_agrees_with_the_enumerations_entry() {
+        // Lot E4: `connect_additional_device` answers `slot_of()` right
+        // after the open — the value the frontend mints its session from
+        // must be the SAME slot the next `list_devices` reports for that
+        // unit (the id-adoption invariant), and never the default slot.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B"]))]);
+        let a = reg.enumerate().await[0].id.clone();
+        let b = reg.enumerate().await[1].id.clone();
+        reg.open(&a).await.expect("open A on slot 0");
+        reg.open_additional(&b, None).await.expect("open B");
+
+        let slot = reg.slot_of("usb/B").expect("B has a slot");
+        assert!(slot >= 1, "an additional open never lands on the default slot");
+        let list = reg.list().await;
+        let entry = list
+            .devices
+            .iter()
+            .find(|d| d.id == "usb/B")
+            .expect("B enumerated");
+        assert!(entry.open);
+        assert_eq!(entry.slot, Some(slot as u32));
+    }
+
+    #[tokio::test]
+    async fn a_preferred_slot_hint_is_honored_when_free_and_falls_back_when_not() {
+        // Lot E4 revive gesture: a dormant group asks for ITS slot back.
+        let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B", "C"]))]);
+        let ids: Vec<_> = reg.enumerate().await.iter().map(|d| d.id.clone()).collect();
+        reg.open(&ids[0]).await.expect("A on slot 0");
+
+        // A hint beyond the current vector grows it with idle runtimes —
+        // a fresh boot has only slot 0, yet the doc's dormant group can
+        // name slot 2.
+        reg.open_additional(&ids[1], Some(2)).await.expect("B on slot 2");
+        assert_eq!(reg.slot_of("usb/B"), Some(2));
+        assert_eq!(reg.runtimes().len(), 3, "slot 1 exists, idle");
+
+        // An OCCUPIED hint falls back to the normal first-free allocation.
+        reg.open_additional(&ids[2], Some(2)).await.expect("C falls back");
+        assert_eq!(reg.slot_of("usb/C"), Some(1));
+
+        // Slot 0 is never a valid hint (the default slot stays the
+        // connect/demo flows' — the review-#5 rule).
+        let rt_c = reg.runtime_for(Some("usb/C")).expect("C routes");
+        reg.close_runtime(&rt_c).await.expect("free slot 1");
+        reg.open_additional(&ids[2], Some(0)).await.expect("C re-added");
+        assert_eq!(reg.slot_of("usb/C"), Some(1), "hint 0 ignored");
+    }
+
+    #[tokio::test]
     async fn open_additional_rejects_a_unit_already_open_anywhere() {
         // Planner finding F2's command-level guard: re-opening an open unit
         // onto a second runtime would steal its claim out from under the
@@ -1033,7 +1111,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         reg.open(&a).await.expect("open A");
 
-        let err = reg.open_additional(&a).await.expect_err("A is already open");
+        let err = reg.open_additional(&a, None).await.expect_err("A is already open");
         assert_eq!(err.to_string(), "Device already open: usb/A");
         assert_eq!(reg.runtimes().len(), 1, "no slot may have been allocated");
         assert_eq!(reg.current().expect("A untouched").id, a);
@@ -1064,14 +1142,14 @@ mod tests {
         let reg = registry(vec![Arc::new(FakeSource::new("usb", true, &["A", "B", "C", "D"]))]);
         let ids: Vec<_> = reg.enumerate().await.iter().map(|d| d.id.clone()).collect();
         reg.open(&ids[0]).await.expect("A on slot 0");
-        reg.open_additional(&ids[1]).await.expect("B on slot 1");
-        reg.open_additional(&ids[2]).await.expect("C on slot 2");
+        reg.open_additional(&ids[1], None).await.expect("B on slot 1");
+        reg.open_additional(&ids[2], None).await.expect("C on slot 2");
         assert_eq!(reg.slot_of("usb/C"), Some(2));
 
         // Close B (slot 1): D reuses ITS slot, C keeps slot 2.
         let rt_b = reg.runtime_for(Some("usb/B")).expect("B routes");
         reg.close_runtime(&rt_b).await.expect("close slot 1");
-        reg.open_additional(&ids[3]).await.expect("D reuses the freed slot");
+        reg.open_additional(&ids[3], None).await.expect("D reuses the freed slot");
         assert_eq!(reg.slot_of("usb/D"), Some(1), "reuse, not growth");
         assert_eq!(reg.slot_of("usb/C"), Some(2), "C keeps its slot throughout");
         assert_eq!(reg.runtimes().len(), 3);
@@ -1080,7 +1158,7 @@ mod tests {
 
         // Slot 0 freed: an additional open must STILL not take it.
         reg.close().await.expect("close slot 0");
-        reg.open_additional(&ids[1]).await.expect("B re-added");
+        reg.open_additional(&ids[1], None).await.expect("B re-added");
         assert_eq!(reg.slot_of("usb/B"), Some(3), "never slot 0 — a fresh slot instead");
         assert!(reg.default_runtime().current().is_none(), "slot 0 stays free for connect/demo");
     }
@@ -1095,11 +1173,11 @@ mod tests {
         let descs = reg.enumerate().await;
         reg.open(&descs[0].id).await.expect("the default unit on slot 0");
         for d in descs.iter().skip(1).take(MAX_DEVICES - 1) {
-            reg.open_additional(&d.id).await.expect("fill a slot");
+            reg.open_additional(&d.id, None).await.expect("fill a slot");
         }
         assert_eq!(reg.runtimes().len(), MAX_DEVICES);
         let err = reg
-            .open_additional(&descs[MAX_DEVICES].id)
+            .open_additional(&descs[MAX_DEVICES].id, None)
             .await
             .expect_err("the ceiling must hold");
         assert!(matches!(err, DeviceError::NoFreeSlot));
@@ -1119,7 +1197,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("A on slot 0");
-        reg.open_additional(&b).await.expect("B on slot 1");
+        reg.open_additional(&b, None).await.expect("B on slot 1");
 
         let err = reg.open(&b).await.expect_err("picking B while it is open on slot 1");
         assert_eq!(err.to_string(), "Device already open: usb/B");
@@ -1137,7 +1215,7 @@ mod tests {
         // Land B on slot 1: occupy slot 0 first, then free it.
         let a = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("occupy slot 0");
-        reg.open_additional(&b).await.expect("B on slot 1");
+        reg.open_additional(&b, None).await.expect("B on slot 1");
         reg.close().await.expect("free slot 0");
 
         let d = reg.open_first_physical().await.expect("auto-connect");
@@ -1156,7 +1234,7 @@ mod tests {
         let x = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&x).await.expect("occupy slot 0");
-        reg.open_additional(&b).await.expect("B on slot 1");
+        reg.open_additional(&b, None).await.expect("B on slot 1");
         reg.close().await.expect("free slot 0");
         src.vanish("X");
 
@@ -1176,7 +1254,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let v1 = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("occupy slot 0");
-        reg.open_additional(&v1).await.expect("V1 added on slot 1");
+        reg.open_additional(&v1, None).await.expect("V1 added on slot 1");
 
         let d = reg.open_virtual().await.expect("demo hand-over");
         assert_eq!(d.id.as_str(), "virtual/V2", "V1 is taken — the demo must use V2");
@@ -1190,7 +1268,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("open A");
-        reg.open_additional(&b).await.expect("open B");
+        reg.open_additional(&b, None).await.expect("open B");
 
         let rt_a = reg.runtime_for(Some("usb/A")).expect("A routes");
         let rt_b = reg.runtime_for(Some("usb/B")).expect("B routes");
@@ -1214,8 +1292,8 @@ mod tests {
         let b = reg.enumerate().await[1].id.clone();
 
         let (ra, rb) = tokio::join!(
-            { let r = reg.clone(); let a = a.clone(); async move { r.open_additional(&a).await } },
-            { let r = reg.clone(); let b = b.clone(); async move { r.open_additional(&b).await } },
+            { let r = reg.clone(); let a = a.clone(); async move { r.open_additional(&a, None).await } },
+            { let r = reg.clone(); let b = b.clone(); async move { r.open_additional(&b, None).await } },
         );
         ra.expect("open A");
         rb.expect("open B");
@@ -1231,7 +1309,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("open A");
-        reg.open_additional(&b).await.expect("open B");
+        reg.open_additional(&b, None).await.expect("open B");
 
         let list = reg.list().await;
         assert_eq!(list.open, vec!["usb/A".to_string(), "usb/B".to_string()], "slot order");
@@ -1322,7 +1400,7 @@ mod tests {
         ]);
         assert!(reg.physical_present().await, "A is free");
         let a = reg.enumerate().await[0].id.clone();
-        reg.open_additional(&a).await.expect("A added on slot 1");
+        reg.open_additional(&a, None).await.expect("A added on slot 1");
         assert!(!reg.physical_present().await, "the only QA40x is open — nothing to hand over to");
     }
 
@@ -1364,7 +1442,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("open A");
-        reg.open_additional(&b).await.expect("open B");
+        reg.open_additional(&b, None).await.expect("open B");
 
         let rts = reg.runtimes();
         let (h0, h1) = (rts[0].handle(), rts[1].handle());
@@ -1390,7 +1468,7 @@ mod tests {
         let a = reg.enumerate().await[0].id.clone();
         let b = reg.enumerate().await[1].id.clone();
         reg.open(&a).await.expect("open A");
-        reg.open_additional(&b).await.expect("open B");
+        reg.open_additional(&b, None).await.expect("open B");
 
         // Wedge slot 0's device mutex only.
         let handle0 = reg.runtimes()[0].handle();

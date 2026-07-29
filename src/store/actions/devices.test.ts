@@ -26,9 +26,24 @@ import { initialSession, initialState, SLOT0 } from "../state";
 import type { DeviceList } from "../../gen";
 import type { Ipc } from "../../ipc/ipc";
 import { fakeEntry, fakeList as list } from "./devices.fixtures";
-import { deriveDevices, pickDevice, refreshDevices, setDeviceAlias, setFocusedSession } from "./devices";
-import { autoConnectTick, connect, deviceLost, setInputRange } from "./device";
+import {
+  deriveDevices,
+  dropSession,
+  mintSession,
+  pickDevice,
+  refreshDevices,
+  setDeviceAlias,
+  setFocusedSession,
+} from "./devices";
+import {
+  autoConnectTick,
+  connect,
+  deviceLost,
+  refreshTelemetry,
+  setInputRange,
+} from "./device";
 import { startRun } from "./stream";
+import { isRoutable } from "../selectors/session";
 
 const empty = () => initialState().devices;
 
@@ -467,19 +482,48 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
     return store;
   }
 
-  it("deviceLost(store, 'usb/B') tears down ONLY the session that adopted usb/B — slot-0 (usb/A) stays streaming", () => {
+  it("deviceLost 'usb/B' EVICTS the session that adopted usb/B (lot E4 decision B4) — slot-0 (usb/A) stays streaming, and the loss is a wire-visible focus event only for survivors", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, "usb/B");
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/B");
     const s = store.get();
-    expect(s.devices.sessions["slot-1"].device.status).toBe("disconnected");
-    expect(s.devices.sessions["slot-1"].run.streaming).toBe(false);
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.devices.focus).toBe(SLOT0);
     expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
   });
 
-  it("deviceLost(store, null) tears down slot 0 only (the payload-less monitor event)", () => {
+  it("a duplicate loss event for an already-evicted id is a NO-OP while ≥ 2 sessions survive (the unmatched-id rule keeps covering the post-eviction echo)", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, null);
+    store.update("test/third-session", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-2": {
+            ...initialSession(2),
+            deviceId: "usb/C",
+            device: { ...initialSession(2).device, status: "connected" as const },
+            run: { ...initialSession(2).run, streaming: true },
+          },
+        },
+      },
+    }));
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/B");
+    deviceLost(store, ipc, "usb/B");
+    const s = store.get();
+    expect(s.devices.sessions["slot-1"]).toBeUndefined();
+    expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
+    expect(s.devices.sessions["slot-2"].device.status).toBe("connected");
+  });
+
+  it("deviceLost(null) tears down slot 0 only (the payload-less monitor event)", () => {
+    const store = twoAdoptedSessionsStore();
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, null);
     const s = store.get();
     expect(s.devices.sessions[SLOT0].device.status).toBe("disconnected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(false);
@@ -489,11 +533,56 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
 
   it("with SEVERAL sessions, an id nobody adopted is a NO-OP — a stale enumeration clearing an id must not get slot 0 torn down for another unit's loss (E2 review #5)", () => {
     const store = twoAdoptedSessionsStore();
-    deviceLost(store, "usb/never-adopted");
+    const { ipc } = recordingIpc(list());
+    deviceLost(store, ipc, "usb/never-adopted");
     const s = store.get();
     expect(s.devices.sessions[SLOT0].device.status).toBe("connected");
     expect(s.devices.sessions[SLOT0].run.streaming).toBe(true);
     expect(s.devices.sessions["slot-1"].device.status).toBe("connected");
+  });
+
+  it("a loss event for an id the registry KNOWS but no session holds is a NO-OP even at one session — device B's queued goodbye delivered after its removal must not tear down surviving device A (E4 review #3)", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/lone-adopted-with-known-b", (s) => ({
+      ...s,
+      devices: {
+        ...deriveDevices(
+          s.devices,
+          list(fakeEntry("usb/A", { open: true, slot: 0 }), fakeEntry("usb/B"))
+        ),
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            deviceId: "usb/A",
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+        },
+      },
+    }));
+    deviceLost(store, recordingIpc(list()).ipc, "usb/B");
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("connected");
+    expect(store.get().devices.sessions[SLOT0].run.streaming).toBe(true);
+  });
+
+  it("an id UNKNOWN to the enumeration still falls back at one session — the smoke.pw.ts any-id ≡ payload-less contract", () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/lone-adopted", (s) => ({
+      ...s,
+      devices: {
+        ...deriveDevices(s.devices, list(fakeEntry("usb/A", { open: true, slot: 0 }))),
+        sessions: {
+          [SLOT0]: {
+            ...initialSession(0),
+            deviceId: "usb/A",
+            device: { ...initialSession(0).device, status: "connected" as const },
+            run: { ...initialSession(0).run, streaming: true },
+          },
+        },
+      },
+    }));
+    deviceLost(store, recordingIpc(list()).ipc, "usb/never-seen");
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
   });
 
   it("with slot 0 as the LONE session, an unmatched id still falls back to it — the pre-adoption window right after connect (unplug before the first enumeration lands)", () => {
@@ -512,7 +601,7 @@ describe("deviceLost — routed by adopted deviceId (issue #25 lot E2)", () => {
         },
       },
     }));
-    deviceLost(store, "usb/A");
+    deviceLost(store, recordingIpc(list()).ipc, "usb/A");
     expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
   });
 });
@@ -564,5 +653,138 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
     setFocusedSession(store, ipc, SLOT0); // already focused
     expect(store.get()).toBe(before);
     expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a focus change while a gap-free generator runs (E4 review #2b) — the generator plays a FIXED buffer for the focused session and does not follow a focus move", () => {
+    const base = twoSessions({ slot0: false, slot1: false });
+    const store = new Store(
+      {
+        ...base,
+        devices: {
+          ...base.devices,
+          sessions: {
+            ...base.devices.sessions,
+            [SLOT0]: {
+              ...base.devices.sessions[SLOT0],
+              run: {
+                ...base.devices.sessions[SLOT0].run,
+                outputOnly: true,
+                generatorRunning: true,
+              },
+            },
+          },
+        },
+      },
+      { freeze: true }
+    );
+    const { ipc, calls } = recordingIpc(list());
+    setFocusedSession(store, ipc, "slot-1");
+    expect(store.get().devices.focus).toBe(SLOT0);
+    expect(calls.filter(([m]) => m === "stream_update")).toHaveLength(0);
+    expect(
+      store.get().ui.toasts.some((t) => t.message.includes("output-only"))
+    ).toBe(true);
+  });
+});
+
+describe("wire-verb isRoutable gates (E4 review #1) — an unroutable slot ≥ 1 key must never fall through to the default runtime", () => {
+  /** A connected slot-1 session whose adopted id a stale enumeration just
+   * cleared — the exact window where an arg-less call would land on the
+   * OTHER device. */
+  function unadoptedSlot1(): Store<AppState> {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/unadopted-slot1", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": {
+            ...initialSession(1),
+            device: { ...initialSession(1).device, status: "connected" as const },
+          },
+        },
+      },
+    }));
+    return store;
+  }
+
+  it("setInputRange refuses — a range register is calibration-bearing, and moving the other device's mid-capture is the four-offsets class on the wire", async () => {
+    const store = unadoptedSlot1();
+    const { ipc, calls } = recordingIpc(list());
+    await setInputRange(store, ipc, 18, "slot-1");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refreshTelemetry refuses — the ~1 Hz poll must not take the default runtime's device mutex inside its capture, nor land device A's telemetry on device B's session", async () => {
+    const store = unadoptedSlot1();
+    const { ipc, calls } = recordingIpc(list());
+    await refreshTelemetry(store, ipc, "slot-1");
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("mintSession / dropSession — pure session mint/evict (issue #25 lot E4)", () => {
+  it("mintSession is PURE: the input state is untouched, and the result holds fresh devices/sessions objects", () => {
+    const before = initialState();
+    const s = mintSession(before, 1, "usb/B");
+    // The input is byte-for-byte untouched — no in-place mutation anywhere.
+    expect(before.devices.sessions["slot-1"]).toBeUndefined();
+    expect(Object.keys(before.devices.sessions)).toEqual([SLOT0]);
+    // The output is a fresh object graph down to the touched sub-objects.
+    expect(s).not.toBe(before);
+    expect(s.devices).not.toBe(before.devices);
+    expect(s.devices.sessions).not.toBe(before.devices.sessions);
+    expect(s.devices.sessions[SLOT0]).toBe(before.devices.sessions[SLOT0]); // untouched sibling, same ref
+  });
+
+  it("adopts the deviceId AT MINT — isRoutable is true from the very first state, no unroutable window", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(s.devices.sessions["slot-1"].deviceId).toBe("usb/B");
+    expect(isRoutable(s, "slot-1")).toBe(true); // bookkeeping item 1: true from instant one
+    expect(s.devices.sessions["slot-1"].device.status).toBe("connecting");
+    expect(s.devices.sessions["slot-1"].device.present).toBe(true);
+  });
+
+  it("leaves the focus untouched — an added device comes up in MONITOR mode (decision 1)", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(s.devices.focus).toBe(SLOT0);
+  });
+
+  it("dropSession moves a dropped focus to the LOWEST remaining slot and re-derives primary", () => {
+    // Two open, enumerated units at slots 0/1 so derivePrimary's P1a rule
+    // (the focused slot's open unit wins) has something to visibly react to.
+    const enumerated = deriveDevices(
+      empty(),
+      list(fakeEntry("usb/A", { open: true, slot: 0 }), fakeEntry("usb/B", { open: true, slot: 1 }))
+    );
+    let s: AppState = { ...initialState(), devices: enumerated };
+    s = mintSession(s, 1, "usb/B");
+    s = { ...s, devices: { ...s.devices, focus: "slot-1", primary: "usb/B" } };
+    expect(s.devices.primary).toBe("usb/B"); // focus slot-1's open unit wins (P1a)
+
+    const next = dropSession(s, "slot-1");
+    expect(next.devices.sessions["slot-1"]).toBeUndefined();
+    expect(next.devices.focus).toBe(SLOT0); // fell back to the lowest remaining slot
+    expect(next.devices.primary).toBe("usb/A"); // re-derived: slot-0's open unit now wins
+  });
+
+  it("dropSession(SLOT0) is IDENTITY — the default session is never dropped", () => {
+    const s = initialState();
+    expect(dropSession(s, SLOT0)).toBe(s);
+  });
+
+  it("dropSession on an unknown key is IDENTITY", () => {
+    const s = mintSession(initialState(), 1, "usb/B");
+    expect(dropSession(s, "slot-7")).toBe(s);
+  });
+
+  it("dropping a focus NOT on the evicted key leaves focus untouched", () => {
+    let s = mintSession(initialState(), 1, "usb/B");
+    s = mintSession(s, 2, "usb/C");
+    // Focus stays on SLOT0 throughout (mintSession never moves it).
+    const next = dropSession(s, "slot-2");
+    expect(next.devices.focus).toBe(SLOT0);
+    expect(next.devices.sessions["slot-1"]).toBeDefined(); // the OTHER added session survives
   });
 });

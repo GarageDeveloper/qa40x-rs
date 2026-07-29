@@ -9,11 +9,12 @@ import "./panel.css";
 import type { Store } from "../../store/store";
 import { shallowEq } from "../../store/store";
 import type { AppState } from "../../store/state";
-import { FFT_SIZES } from "../../store/state";
+import { FFT_SIZES, SLOT0 } from "../../store/state";
+import type { SessionKey } from "../../store/sessionkey";
 import type { Ipc } from "../../ipc/ipc";
 import {
   connect,
-  connectVirtual,
+  demoAddVirtual,
   disconnect,
   setInputRange,
   setOutputRange,
@@ -22,15 +23,17 @@ import {
 import { setFftSize } from "../../store/actions/acquisition";
 import { setTheme } from "../../store/actions/ui";
 import { annunciators } from "../../store/selectors/annunciators";
-import { focusedDevice } from "../../store/selectors/session";
-import { pickDevice } from "../../store/actions/devices";
+import { focusedDevice, sessionKeys } from "../../store/selectors/session";
+import { pickDevice, setFocusedSession } from "../../store/actions/devices";
 import {
   availableEntries,
   deviceLabel,
+  focusSelectorMode,
   inputRangesDbv,
   outputRangesDbv,
   pickedDeviceId,
   sampleRatesHz,
+  sessionLabel,
   showDevicePicker,
 } from "../../store/selectors/devices";
 import { openAppDrawer } from "../appmenu/drawer";
@@ -99,23 +102,32 @@ export function mountDevicePanel(
   const connectBtn = el("button.btn.btn--primary", {
     "data-testid": "btn-connect",
     onclick: () => {
-      const { status } = focusedDevice(store.get());
-      if (status === "connected") void disconnect(store, ipc);
-      else if (status === "disconnected")
+      const s = store.get();
+      const { status } = focusedDevice(s);
+      // KEYED to the focus (lot E4, C1 fix): the bar READS the focused
+      // session, so its Disconnect must act on that same session — the
+      // SLOT0 default would close the wrong unit under a moved focus.
+      if (status === "connected") void disconnect(store, ipc, s.devices.focus);
+      else if (status === "disconnected" && s.devices.focus === SLOT0)
         // Rule P3: a deviceId rides along only when the user explicitly
-        // picked a unit — an untouched picker keeps the legacy call.
+        // picked a unit — an untouched picker keeps the legacy call. A
+        // slot ≥ 1 focus cannot reconnect here (connect_device owns slot
+        // 0 only): the button is disabled with a pointer to + device.
         void connect(store, ipc, { deviceId: pickedDeviceId(store.get()) });
     },
   }, "Connect");
-  // Demo mode: one click attaches the embedded virtual QA403 — for trying
-  // the app with no hardware, and for development. Hidden once connected;
-  // the DEMO chip then marks the session so it can't pass for a measurement.
+  // Demo mode: one click ADDS the embedded virtual QA403 (the + device
+  // path, never a slot-0 supersede — lot E4) and focuses it — for trying
+  // the app with no hardware, and for development. Hidden once the focused
+  // session is connected; the DEMO chip then marks the session so it can't
+  // pass for a measurement.
   const demoBtn = el("button.btn", {
     "data-testid": "btn-demo",
-    title: "Demo mode — connect to a built-in virtual QA403 (no hardware needed)",
+    title:
+      "Demo mode — add a built-in virtual QA403 alongside (no hardware needed)",
     onclick: () => {
       if (focusedDevice(store.get()).status === "disconnected")
-        void connectVirtual(store, ipc);
+        void demoAddVirtual(store, ipc);
     },
   }, "Demo");
   const demoChip = el(
@@ -132,18 +144,36 @@ export function mountDevicePanel(
   const unitSel = el("select.field.device-panel__unit.u-hidden", {
     "data-testid": "device-select",
     title: "Measurement device — pick which unit Connect opens",
-    onchange: (e: Event) =>
-      pickDevice(store, (e.target as HTMLSelectElement).value),
+    onchange: (e: Event) => {
+      const v = (e.target as HTMLSelectElement).value;
+      // Dispatch-time mode read (lot E4, decision B7): the same node is
+      // the lot-D pick list at ≤ 1 session and the FOCUS selector at ≥ 2
+      // — option values are session keys there, and the only legal focus
+      // mutator is setFocusedSession (it re-syncs every running stream).
+      if (unitSel.dataset.mode === "focus") {
+        setFocusedSession(store, ipc, v as SessionKey);
+        // A refused switch (e.g. output-only generator running) leaves the
+        // focus in place — snap the select back so it never lies.
+        unitSel.value = store.get().devices.focus;
+      } else if (store.get().devices.byId[v]) {
+        // The byId sniff drops a value delivered across a focus→pick mode
+        // flip (a session key is junk as a pick — review note).
+        pickDevice(store, v);
+      }
+    },
   });
 
+  // KEYED to the focus (lot E4, C1 fix): the menus DISPLAY the focused
+  // session's registers, so their writes must land on that same session —
+  // the SLOT0 default would set slot 0's registers while showing slot 1's.
   const inputSel = select("input-range", "In", (v) =>
-    void setInputRange(store, ipc, v)
+    void setInputRange(store, ipc, v, store.get().devices.focus)
   );
   const outputSel = select("output-range", "Out", (v) =>
-    void setOutputRange(store, ipc, v)
+    void setOutputRange(store, ipc, v, store.get().devices.focus)
   );
   const rateSel = select("sample-rate", "Rate", (v) =>
-    void setSampleRate(store, ipc, v)
+    void setSampleRate(store, ipc, v, store.get().devices.focus)
   );
   const fftSel = select("fft-size", "FFT", (v) => setFftSize(store, ipc, v));
 
@@ -210,11 +240,12 @@ export function mountDevicePanel(
     // refresh churn.
     (s) => ({
       device: focusedDevice(s),
+      focusIsSlot0: s.devices.focus === SLOT0,
       inputRanges: inputRangesDbv(s),
       outputRanges: outputRangesDbv(s),
       rates: sampleRatesHz(s),
     }),
-    ({ device, inputRanges, outputRanges, rates }) => {
+    ({ device, focusIsSlot0, inputRanges, outputRanges, rates }) => {
       led.className = `led${
         device.status === "connected"
           ? " led--on"
@@ -224,7 +255,16 @@ export function mountDevicePanel(
       }`;
       connectBtn.textContent =
         device.status === "connected" ? "Disconnect" : "Connect";
-      connectBtn.toggleAttribute("disabled", device.status === "connecting");
+      // A DISCONNECTED slot ≥ 1 focus cannot be reopened by connect_device
+      // (it owns slot 0 only): disabled with a pointer, not hidden.
+      const slot1Reconnect = device.status === "disconnected" && !focusIsSlot0;
+      connectBtn.toggleAttribute(
+        "disabled",
+        device.status === "connecting" || slot1Reconnect
+      );
+      connectBtn.title = slot1Reconnect
+        ? "An added device reopens from the Traces panel's + device menu"
+        : "";
       demoBtn.classList.toggle("u-hidden", device.status !== "disconnected");
       demoChip.classList.toggle(
         "u-hidden",
@@ -265,39 +305,74 @@ export function mountDevicePanel(
   store.select(
     // Scalar-only selection (review #5): an allocated array per evaluation
     // would defeat shallowEq and re-fire this on EVERY store batch — per
-    // frame during a capture. The id signature is the rebuild trigger; the
+    // frame during a capture. The signatures are the rebuild triggers; the
     // entries are read back off the store inside the callback.
-    (s) => ({
-      show: showDevicePicker(s),
-      // Aliases join the signature (lot E2): a rename must rebuild the
-      // option texts even though the id list is unchanged. JSON, not
-      // string joins — the alias is USER TEXT, and a free-text field
-      // containing the join character must never collide two states
-      // (the captureBenchSignature rule, state.ts).
-      sig: JSON.stringify(
-        s.devices.available.map((id) => [id, s.devices.aliases[id] ?? null])
-      ),
-      // While connected the picker mirrors the OPEN unit (= the primary,
-      // rule P1); disconnected it shows the user's pick, else the primary.
-      value:
-        focusedDevice(s).status === "disconnected"
-          ? s.devices.pick ?? s.devices.primary
-          : s.devices.primary,
-      connected: focusedDevice(s).status !== "disconnected",
-    }),
-    ({ show, sig, value, connected }) => {
+    (s) => {
+      const mode = focusSelectorMode(s);
+      return {
+        show: showDevicePicker(s),
+        // Dual-mode (lot E4, decision B7): "pick" is the lot-D picker
+        // byte-for-byte; at ≥ 2 live sessions the node becomes the FOCUS
+        // selector — option values are SESSION KEYS (slot 0 can
+        // transiently hold no device id, and focus is a slot concept).
+        mode,
+        // Aliases join the signature (lot E2): a rename must rebuild the
+        // option texts even though the id list is unchanged. JSON, not
+        // string joins — the alias is USER TEXT, and a free-text field
+        // containing the join character must never collide two states
+        // (the captureBenchSignature rule, state.ts).
+        sig:
+          mode === "focus"
+            ? JSON.stringify(sessionKeys(s).map((k) => [k, sessionLabel(s, k)]))
+            : JSON.stringify(
+                s.devices.available.map((id) => [id, s.devices.aliases[id] ?? null])
+              ),
+        // Pick mode: while connected the picker mirrors the OPEN unit (=
+        // the primary, rule P1); disconnected it shows the user's pick,
+        // else the primary. Focus mode: the focused session key.
+        value:
+          mode === "focus"
+            ? s.devices.focus
+            : focusedDevice(s).status === "disconnected"
+              ? s.devices.pick ?? s.devices.primary
+              : s.devices.primary,
+        connected: focusedDevice(s).status !== "disconnected",
+      };
+    },
+    ({ show, mode, sig, value, connected }) => {
       unitSel.classList.toggle("u-hidden", !show);
-      unitSel.toggleAttribute("disabled", connected);
-      const units = availableEntries(store.get());
-      if (unitSel.dataset.sig !== sig) {
-        unitSel.dataset.sig = sig;
+      // The attribute exists only in focus mode: the one-session bar keeps
+      // the exact pre-E4 attribute set (byte-identity, review #10).
+      if (mode === "focus") unitSel.dataset.mode = "focus";
+      else delete unitSel.dataset.mode;
+      // Focus mode: always enabled — switching the focus is its whole job
+      // (and wire-safe: setFocusedSession re-syncs every running stream).
+      // Pick mode keeps the lot-D disabled-while-connected rule.
+      unitSel.toggleAttribute("disabled", mode === "pick" && connected);
+      unitSel.title =
+        mode === "focus"
+          ? "Focused device — the transport, spacebar and bench sources follow it"
+          : "Measurement device — pick which unit Connect opens";
+      const fullSig = mode === "focus" ? `focus|${sig}` : sig;
+      if (unitSel.dataset.sig !== fullSig) {
+        unitSel.dataset.sig = fullSig;
+        const s = store.get();
         unitSel.replaceChildren(
-          ...units.map((u) =>
-            el("option", { value: u.id }, deviceLabel(store.get(), u))
-          )
+          ...(mode === "focus"
+            ? sessionKeys(s).map((k) =>
+                el("option", { value: k }, sessionLabel(s, k))
+              )
+            : availableEntries(s).map((u) =>
+                el("option", { value: u.id }, deviceLabel(s, u))
+              ))
         );
       }
-      if (value !== null && units.some((u) => u.id === value)) {
+      if (mode === "focus") {
+        unitSel.value = value as string;
+      } else if (
+        value !== null &&
+        availableEntries(store.get()).some((u) => u.id === value)
+      ) {
         unitSel.value = value;
       }
     },

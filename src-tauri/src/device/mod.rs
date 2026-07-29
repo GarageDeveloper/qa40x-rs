@@ -84,4 +84,4 @@ pub use runtime::{
     OpenUnitCell,
 };
 pub use source::{DeviceHandle, DeviceSource};
-pub use wire::{DeviceEntry, DeviceList};
+pub use wire::{AddedDevice, DeviceEntry, DeviceList};

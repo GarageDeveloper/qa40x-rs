@@ -126,3 +126,113 @@
 .traces__wt:hover {
   color: var(--ink-1);
 }
+
+/* -- device groups (issue #25 lot E4) -------------------------------- */
+
+.traces__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* "+ device" head select: same quiet-select idiom as ＋wt, wider face. */
+.traces__adddev {
+  width: 5em;
+}
+
+.traces__groups,
+.traces__tail,
+.traces__group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.traces__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.traces__group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+}
+
+.traces__group-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.traces__group-alias {
+  width: 5.5em;
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--ink-2);
+}
+
+.traces__group-ctls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 2px;
+}
+
+.traces__group-ctl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.traces__group-ctl-label {
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+/* Compact .field override: the sidebar row holds THREE labelled selects —
+   the top bar's 13px/8px+24px chrome truncates "42 dBV" to "42 dE"
+   (Raphaël, 2026-07-28). Smaller font, tighter padding, arrow pulled in.
+   `select.` prefix: `select.field` (element+class) outranks a lone class,
+   so the override must match its specificity to win by cascade order. */
+select.traces__group-sel {
+  font-size: 11px;
+  min-width: 0;
+  flex: 1;
+  padding: 3px 4px;
+  padding-right: 15px;
+  background-position: right 4px center;
+}
+
+.traces__group-collapse {
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 2px;
+  flex: none;
+}
+
+.traces__group-collapse:hover {
+  color: var(--ink-1);
+}
+
+/* Collapsed group: header only — controls and rows fold away (same
+   disclosure idiom as the sidebar sections' is-collapsed). */
+.traces__group--collapsed .traces__group-ctls,
+.traces__group--collapsed .traces__group-rows {
+  display: none;
+}

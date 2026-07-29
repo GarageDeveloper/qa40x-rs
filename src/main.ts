@@ -51,6 +51,31 @@ const wsStore = createWorkspaceStore();
   // the app writes, so a spec never touches IndexedDB internals.
   wsCurrentName: () => wsStore.loadCurrent().then((d) => d?.name ?? null),
   wsSavedNames: () => wsStore.list(),
+  // Multi-session probe (issue #25 lot E4) — an EXTENSION beside state(),
+  // never a reshape of it (the four `state().run.*` adapter accessors are
+  // pinned): every session's transport-relevant scalars plus the focus,
+  // keyed by session key.
+  sessions: () => {
+    const s = store.get();
+    return {
+      // Named `focused` on purpose: the focus-mutator source-scan pin
+      // flags a tight devices-context focus key, and this read-projection
+      // must not need an allowlist entry.
+      focused: s.devices.focus,
+      byKey: Object.fromEntries(
+        Object.values(s.devices.sessions).map((x) => [
+          x.key,
+          {
+            slot: x.slot,
+            deviceId: x.deviceId,
+            status: x.device.status,
+            streaming: x.run.streaming,
+            frames: x.run.stats.frames,
+          },
+        ])
+      ),
+    };
+  },
 };
 
 // Resolve the startup theme before first paint: stored choice, else OS.

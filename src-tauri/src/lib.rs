@@ -209,18 +209,39 @@ async fn connect_device(
 /// <id>`) instead of superseded — adding must never steal an open unit's
 /// claim. Any enumerated unit qualifies, virtual included (a virtual unit
 /// never unplugs, so no monitor is spawned for it).
+///
+/// The answer carries the opened unit's id AND slot ([`device::AddedDevice`],
+/// lot E4): the frontend mints the session with the id already adopted, so
+/// no command can ever fall through to the default runtime while waiting
+/// for an enumeration to land.
+/// `slot` (optional): the caller's preferred runtime slot — the Traces
+/// panel's revive-a-dormant-group gesture asks for the group's OWN slot so
+/// its slot-keyed trace rows come back to life. Occupied/invalid hints fall
+/// back to the normal first-free allocation; the answer's `slot` is the
+/// authority.
 #[tauri::command]
 async fn connect_additional_device(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     device_id: String,
-) -> Result<String, String> {
+    slot: Option<u32>,
+) -> Result<device::AddedDevice, String> {
     info!("Connect additional device command called ({device_id})");
     let devices = { state.lock().await.devices.clone() };
     let desc = devices
-        .open_additional(&device::DeviceId::from_wire(device_id))
+        .open_additional(
+            &device::DeviceId::from_wire(device_id),
+            slot.map(|s| s as usize),
+        )
         .await
         .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    // The slot is read back right after the open. If the unit is already
+    // gone (lost between the open and this read), answer an error rather
+    // than guess a slot the frontend would mint a phantom session for.
+    let Some(slot) = devices.slot_of(desc.id.as_str()) else {
+        return Err(format!("Failed to connect: device lost right after open: {}", desc.id.as_str()));
+    };
 
     // Watch THIS open for unplug — same rules as connect_device: resolved by
     // the unit just opened (never "the default"), physical units only.
@@ -232,7 +253,10 @@ async fn connect_additional_device(
         }
     }
 
-    Ok("Connected successfully".to_string())
+    Ok(device::AddedDevice {
+        device_id: desc.id.as_str().to_string(),
+        slot: slot as u32,
+    })
 }
 
 /// Connect to the embedded virtual QA40x (demo mode). The simulator runs
@@ -1538,7 +1562,7 @@ mod command_arg_tests {
         devices.open_virtual().await.expect("demo unit opens on slot 0");
 
         let err = devices
-            .open_additional(&device::DeviceId::from_wire(""))
+            .open_additional(&device::DeviceId::from_wire(""), None)
             .await
             .expect_err("an empty id must never resolve to some open unit");
         assert!(matches!(err, device::DeviceError::NotFound));
@@ -1587,7 +1611,7 @@ mod command_arg_tests {
         {
             let devices = { app_state.lock().await.devices.clone() };
             devices
-                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
                 .await
                 .expect("the built-in second virtual unit opens on a fresh slot");
         }
@@ -1646,7 +1670,7 @@ mod command_arg_tests {
         {
             let devices = { app_state.lock().await.devices.clone() };
             devices
-                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"))
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
                 .await
                 .expect("the second unit opens on a fresh slot");
         }

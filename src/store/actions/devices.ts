@@ -7,8 +7,9 @@ import type { Ipc } from "../../ipc/ipc";
 import type { DeviceList } from "../../gen";
 import type { Store } from "../store";
 import type { AppState, DevicesState, SessionKey } from "../state";
-import { slotOfSessionKey } from "../state";
+import { SLOT0, initialSession, sessionKeyForSlot, slotOfSessionKey } from "../state";
 import { syncAllStreams } from "./stream";
+import { toast } from "./ui";
 
 /**
  * Make `key` the FOCUSED session — the Run/Space target, the single-device
@@ -31,6 +32,19 @@ export function setFocusedSession(
 ): void {
   const s = store.get();
   if (s.devices.focus === key || !s.devices.sessions[key]) return;
+  // The gap-free generator (output-only, M2) plays a FIXED buffer for the
+  // focused session and does NOT follow a focus move the way streams do —
+  // syncAllStreams below re-syncs capture loops, not the generator. A
+  // focus change under a running generator would strand the old device
+  // looping a mix the UI no longer describes, uneditable and unstoppable
+  // from the new focus (E4 review #2b). Refused until per-device sources
+  // land (lot F); stop output-only first.
+  for (const sess of Object.values(s.devices.sessions)) {
+    if (sess.run.generatorRunning) {
+      toast(store, "info", "Stop the output-only generator before switching focus");
+      return;
+    }
+  }
   store.update("devices/focus", (st) => {
     if (!st.devices.sessions[key]) return st;
     const devices = { ...st.devices, focus: key };
@@ -65,6 +79,50 @@ function derivePrimary(d: Omit<DevicesState, "primary">): string | null {
   if (d.pick !== null && d.available.includes(d.pick)) return d.pick;
   const physical = d.available.find((id) => !d.byId[id]?.is_virtual);
   return physical ?? d.available[0] ?? null;
+}
+
+/**
+ * Mint the session for a unit just opened on `slot` (issue #25 lot E4) —
+ * PURE, with the registry id adopted AT MINT: the id comes from the
+ * `connect_additional_device` answer itself, so `isRoutable` is true from
+ * the first instant and no command can fall through to the default runtime
+ * (bookkeeping item 1). The focus is deliberately untouched — an added
+ * device comes up in MONITOR mode (Raphaël decision 1: only the focused
+ * session carries the bench's sources). Status starts "connecting"; the
+ * add flow flips it once `get_device_info` answers.
+ */
+export function mintSession(s: AppState, slot: number, deviceId: string): AppState {
+  const key = sessionKeyForSlot(slot);
+  const base = initialSession(slot);
+  const sessions = {
+    ...s.devices.sessions,
+    [key]: {
+      ...base,
+      deviceId,
+      device: { ...base.device, status: "connecting" as const, present: true },
+    },
+  };
+  const devices = { ...s.devices, sessions };
+  return { ...s, devices: { ...devices, primary: derivePrimary(devices) } };
+}
+
+/**
+ * Evict a session (device removed or lost — issue #25 lot E4). PURE.
+ * SLOT0 is never dropped (the connect/demo flows own it). A focus on the
+ * dropped key falls back to the lowest remaining slot; the CALLER must
+ * re-sync every running stream in the same gesture (the setFocusedSession
+ * rationale: the DAC slot program follows the focus).
+ */
+export function dropSession(s: AppState, key: SessionKey): AppState {
+  if (key === SLOT0 || !s.devices.sessions[key]) return s;
+  const sessions = { ...s.devices.sessions };
+  delete sessions[key];
+  const focus =
+    s.devices.focus === key
+      ? (Object.values(sessions).sort((a, b) => a.slot - b.slot)[0]?.key ?? SLOT0)
+      : s.devices.focus;
+  const devices = { ...s.devices, sessions, focus };
+  return { ...s, devices: { ...devices, primary: derivePrimary(devices) } };
 }
 
 /**
@@ -103,6 +161,7 @@ export function deriveDevices(prev: DevicesState, list: DeviceList): DevicesStat
     available,
     pick: prev.pick,
     enumerating: false,
+    adding: prev.adding,
     sessions,
     focus: prev.focus,
     aliases: prev.aliases,

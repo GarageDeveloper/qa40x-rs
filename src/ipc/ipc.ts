@@ -12,6 +12,7 @@
  */
 import { invoke, Channel as TauriChannel } from "@tauri-apps/api/core";
 import type {
+  AddedDevice,
   Channel,
   DeviceConfig,
   DeviceList,
@@ -60,6 +61,18 @@ export interface Commands {
   // Names its unit by construction — any-unit opens go through
   // `connect_device` with a `deviceId`.
   connect_virtual_device: { args: Record<string, never>; result: string };
+  // Add-device (issue #25 lot E4): open an ADDITIONAL enumerated unit onto
+  // a free non-default runtime slot — never a supersede (already-open is
+  // rejected). `deviceId` is REQUIRED here, unlike every DeviceScoped
+  // command: it names the unit to OPEN, and the answer carries the opened
+  // id + slot so the caller mints its session with the id already adopted
+  // (no unroutable window). `slot` is the OPTIONAL preferred slot (the
+  // revive-a-dormant-group gesture asks for the group's own slot);
+  // occupied/invalid hints fall back — the answer's slot is the authority.
+  connect_additional_device: {
+    args: { deviceId: string; slot?: number };
+    result: AddedDevice;
+  };
   disconnect_device: { args: DeviceScoped; result: string };
   is_device_connected: { args: DeviceScoped; result: boolean };
   is_device_present: { args: Record<string, never>; result: boolean };

@@ -5,10 +5,17 @@
  * define signal sources, play the mix and render frames — and NOTHING beyond
  * that. It is a stand-in, not a simulator: where it cannot be honest it
  * throws a loud error (unknown commands, script execution, measurement
- * programs other than the THD sweep and wow & flutter — see thdSweep and
- * wowFlutter for why those exist and what may be asserted against them)
- * instead of quietly inventing behaviour a test could then "verify". See
- * tests/e2e/README.md for the full list of what is and is not simulated.
+ * programs other than the THD sweep and wow & flutter — see FakeUnit's
+ * thdSweep and wowFlutter for why those exist and what may be asserted
+ * against them) instead of quietly inventing behaviour a test could then
+ * "verify". See tests/e2e/README.md for the full list of what is and is not
+ * simulated.
+ *
+ * Split (issue #25 lot E4): `FakeDevice` owns the bench-wide surfaces — the
+ * command table, the enumeration model, the REST mirror, the export seam,
+ * storage — while everything a single open unit owns (connection, config
+ * registers, mixer, the v2 stream loop, trigger latches, measurement stats,
+ * the program gate) lives on `FakeUnit` (fake-unit.ts).
  *
  * Level model (kept honest, because level bookkeeping is where UI bugs hide):
  * - mixer slots render in the frontend's "level-volts" (sine peak 1.0 ≙
@@ -26,52 +33,18 @@
  *   absolute level that was actually driven when it was captured.
  */
 
-import {
-  analyzeAudio,
-  analyzeSpectrum,
-  autoHysteresis,
-  findEdge,
-  measureScope,
-  processFft,
-  SlidingStats,
-} from "./dsp";
+import { analyzeAudio, analyzeSpectrum, processFft } from "./dsp";
 import { inputDbvOffsetDb, syntheticLoopbackProvider, type FrameProvider } from "./frames";
+import {
+  FakeUnit,
+  type Args,
+  type ChannelLike,
+  type MixSlotDesc,
+  type MixSlotError,
+  type StreamConfigWire,
+} from "./fake-unit";
 
 /* ---- mirrors of the frontend/backend wire types ---------------------- */
-
-type MixRoute = "left" | "right" | "both" | "off";
-
-interface MixTone {
-  enabled: boolean;
-  frequency_hz: number;
-  amplitude_vrms: number;
-  phase_degrees: number;
-}
-
-type MixSlotSource =
-  | {
-      kind: "waveform";
-      waveform: "sine" | "square" | "triangle" | "sawtooth";
-      frequency_hz: number;
-      amplitude: number;
-    }
-  | { kind: "tones"; tones: MixTone[] }
-  | { kind: "multitone"; amplitude: number }
-  | { kind: "noise"; amplitude: number }
-  | { kind: "chirp"; amplitude: number }
-  | { kind: "script"; source: string };
-
-interface MixSlotDesc {
-  id: string;
-  source: MixSlotSource;
-  route: MixRoute;
-  enabled: boolean;
-}
-
-interface MixSlotError {
-  id: string;
-  error: string;
-}
 
 /** Mirrors `DeviceEntry`/`DeviceList` (src-tauri/src/device/wire.rs, issue
  * #25 lot D) — the device bar's enumeration feed. */
@@ -111,161 +84,19 @@ interface DeviceListWire {
   open: string[];
 }
 
-/* ---- v2 stream wire (mirrors src-tauri/src/stream.rs) ----------------- */
-
-/** Mirrors `TriggerConfig` (stream.rs) — level/hysteresis in level-volts of
- * the endpoint's own converter, converted per-frame to FS just like the
- * real backend's `evaluate_trigger`. */
-interface TriggerConfigWire {
-  mode: "auto" | "normal" | "single";
-  edge: "rising" | "falling";
-  level_v: number;
-  hysteresis_v: number | null;
-  pre_samples: number;
-  arm_epoch: number;
-}
-
-/** Mirrors `TriggerRequest` — the `SpectraRequest` pattern, one optional
- * config per hw endpoint. */
-interface TriggerRequestWire {
-  input_l: TriggerConfigWire | null;
-  input_r: TriggerConfigWire | null;
-  output_l: TriggerConfigWire | null;
-  output_r: TriggerConfigWire | null;
-}
-
-/** Mirrors `MeasureRequest` (stream.rs, lot B) — which endpoints get the
- * scope measurement suite. Optional on the wire like the backend's
- * `#[serde(default)]`: an older config without it means all-off. */
-interface MeasureRequestWire {
-  input_l: boolean;
-  input_r: boolean;
-  output_l: boolean;
-  output_r: boolean;
-}
-
-interface StreamConfigWire {
-  buffer_size: number;
-  slots: MixSlotDesc[];
-  window: "hann" | "rect" | "flattop";
-  averaging: { coherent: boolean; count: number };
-  spectra: { input_l: boolean; input_r: boolean; output_l: boolean; output_r: boolean };
-  output_range_dbv: number | null;
-  triggers: TriggerRequestWire;
-  measures?: MeasureRequestWire;
-}
-
-/** Under mockIPC invoke args are not serialized: the live Tauri `Channel`
- * object arrives intact and the fake pushes with `onmessage` (the mechanism
- * proven by src/ipc/channel-mock.test.ts, the M0 spike). */
-interface ChannelLike {
-  onmessage: (msg: unknown) => void;
-}
-
-type Args = Record<string, unknown>;
-
-/* ---- signal-source rendering (level-volts; sources.rs stand-in) ------ */
-
-/** One slot's contribution. All waveforms hit the RMS target `A` (in volts):
- * level-volts = physical/√2, so a sine peaks at A, a square at A/√2, a
- * triangle/sawtooth at A·√3/√2, noise has lv-RMS A/√2. */
-function renderSlot(src: MixSlotSource, sampleRate: number, n: number): number[] {
-  const out = new Array<number>(n).fill(0);
-  const w = (hz: number): number => (2 * Math.PI * hz) / sampleRate;
-  switch (src.kind) {
-    case "waveform": {
-      const a = src.amplitude;
-      const ph = w(src.frequency_hz);
-      for (let i = 0; i < n; i++) {
-        const s = Math.sin(ph * i);
-        if (src.waveform === "sine") out[i] = a * s;
-        else if (src.waveform === "square") out[i] = (a / Math.SQRT2) * Math.sign(s || 1);
-        else {
-          const t = ((src.frequency_hz * i) / sampleRate) % 1;
-          const shape = src.waveform === "triangle" ? 1 - 4 * Math.abs(t - 0.5) : 2 * t - 1;
-          out[i] = ((a * Math.sqrt(3)) / Math.SQRT2) * shape;
-        }
-      }
-      return out;
-    }
-    case "tones": {
-      for (const tone of src.tones) {
-        if (!tone.enabled) continue;
-        const ph = w(tone.frequency_hz);
-        const phi = (tone.phase_degrees * Math.PI) / 180;
-        for (let i = 0; i < n; i++) out[i] += tone.amplitude_vrms * Math.sin(ph * i + phi);
-      }
-      return out;
-    }
-    case "multitone": {
-      // Invented stand-in: 8 log-spaced tones, Schroeder-ish phases, total
-      // RMS = amplitude. The real backend's multitone differs; replaced by
-      // recorded fixtures in the suite task.
-      const tones = 8;
-      const a = src.amplitude / Math.sqrt(tones);
-      for (let k = 0; k < tones; k++) {
-        const hz = 100 * Math.pow(100, k / (tones - 1)); // 100 Hz … 10 kHz
-        const ph = w(hz);
-        const phi = (Math.PI * k * (k + 1)) / tones;
-        for (let i = 0; i < n; i++) out[i] += a * Math.sin(ph * i + phi);
-      }
-      return out;
-    }
-    case "noise": {
-      const peak = (src.amplitude / Math.SQRT2) * Math.sqrt(3); // uniform, RMS = A/√2 lv
-      for (let i = 0; i < n; i++) out[i] = (Math.random() * 2 - 1) * peak;
-      return out;
-    }
-    case "chirp": {
-      // Log sweep across the frame, 20 Hz → 20 kHz, sine-referenced level.
-      const f0 = 20;
-      const f1 = Math.min(20000, sampleRate / 2.5);
-      const k = Math.log(f1 / f0);
-      for (let i = 0; i < n; i++) {
-        const t = i / n;
-        const phase = ((2 * Math.PI * f0 * (n / sampleRate)) / k) * (Math.exp(k * t) - 1);
-        out[i] = src.amplitude * Math.sin(phase);
-      }
-      return out;
-    }
-    case "script":
-      // Guarded in mixer_set_slots; render silence if one slips through.
-      return out;
-  }
-}
-
-/** The mixer.rs output-range policy: smallest of {+8, +18} dBV containing
- * peak + 1 dB margin; down-moves wait for 1 dB of clearance (hysteresis). */
-function fitOutputRange(peakDbv: number, current: number): number {
-  const pick = (dbv: number): number => (dbv + 1 <= 8 ? 8 : 18);
-  const target = pick(peakDbv);
-  if (target >= current) return target;
-  return pick(peakDbv + 1) < current ? target : current;
-}
-
 /* ---- the device ------------------------------------------------------ */
 
 export class FakeDevice {
   /** Wired by boot.ts to the mock's `plugin:event|emit` path. */
   emitter: (event: string, payload?: unknown) => void = () => {};
 
-  private connected = false;
   private present = true;
-  /** True when the session was opened via connect_virtual_device (demo mode). */
-  private virtualDevice = false;
   /** How many physical units the bus offers (lot D picker specs poke it via
    * setUnits; presence off hides them all, like a real unplug). */
   private unitCount = 1;
-  /** The unit currently open, as a `"<source>/<unit-key>"` id. */
-  private openId: string | null = null;
   /** Every `connect_device` deviceId argument, in call order (null = the
    * arg-less legacy call) — what the picker specs assert against. */
   connectDeviceIds: (string | null)[] = [];
-  private generatorRunning = false;
-  // Mirrors the real backend: `last_telemetry` does NO USB I/O and returns
-  // null until a keepalive has run. A fake that always returned data here
-  // hid a v2 bug (no keepalive → forever-empty telemetry on hardware).
-  private lastTelemetry: Record<string, number> | null = null;
   /* REST server mirror — the fake never runs one, but the App drawer's
    * exposure/token state must round-trip like the real backend's. */
   private restExposed = false;
@@ -280,7 +111,6 @@ export class FakeDevice {
       token: this.restExposed ? (this.fixedRestToken ?? "e2e-generated-token") : null,
     };
   }
-  private config = { input_gain: 42, output_gain: 8, sample_rate: 48000 };
 
   /* -- Export seam (issue #30), public for spec assertions -------------- */
   /** Overrides the answered save path; null (default) derives it from the
@@ -293,53 +123,78 @@ export class FakeDevice {
   /** Every clipboard image handed to `export_copy_image` (dimensions +
    * payload size — the pixel values themselves don't matter to specs). */
   copiedImages: { width: number; height: number; byteLength: number }[] = [];
-  private slots: MixSlotDesc[] = [];
   private storage = new Map<string, unknown[]>(); // key: kind (projects, …)
-  /** While armed (holdPrograms), measurement-program commands do not resolve
-   * until releasePrograms() — so a test can OBSERVE the app in its
-   * program-is-running state instead of racing a timer. */
-  private programGate: Promise<void> | null = null;
-  private programGateRelease: (() => void) | null = null;
-  /** Armed while a `wowFlutter()` call is in flight: `sweep_stop` rejects it
-   * with "cancelled" — the fake's model of the real backend's cancellable
-   * capture (issue #28 review point 7). Unlike the THD sweep (an
-   * intentional instantaneous stub, see `thdSweep`), wow & flutter's Stop
-   * button is meant to actually abort a held capture, so its fake honors
-   * that instead of only being a lock-observation gate. */
-  private wowFlutterCancel: (() => void) | null = null;
-  /* v2 stream loop (stream_start/update/stop) */
-  private streamTimer: ReturnType<typeof setInterval> | null = null;
-  private streamConfig: StreamConfigWire | null = null;
-  private streamChannel: ChannelLike | null = null;
-  private streamSeq = 0;
-  /** Named per-slot errors of the current stream config (script refusals) —
-   * carried on every frame, like the real backend's set_slots errors. */
-  private streamSlotErrors: MixSlotError[] = [];
-  /** Per-endpoint SINGLE latch — mirrors stream.rs's `TriggerStates` /
-   * `EndpointTrigger`: one armed-epoch + fired flag PER ENDPOINT ("input_l"
-   * etc.), never a single shared latch (multi-endpoint discipline, issue
-   * #25's e2e twin). */
-  private triggerArmedEpoch: Record<string, number> = {};
-  private triggerFired: Record<string, boolean> = {};
-  /** Per-endpoint, per-measure sliding stats (lot B) — mirrors stream.rs's
-   * `MeasureStates`: one bank PER ENDPOINT, dropped when the endpoint
-   * leaves the request (a re-enable restarts the history). */
-  private measureStats: Record<string, Record<string, SlidingStats>> = {};
 
-  constructor(private provider: FrameProvider = syntheticLoopbackProvider()) {}
+  /** Open units by runtime slot (lot E4) — slot 0 always exists (the
+   * default runtime, the target of every arg-less command); the
+   * connect_additional_device arm fills further slots. */
+  private units = new Map<number, FakeUnit>();
+  /** Physical unit ids pulled off the bus by unplugUnit(); cleared by
+   * setPresent(true) (a bus-wide replug). */
+  private unpluggedIds = new Set<string>();
+  /** How many built-in virtual units enumerate. The REAL registry always
+   * offers two, but the fake defaults to ONE: devices.pw.ts pins the
+   * single-virtual option list — multi-device specs opt in via
+   * setVirtualUnits(). */
+  private virtualUnitCount = 1;
 
-  /** Swap the capture provider (e.g. for recorded fixtures) mid-session. */
-  setProvider(p: FrameProvider): void {
-    this.provider = p;
+  constructor(provider: FrameProvider = syntheticLoopbackProvider()) {
+    this.units.set(0, new FakeUnit(provider));
   }
 
-  /** Simulate an unplug/replug from a test. */
+  /** The default-runtime unit (slot 0) — mirrors registry.rs's
+   * `runtime_for(None)`. */
+  private get unit(): FakeUnit {
+    return this.units.get(0) as FakeUnit;
+  }
+
+  /** Route a command to the addressed unit: no id ⇒ slot 0; an id some
+   * open unit holds ⇒ that unit; anything else is rejected exactly like
+   * the registry (`Unknown device: <id>`) — never a silent fallback. */
+  private unitFor(deviceId: string | undefined): FakeUnit {
+    if (deviceId === undefined) return this.unit;
+    for (const u of this.units.values()) {
+      if (u.connected && u.openId === deviceId) return u;
+    }
+    throw new Error(`Unknown device: ${deviceId}`);
+  }
+
+  /** Open units, sorted by slot — the enumeration/report order. */
+  private openUnits(): [number, FakeUnit][] {
+    return [...this.units]
+      .filter(([, u]) => u.connected && u.openId !== null)
+      .sort(([a], [b]) => a - b);
+  }
+
+  /** Swap slot 0's capture provider (e.g. for recorded fixtures). */
+  setProvider(p: FrameProvider): void {
+    this.unit.setProvider(p);
+  }
+
+  /** Simulate a bus-wide unplug/replug from a test. Slot 0 keeps its
+   * historical contract byte-for-byte: it loses whatever it has open
+   * (virtual included) with the payload-less event. Higher slots lose
+   * their PHYSICAL units only (a bus-off cannot detach an in-process
+   * virtual unit), each with its id in the payload — the real per-unit
+   * liveness monitor's shape. */
   setPresent(present: boolean): void {
     this.present = present;
-    if (!present && this.connected) {
-      this.connected = false;
-      this.openId = null;
-      this.emitter("device-disconnected");
+    if (present) {
+      this.unpluggedIds.clear();
+      return;
+    }
+    for (const [slot, u] of [...this.units].sort(([a], [b]) => a - b)) {
+      if (!u.connected) continue;
+      if (slot === 0) {
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected");
+      } else if (u.openId !== null && u.openId.startsWith("usb/")) {
+        const lost = u.openId;
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected", { device_id: lost });
+      }
     }
   }
 
@@ -348,16 +203,61 @@ export class FakeDevice {
     this.unitCount = n;
   }
 
+  /** How many built-in virtual units enumerate (default 1 — see
+   * `virtualUnitCount`). The real-app shape is 2. */
+  setVirtualUnits(n: number): void {
+    this.virtualUnitCount = n;
+  }
+
+  /** Unplug ONE physical unit (lot E4): it leaves the bus and its open
+   * slot, and the `device-disconnected` event names it — the per-unit
+   * liveness monitor's contract. A running stream is NOT stopped here: the
+   * loop's next tick errors out on the dead unit, like hardware. */
+  unplugUnit(id: string): void {
+    this.unpluggedIds.add(id);
+    for (const u of this.units.values()) {
+      if (u.connected && u.openId === id) {
+        u.connected = false;
+        u.openId = null;
+        this.emitter("device-disconnected", { device_id: id });
+      }
+    }
+  }
+
+  /** Slots with an open unit, ascending — multi-device spec assertions. */
+  openSlots(): number[] {
+    return this.openUnits().map(([slot]) => slot);
+  }
+
+  /** The stream config `slot`'s unit last adopted (null: none / no unit). */
+  streamConfigOf(slot: number): StreamConfigWire | null {
+    return this.units.get(slot)?.streamConfig ?? null;
+  }
+
+  /** Frames `slot`'s unit has pushed on its current stream. */
+  frameCountOf(slot: number): number {
+    return this.units.get(slot)?.streamSeq ?? 0;
+  }
+
   /* -- the enumeration model (mirrors DeviceRegistry::list) ------------- */
 
   private physicalIds(): string[] {
     if (!this.present) return [];
-    return Array.from({ length: this.unitCount }, (_, i) => `usb/E2E-FAKE-000${i + 1}`);
+    return Array.from({ length: this.unitCount }, (_, i) => `usb/E2E-FAKE-000${i + 1}`)
+      .filter((id) => !this.unpluggedIds.has(id));
   }
 
   private static readonly VIRTUAL_ID = "virtual/E2E-VIRT-0001";
 
-  private deviceEntry(id: string, open: boolean): DeviceEntryWire {
+  private virtualIds(): string[] {
+    return Array.from(
+      { length: this.virtualUnitCount },
+      (_, i) => `virtual/E2E-VIRT-000${i + 1}`
+    );
+  }
+
+  private deviceEntry(id: string, slot: number | null): DeviceEntryWire {
+    const open = slot !== null;
     const virtual = id.startsWith("virtual/");
     const serial = id.split("/")[1];
     // Real register-map tables (caps.rs pins them): the virtual unit is the
@@ -391,42 +291,50 @@ export class FakeDevice {
         is_virtual: virtual,
       },
       open,
-      // Registry rule: an open unit carries its runtime slot; the fake is
-      // single-open (lot E4 makes this per-unit), so slot 0.
-      slot: open ? 0 : null,
+      // Registry rule: an open unit carries its runtime slot (per-unit
+      // since lot E4).
+      slot,
     };
   }
 
   private deviceList(): DeviceListWire {
-    const ids = [...this.physicalIds(), FakeDevice.VIRTUAL_ID];
-    const open = this.connected && this.openId !== null ? [this.openId] : [];
-    // An open unit that stopped enumerating stays listed (registry rule).
-    if (open.length && !ids.includes(open[0])) ids.push(open[0]);
+    const ids = [...this.physicalIds(), ...this.virtualIds()];
+    const slotById = new Map<string, number>();
+    const open: string[] = [];
+    for (const [slot, u] of this.openUnits()) {
+      slotById.set(u.openId as string, slot);
+      open.push(u.openId as string);
+      // An open unit that stopped enumerating stays listed (registry rule).
+      if (!ids.includes(u.openId as string)) ids.push(u.openId as string);
+    }
     return {
-      devices: ids.map((id) => this.deviceEntry(id, open.includes(id))),
+      devices: ids.map((id) => this.deviceEntry(id, slotById.get(id) ?? null)),
       open,
     };
   }
 
-  /** Arm the program gate: the next measurement-program command (e.g. a THD
-   * sweep) stays in flight until releasePrograms(). Lets a test assert what
-   * the UI looks like WHILE a program owns the device. */
+  /** Arm the program gate on every unit: the next measurement-program
+   * command (e.g. a THD sweep) stays in flight until releasePrograms().
+   * Lets a test assert what the UI looks like WHILE a program owns a
+   * device. */
   holdPrograms(): void {
-    if (this.programGate) return;
-    this.programGate = new Promise((resolve) => {
-      this.programGateRelease = resolve;
-    });
+    for (const u of this.units.values()) u.holdPrograms();
   }
 
   /** Release a held program command (no-op when none is armed). */
   releasePrograms(): void {
-    this.programGateRelease?.();
-    this.programGate = null;
-    this.programGateRelease = null;
+    for (const u of this.units.values()) u.releasePrograms();
   }
 
   /* eslint-disable-next-line complexity -- a command table, one arm each */
   handle(cmd: string, a: Args): unknown {
+    // The connect-family arms resolve their own target below (their
+    // deviceId names a unit to OPEN, not an open unit to route to); every
+    // other command routes by its optional deviceId (issue #25 lots C/E4).
+    const u =
+      cmd === "connect_device" || cmd === "connect_additional_device"
+        ? this.unit
+        : this.unitFor(a.deviceId as string | undefined);
     switch (cmd) {
       /* -- presence / connection -- */
       case "is_device_present":
@@ -435,7 +343,7 @@ export class FakeDevice {
         // The bus device, never the virtual one — mirrors the backend.
         return this.present && this.unitCount > 0;
       case "is_device_connected":
-        return this.connected;
+        return u.connected;
       case "connect_device": {
         const wanted = (a.deviceId as string | undefined) ?? null;
         this.connectDeviceIds.push(wanted);
@@ -444,54 +352,93 @@ export class FakeDevice {
           throw new Error(`Failed to connect: Not found (fake): ${wanted}`);
         }
         if (wanted !== null && wanted.startsWith("virtual/")) {
-          this.connected = true;
-          this.config.input_gain = 42;
-          this.virtualDevice = true;
-          this.openId = wanted;
+          u.connected = true;
+          u.config.input_gain = 42;
+          u.virtualDevice = true;
+          u.openId = wanted;
           return "Connected to the virtual QA40x (e2e fake device)";
         }
         const first = this.physicalIds()[0];
         if (!this.present || first === undefined)
           throw new Error("No QA40x on the bus (fake)");
-        this.connected = true;
-        this.config.input_gain = 42; // connect forces the safe input range
-        this.virtualDevice = false;
-        this.openId = wanted ?? first;
+        u.connected = true;
+        u.config.input_gain = 42; // connect forces the safe input range
+        u.virtualDevice = false;
+        u.openId = wanted ?? first;
         return "Connected to QA402 (e2e fake device)";
       }
       case "connect_virtual_device":
         // Demo mode: attaches regardless of bus presence — the virtual
         // device lives in-process, exactly like the backend's simulator.
-        this.connected = true;
-        this.config.input_gain = 42;
-        this.virtualDevice = true;
-        this.openId = FakeDevice.VIRTUAL_ID;
+        u.connected = true;
+        u.config.input_gain = 42;
+        u.virtualDevice = true;
+        u.openId = FakeDevice.VIRTUAL_ID;
         return "Connected to the virtual QA40x (demo mode, e2e fake)";
+      case "connect_additional_device": {
+        const wanted = a.deviceId as string;
+        // Mirror registry::open_additional — never a supersede: a unit
+        // already open on ANY slot is rejected (planner finding F2).
+        for (const held of this.units.values()) {
+          if (held.connected && held.openId === wanted) {
+            throw new Error(`Failed to connect: Device already open: ${wanted}`);
+          }
+        }
+        if (!this.deviceList().devices.some((d) => d.id === wanted)) {
+          throw new Error(`Failed to connect: Not found (fake): ${wanted}`);
+        }
+        // Preferred slot honored when free (the revive gesture — mirrors
+        // registry::free_or_new_runtime's hint arm), else first free
+        // NON-DEFAULT slot (a disconnected unit's slot is reused with a
+        // FRESH unit — a fresh runtime open), else a new slot, capped like
+        // registry::MAX_DEVICES.
+        const hint = a.slot as number | undefined;
+        let slot: number;
+        if (hint !== undefined && hint >= 1 && hint < 8 && !this.units.get(hint)?.connected) {
+          slot = hint;
+        } else {
+          slot = 1;
+          while (this.units.get(slot)?.connected) slot++;
+          if (slot >= 8) {
+            throw new Error("Failed to connect: All device slots are in use");
+          }
+        }
+        const fresh = new FakeUnit(syntheticLoopbackProvider());
+        fresh.connected = true;
+        fresh.config.input_gain = 42; // connect forces the safe input range
+        fresh.virtualDevice = wanted.startsWith("virtual/");
+        fresh.openId = wanted;
+        this.units.set(slot, fresh);
+        // The answer carries id + slot (the step-3 `AddedDevice` shape) so
+        // the frontend adopts the id from the connect answer itself —
+        // bookkeeping item 1: the unroutable window is zero.
+        return { device_id: wanted, slot };
+      }
       case "list_devices":
         return this.deviceList();
       case "disconnect_device":
-        this.connected = false;
-        this.virtualDevice = false;
-        this.openId = null;
+        u.connected = false;
+        u.virtualDevice = false;
+        u.openId = null;
         // Mirror the backend: the stream loop and the gap-free generator are
         // stopped BEFORE the device closes (clean Stopped, never an Error).
-        this.stopStream(true);
-        this.generatorRunning = false;
+        u.stopStream(true);
+        u.generatorRunning = false;
         return "Disconnected (e2e fake device)";
       case "get_device_info": {
         // Identity follows the OPEN unit (lot D review #6): a spec pinning
         // "the bar names the unit you picked" must fail against a fake
         // reporting the wrong unit. The virtual unit is the QA403 of the
         // real demo backend.
-        const model = this.virtualDevice ? "QA403" : "QA402";
-        const rates = this.virtualDevice
+        const model = u.virtualDevice ? "QA403" : "QA402";
+        const rates = u.virtualDevice
           ? [48000, 96000, 192000, 384000]
           : [48000, 96000, 192000];
         return {
           model,
           firmware_version: 991,
-          serial: this.openId?.split("/")[1] ?? "E2E-FAKE-0001",
-          is_virtual: this.virtualDevice,
+          serial: u.openId?.split("/")[1] ?? "E2E-FAKE-0001",
+          is_virtual: u.virtualDevice,
           product: `${model} Audio Analyzer (e2e fake)`,
           sample_rates: rates,
           supports_flash: false,
@@ -508,15 +455,15 @@ export class FakeDevice {
       /* -- config registers -- */
       case "get_device_config":
       case "read_device_config":
-        return { ...this.config };
+        return { ...u.config };
       case "set_input_gain":
-        this.config.input_gain = a.gainDbv as number;
+        u.config.input_gain = a.gainDbv as number;
         return `Input range set to ${a.gainDbv} dBV (fake)`;
       case "set_output_gain":
-        this.config.output_gain = a.gainDbv as number;
+        u.config.output_gain = a.gainDbv as number;
         return `Output range set to ${a.gainDbv} dBV (fake)`;
       case "set_sample_rate":
-        this.config.sample_rate = a.rateHz as number;
+        u.config.sample_rate = a.rateHz as number;
         return `Sample rate set to ${a.rateHz} Hz (fake)`;
 
       /* -- converter dBFS→dBV offsets (see header for the model) -- */
@@ -525,24 +472,24 @@ export class FakeDevice {
         // ADC_CAL_DB): the same offset the synthetic capture uses, and the
         // one that makes REAL recorded fixtures display their true absolute
         // dBV (a −12 dBV recorded sine reads ≈ −12 dBV, not 8.8 dB low).
-        return { offset_db: inputDbvOffsetDb(this.config.input_gain), calibrated: true };
+        return { offset_db: inputDbvOffsetDb(u.config.input_gain), calibrated: true };
       case "get_output_dbv_offset":
         return {
-          offset_db: this.config.output_gain + 20 * Math.log10(Math.SQRT2),
+          offset_db: u.config.output_gain + 20 * Math.log10(Math.SQRT2),
           calibrated: true,
         };
 
       /* -- telemetry / status -- */
       case "keepalive":
-        this.lastTelemetry = {
+        u.lastTelemetry = {
           usb_voltage_v: 5.02,
           usb_current_ma: 331,
           iso_current_ma: 118,
           temperature_c: 33.4,
         };
-        return this.lastTelemetry;
+        return u.lastTelemetry;
       case "last_telemetry":
-        return this.lastTelemetry;
+        return u.lastTelemetry;
       case "rest_status":
         return this.restStatus();
       case "rest_set_exposed":
@@ -593,7 +540,7 @@ export class FakeDevice {
       case "mixer_set_slots": {
         const slots = a.slots as MixSlotDesc[];
         const errors: MixSlotError[] = [];
-        this.slots = slots.filter((s) => {
+        u.slots = slots.filter((s) => {
           if (s.source.kind === "script") {
             errors.push({ id: s.id, error: "the e2e fake backend does not execute Rhai scripts" });
             return false;
@@ -603,7 +550,7 @@ export class FakeDevice {
         return errors;
       }
       case "mixer_render":
-        return this.renderMix(
+        return u.renderMix(
           a.sampleRate as number,
           a.bufferSize as number,
           Boolean(a.withSlots)
@@ -611,60 +558,60 @@ export class FakeDevice {
 
       /* -- streaming -- */
       case "generate_and_capture": {
-        this.assertConnected(cmd);
+        u.assertConnected(cmd);
         const left = a.left as number[];
         const right = a.right as number[];
-        const cap = this.provider.capture(left, right, {
-          sampleRate: this.config.sample_rate,
-          outputRangeDbv: this.config.output_gain,
-          inputRangeDbv: this.config.input_gain,
+        const cap = u.provider.capture(left, right, {
+          sampleRate: u.config.sample_rate,
+          outputRangeDbv: u.config.output_gain,
+          inputRangeDbv: u.config.input_gain,
         });
         return {
           left_channel: cap.left,
           right_channel: cap.right,
-          sample_rate: this.config.sample_rate,
+          sample_rate: u.config.sample_rate,
         };
       }
       case "acquire_data": {
-        this.assertConnected(cmd);
+        u.assertConnected(cmd);
         const n = a.numSamples as number;
         const silence = new Array<number>(n).fill(0);
-        const cap = this.provider.capture(silence, silence, {
-          sampleRate: this.config.sample_rate,
-          outputRangeDbv: this.config.output_gain,
-          inputRangeDbv: this.config.input_gain,
+        const cap = u.provider.capture(silence, silence, {
+          sampleRate: u.config.sample_rate,
+          outputRangeDbv: u.config.output_gain,
+          inputRangeDbv: u.config.input_gain,
         });
-        return { left_channel: cap.left, right_channel: cap.right, sample_rate: this.config.sample_rate };
+        return { left_channel: cap.left, right_channel: cap.right, sample_rate: u.config.sample_rate };
       }
       /* -- the v2 backend run loop (rewrite-v2 B-2 wire) -- */
       case "stream_start": {
-        this.assertConnected(cmd);
+        u.assertConnected(cmd);
         // Take-over semantics (mirrors StreamControl::start): a running
         // loop is stopped — its channel gets its Stopped — then the new
         // one starts. "Play right after Stop" must always start.
-        if (this.streamTimer !== null) this.stopStream(true);
-        this.applyStreamConfig(a.config as StreamConfigWire);
-        this.streamChannel = a.onFrame as ChannelLike;
-        this.streamSeq = 0;
+        if (u.streamTimer !== null) u.stopStream(true);
+        u.applyStreamConfig(a.config as StreamConfigWire);
+        u.streamChannel = a.onFrame as ChannelLike;
+        u.streamSeq = 0;
         // A fresh loop = fresh trigger latches (mirrors `TriggerStates`
         // being a LOCAL of `run_stream_loop`, not shared across restarts —
         // only `stream_update` on an already-running loop must NOT reset).
-        this.triggerArmedEpoch = {};
-        this.triggerFired = {};
-        this.measureStats = {};
+        u.triggerArmedEpoch = {};
+        u.triggerFired = {};
+        u.measureStats = {};
         // ~8 fps: fast enough for the specs, slow enough to stay honest
         // about per-frame work in a browser context.
-        this.streamTimer = setInterval(() => this.streamFrame(), 120);
+        u.streamTimer = setInterval(() => u.streamFrame(), 120);
         return null;
       }
       case "stream_update":
-        this.applyStreamConfig(a.config as StreamConfigWire);
+        u.applyStreamConfig(a.config as StreamConfigWire);
         return null;
       case "stream_stop":
-        this.stopStream(true);
+        u.stopStream(true);
         return null;
       case "stream_status":
-        return this.streamTimer !== null;
+        return u.streamTimer !== null;
       case "stream_reset_averaging":
         // The fake has no averaging accumulator — accepting the command is
         // the contract (the real backend empties its analyzers).
@@ -672,26 +619,26 @@ export class FakeDevice {
       case "stream_reset_measure_stats":
         // Mirrors the real backend's stats_reset consume: every endpoint's
         // sliding windows drop, the next frame starts the new history.
-        this.measureStats = {};
+        u.measureStats = {};
         return null;
       case "sweep_stop":
         // The fake's THD sweep is instantaneous — accepting the command is
         // its whole contract. Wow & flutter's held capture, if any, is
-        // actually cancelled (see `wowFlutterCancel`).
-        this.wowFlutterCancel?.();
+        // actually cancelled (see FakeUnit's `wowFlutterCancel`).
+        u.cancelWowFlutter();
         return null;
 
       /* -- output-only mode (rewrite-v2 M2): gap-free DAC, no capture ---- */
       case "output_only_start": {
-        this.assertConnected(cmd);
+        u.assertConnected(cmd);
         const slots = a.slots as MixSlotDesc[];
         if (slots.length === 0)
           throw new Error("output-only: no signal source is playing (fake)");
         // One DAC owner at a time — the real backend stops the stream loop
         // (its Stopped message reaches the frontend) and any prior generator.
-        this.stopStream(true);
+        u.stopStream(true);
         const errors: MixSlotError[] = [];
-        this.slots = slots.filter((s) => {
+        u.slots = slots.filter((s) => {
           if (s.source.kind === "script") {
             errors.push({ id: s.id, error: "the e2e fake backend does not execute Rhai scripts" });
             return false;
@@ -702,30 +649,30 @@ export class FakeDevice {
         // fresh margined {+8,+18} pick — no hysteresis to carry on a start),
         // scale + report clip, loop the buffer. 0.1 s captures the periodic
         // mix's peak; the real path renders 1 s for seamless repetition.
-        const mix = this.renderMix(this.config.sample_rate, 4800, false);
+        const mix = u.renderMix(u.config.sample_rate, 4800, false);
         const sigmaPeakDbv = mix.peak > 0 ? 20 * Math.log10(mix.peak) : null;
         if (sigmaPeakDbv !== null) {
-          this.config.output_gain = sigmaPeakDbv + 1 <= 8 ? 8 : 18;
+          u.config.output_gain = sigmaPeakDbv + 1 <= 8 ? 8 : 18;
         }
-        const clipped = mix.peak * Math.pow(10, -this.config.output_gain / 20) > 1;
-        this.generatorRunning = true;
+        const clipped = mix.peak * Math.pow(10, -u.config.output_gain / 20) > 1;
+        u.generatorRunning = true;
         return {
           sigma_peak_dbv: sigmaPeakDbv,
           clipped,
-          fitted_output_range_dbv: this.config.output_gain,
+          fitted_output_range_dbv: u.config.output_gain,
           errors,
         };
       }
 
       case "start_generator":
-        this.assertConnected(cmd);
-        this.generatorRunning = true;
+        u.assertConnected(cmd);
+        u.generatorRunning = true;
         return "Generator started (fake gap-free loop)";
       case "stop_generator":
-        this.generatorRunning = false;
+        u.generatorRunning = false;
         return "Generator stopped";
       case "is_generator_running":
-        return this.generatorRunning;
+        return u.generatorRunning;
       case "generate_sine": {
         const n = a.numSamples as number;
         const amp = a.amplitude as number;
@@ -751,20 +698,20 @@ export class FakeDevice {
         );
       case "analyze_audio_averaged": {
         const signal = a.signal as number[];
-        const fft = processFft(signal, this.config.sample_rate);
+        const fft = processFft(signal, u.config.sample_rate);
         return analyzeAudio(signal, fft.magnitudes, fft.frequencies, a.fundamentalFreq as number);
       }
 
-      /* -- measurement programs (device-owning; see thdSweep) -- */
+      /* -- measurement programs (device-owning; see FakeUnit.thdSweep) -- */
       case "measure_thd_vs_frequency":
-        this.assertConnected(cmd);
-        return this.thdSweep(a);
+        u.assertConnected(cmd);
+        return u.thdSweep(a);
       case "measure_thd_vs_level":
-        this.assertConnected(cmd);
-        return this.thdLevelSweep(a);
+        u.assertConnected(cmd);
+        return u.thdLevelSweep(a);
       case "measure_wow_flutter":
-        this.assertConnected(cmd);
-        return this.wowFlutter(a);
+        u.assertConnected(cmd);
+        return u.wowFlutter(a);
 
       /* -- scripts: honestly refused, not silently faked -- */
       case "script_run":
@@ -857,157 +804,6 @@ export class FakeDevice {
     }
   }
 
-  private assertConnected(cmd: string): void {
-    if (!this.connected) throw new Error(`Device not connected (fake, cmd=${cmd})`);
-  }
-
-  /**
-   * A THD-vs-frequency sweep — the one measurement PROGRAM the fake serves,
-   * because the device-lock invariants (a running program suspends the mixer,
-   * names itself on the greyed transports, resumes the mix afterwards) need a
-   * program that actually runs. The RESULT is a stub: log-spaced points at the
-   * fake loopback's ideal floor — tests must assert the lock semantics around
-   * this call, never these numbers. While `holdPrograms()` is armed the
-   * promise stays pending so a test can look at the locked UI.
-   */
-  private async thdSweep(a: Args): Promise<unknown> {
-    if (this.programGate) await this.programGate;
-    const n = Math.max(2, a.numPoints as number);
-    const start = a.startFreq as number;
-    const end = a.endFreq as number;
-    const level = a.amplitudeDbfs as number;
-    const points = Array.from({ length: n }, (_, i) => {
-      const frequency = start * Math.pow(end / start, i / (n - 1));
-      return {
-        frequency,
-        level_dbfs: level,
-        thd_percent: 1e-4,
-        thd_db: -120,
-        thd_n_percent: 3e-4,
-        thd_n_db: -110,
-        fundamental_dbfs: level,
-      };
-    });
-    return { swept: "frequency", points };
-  }
-
-  /**
-   * A THD-vs-level sweep (issue #27): the sibling program, swept axis
-   * flipped — linear dBFS steps at a fixed tone. Same stub-numbers-only
-   * discipline as thdSweep: tests assert the lock/plumbing, never these
-   * values.
-   */
-  private async thdLevelSweep(a: Args): Promise<unknown> {
-    if (this.programGate) await this.programGate;
-    const n = Math.max(2, a.numPoints as number);
-    const start = a.startLevelDbfs as number;
-    const end = a.endLevelDbfs as number;
-    const freq = a.frequencyHz as number;
-    const points = Array.from({ length: n }, (_, i) => {
-      const level_dbfs = start + (end - start) * (i / (n - 1));
-      return {
-        frequency: freq,
-        level_dbfs,
-        thd_percent: 1e-4,
-        thd_db: -120,
-        thd_n_percent: 3e-4,
-        thd_n_db: -110,
-        fundamental_dbfs: level_dbfs,
-      };
-    });
-    return { swept: "level", points };
-  }
-
-  /**
-   * Wow & flutter (issue #28) — like `thdSweep`, a STUB result: the fake
-   * does not run the heterodyne/phase-diff FM demodulation the real
-   * backend does (pinned by the Rust unit tests in
-   * `src-tauri/src/audio/wow_flutter.rs`, e.g. `recovers_known_wow`).
-   * Instead it synthesizes the RESULT that SAME test's signal — a tone
-   * FM-modulated by a known 4 Hz / 0.15 %-peak wow — would produce, using
-   * the SAME decimation/window/cap constants as the real
-   * `deviation_spectrum` (1000 Hz demod rate, power-of-two FFT window,
-   * 200 Hz cap) so the axis, resolution and peak-vs-RMS relationship the
-   * dialog renders are physically consistent, not just "a plausible
-   * shape". `deviation_series` is populated too — the real backend always
-   * returns one. Tests must assert the PLUMBING (fields populate, the
-   * spectrum peaks near 4 Hz, the device-lock semantics), never these
-   * exact numbers.
-   *
-   * Gated by the same `programGate` as `thdSweep` so
-   * `holdPrograms()`/`releasePrograms()` covers it — but UNLIKE the THD
-   * stub (deliberately instantaneous, Stop is only a lock-observation
-   * no-op there), a held wow & flutter call is actually cancellable: Stop
-   * (`sweep_stop`) rejects it, mirroring the real backend's cancellable
-   * capture (issue #28 review point 7).
-   */
-  private async wowFlutter(a: Args): Promise<unknown> {
-    if (this.programGate) {
-      const gate = this.programGate;
-      await new Promise<void>((resolve, reject) => {
-        // EXACT match to the real backend's cancel message (issue #28
-        // second-pass review finding #2 — the frontend now matches this
-        // string exactly, not by substring, so it must not drift).
-        this.wowFlutterCancel = () => reject(new Error("wow & flutter measurement cancelled"));
-        gate.then(resolve);
-      }).finally(() => {
-        this.wowFlutterCancel = null;
-      });
-    }
-    const referenceFreq = (a.referenceFreq as number) || 3150;
-    const durationSecs = Math.min(15, Math.max(1, (a.durationSecs as number) || 4));
-    const wowRateHz = 4;
-    const depth = 0.0015; // 0.15% peak fractional deviation — recovers_known_wow's signal
-    const unweightedRms = (depth / Math.SQRT2) * 100;
-    // The DIN/IEC weighting curve peaks at 4 Hz, so a pure 4 Hz wow reads
-    // close to (not exactly) its unweighted RMS — the RBJ approximation
-    // isn't unity gain at the peak.
-    const weightedRms = unweightedRms * 0.92;
-    const demodRate = 1000; // mirrors the real backend's target_rate/demod_rate
-
-    // Deviation series: a 4 Hz sine at `depth`, decimated like the real
-    // backend (a 50 ms settling skip, then one sample per demod period).
-    const skip = Math.round(demodRate * 0.05);
-    const seriesLen = Math.max(0, Math.round(durationSecs * demodRate) - skip);
-    const deviationSeries = Array.from({ length: seriesLen }, (_, i) => {
-      const t = (skip + i) / demodRate;
-      return depth * 100 * Math.sin(2 * Math.PI * wowRateHz * t);
-    });
-
-    // Deviation spectrum: the SAME power-of-two window + 200 Hz cap as the
-    // real `deviation_spectrum`, so bin resolution matches (e.g. ~0.49 Hz
-    // at a 4 s capture) — fine enough that the 4 Hz peak actually lands
-    // near a sampled bin, unlike the old fixed 7.8 Hz-spaced stub.
-    let fftLen = 1;
-    while (fftLen * 2 <= deviationSeries.length) fftLen *= 2;
-    const maxRate = 200;
-    const rateHz: number[] = [];
-    const spectrumPercent: number[] = [];
-    if (fftLen >= 64) {
-      const binHz = demodRate / fftLen;
-      // Amplitude spectrum peak ties directly to the reported RMS
-      // (RMS = amplitude/√2 for a single tone) — not an independent guess.
-      const peakAmplitude = unweightedRms * Math.SQRT2;
-      const sigma = 1.0; // Hz — narrow enough that 4 Hz is clearly the tallest bin
-      for (let f = 0; f <= maxRate; f += binHz) {
-        rateHz.push(f);
-        spectrumPercent.push(peakAmplitude * Math.exp(-((f - wowRateHz) ** 2) / (2 * sigma * sigma)));
-      }
-    }
-
-    return {
-      reference_freq: referenceFreq,
-      weighted_rms_percent: weightedRms,
-      unweighted_rms_percent: unweightedRms,
-      peak_weighted_percent: weightedRms * Math.SQRT2,
-      static_offset_hz: 0,
-      demod_rate: demodRate,
-      deviation_series: deviationSeries,
-      rate_hz: rateHz,
-      spectrum_percent: spectrumPercent,
-    };
-  }
-
   private store(kind: string): unknown[] {
     let s = this.storage.get(kind);
     if (!s) {
@@ -1015,363 +811,5 @@ export class FakeDevice {
       this.storage.set(kind, s);
     }
     return s;
-  }
-
-  /** Adopt a stream config: slot set (same script filter as
-   * mixer_set_slots — refused scripts become NAMED per-slot errors, the
-   * plumbing the real backend uses for a failed compile) + everything the
-   * per-frame tick reads. */
-  private applyStreamConfig(cfg: StreamConfigWire): void {
-    this.streamConfig = cfg;
-    this.streamSlotErrors = [];
-    this.slots = cfg.slots.filter((s) => {
-      if (s.source.kind === "script") {
-        this.streamSlotErrors.push({
-          id: s.id,
-          error: "the e2e fake backend does not execute Rhai scripts",
-        });
-        return false;
-      }
-      return true;
-    });
-  }
-
-  private stopStream(sendStopped: boolean): void {
-    if (this.streamTimer !== null) {
-      clearInterval(this.streamTimer);
-      this.streamTimer = null;
-    }
-    if (sendStopped) this.streamChannel?.onmessage({ type: "stopped" });
-    this.streamChannel = null;
-  }
-
-  /** One endpoint's trigger alignment this frame — mirrors stream.rs's
-   * `evaluate_trigger`: level/hysteresis volts -> this frame's FS domain via
-   * the SAME offset the frame's own trace uses (the twin of the offsets
-   * object below), ANY change in `arm_epoch` re-arms a SINGLE latch — not
-   * only an increase (a workspace load resets `arm_epoch` to 0 in the
-   * frontend while this fake's own latch may already sit higher — issue #26
-   * review #2) — and a fired SINGLE returns `stopped` without scanning.
-   * READS `samples` only — this never influences spectra/metrics
-   * (module-doc parity). */
-  private evaluateTrigger(
-    endpoint: string,
-    cfg: TriggerConfigWire,
-    samples: number[],
-    offsetDb: number
-  ): { state: "triggered" | "auto" | "waiting" | "stopped"; index: number; frac: number; level_fs: number; hysteresis_fs: number } {
-    const toFs = Math.pow(10, -offsetDb / 20);
-    const levelFs = cfg.level_v * toFs;
-    const hysteresisFs =
-      cfg.hysteresis_v !== null ? cfg.hysteresis_v * toFs : autoHysteresis(samples, 0.02, 1e-4);
-
-    const armedEpoch = this.triggerArmedEpoch[endpoint] ?? 0;
-    if (cfg.arm_epoch !== armedEpoch) {
-      this.triggerArmedEpoch[endpoint] = cfg.arm_epoch;
-      this.triggerFired[endpoint] = false;
-    }
-
-    if (cfg.mode === "single" && this.triggerFired[endpoint]) {
-      return { state: "stopped", index: 0, frac: 0, level_fs: levelFs, hysteresis_fs: hysteresisFs };
-    }
-
-    const hit = findEdge(samples, levelFs, hysteresisFs, cfg.edge, cfg.pre_samples);
-    if (hit) {
-      if (cfg.mode === "single") this.triggerFired[endpoint] = true;
-      return {
-        state: "triggered",
-        index: hit.index,
-        frac: hit.frac,
-        level_fs: levelFs,
-        hysteresis_fs: hysteresisFs,
-      };
-    }
-    return {
-      state: cfg.mode === "auto" ? "auto" : "waiting",
-      index: cfg.pre_samples,
-      frac: 0,
-      level_fs: levelFs,
-      hysteresis_fs: hysteresisFs,
-    };
-  }
-
-  /** One endpoint's measurement suite this frame — mirrors stream.rs's
-   * `MeasureStates::ingest` + `EndpointMeasureStats`: measure, feed each
-   * metric's sliding window, report value + stats. `samples === null`
-   * (unrequested, or an output in monitor mode) drops the endpoint's bank
-   * and reports null, so a re-enable restarts the statistics. */
-  private measureEndpoint(
-    endpoint: string,
-    samples: number[] | null,
-    sampleRate: number
-  ): Record<string, unknown> | null {
-    if (!samples) {
-      delete this.measureStats[endpoint];
-      return null;
-    }
-    const MEASURE_STATS_WINDOW = 100;
-    const bank = (this.measureStats[endpoint] ??= {});
-    const v = measureScope(samples, sampleRate);
-    const stat = (key: string, value: number | null): unknown =>
-      (bank[key] ??= new SlidingStats(MEASURE_STATS_WINDOW)).stat(value);
-    return {
-      vpp: stat("vpp", v.vpp),
-      vmean: stat("vmean", v.vmean),
-      rms_ac: stat("rms_ac", v.rms_ac),
-      freq_hz: stat("freq_hz", v.freq_hz),
-      rise_s: stat("rise_s", v.rise_s),
-      fall_s: stat("fall_s", v.fall_s),
-      duty: stat("duty", v.duty),
-    };
-  }
-
-  /**
-   * One v2 stream frame, mirroring the backend loop's order: render the mix
-   * (level-volts) → fit the output range to the summed peak ({+8,+18} with
-   * +1 dB margin, 1 dB down-hysteresis — the mixer.rs policy) → scale to
-   * DAC full scale (clamp + report, never rescale) → capture through the
-   * PROVIDER seam (synthetic or recorded fixtures — unchanged) → windowed
-   * FFTs for the requested channels → scans the requested endpoints'
-   * trigger alignment (reads the emitted buffers only, never gates the
-   * spectra/metrics above — the stream.rs module-doc rule) → push the
-   * frame with the per-converter offsets of THIS frame's register state.
-   *
-   * Simplifications, documented: one Hann window whatever `window` says, no
-   * averaging (same stance as analyze_spectrum above), and clip flags are
-   * per-frame booleans instead of a 100 ms latch (at ~8 fps every frame
-   * outlives the hold). Assert LEVEL/STRUCTURE invariants against this,
-   * never smoothing behaviour.
-   */
-  private streamFrame(): void {
-    const cfg = this.streamConfig;
-    const ch = this.streamChannel;
-    if (!cfg || !ch) return;
-    if (!this.connected) {
-      ch.onmessage({ type: "error", message: "Device not connected (fake)" });
-      this.stopStream(true);
-      return;
-    }
-    const n = cfg.buffer_size;
-    const sr = this.config.sample_rate;
-    const tone = cfg.slots.length > 0;
-
-    // ---- mix + range fit + scale (tone mode only; monitor leaves reg 6) --
-    let left = new Array<number>(n).fill(0);
-    let right = new Array<number>(n).fill(0);
-    let sigmaPeakDbv: number | null = null;
-    let clipOutput = false;
-    if (tone) {
-      const mix = this.renderMix(sr, n, false);
-      left = mix.left;
-      right = mix.right;
-      if (mix.peak > 0) sigmaPeakDbv = 20 * Math.log10(mix.peak);
-      if (cfg.output_range_dbv !== null) {
-        this.config.output_gain = cfg.output_range_dbv;
-      } else if (sigmaPeakDbv !== null) {
-        this.config.output_gain = fitOutputRange(sigmaPeakDbv, this.config.output_gain);
-      }
-      const scale = Math.pow(10, -this.config.output_gain / 20);
-      for (const chan of [left, right]) {
-        for (let i = 0; i < n; i++) {
-          const v = chan[i] * scale;
-          chan[i] = Math.max(-1, Math.min(1, v));
-          if (v > 1 || v < -1) clipOutput = true;
-        }
-      }
-    }
-
-    // ---- capture through the provider seam (fixtures replay here) -------
-    const cap = this.provider.capture(left, right, {
-      sampleRate: sr,
-      outputRangeDbv: this.config.output_gain,
-      inputRangeDbv: this.config.input_gain,
-    });
-    let inputPeak = 0;
-    for (const chan of [cap.left, cap.right]) {
-      for (const v of chan) inputPeak = Math.max(inputPeak, Math.abs(v));
-    }
-    // Mirror the backend's tri-state judgment (clip ≥ −0.1 dBFS, near ≥ −1).
-    const clipInput =
-      inputPeak >= Math.pow(10, -0.1 / 20)
-        ? "clip"
-        : inputPeak >= Math.pow(10, -1 / 20)
-          ? "near"
-          : "none";
-
-    // ---- requested spectra (shared bins) ---------------------------------
-    let frequencies: number[] = [];
-    const fdOf = (signal: number[]): number[] => {
-      const spec = analyzeSpectrum(signal, sr);
-      if (frequencies.length === 0) frequencies = spec.frequencies;
-      return spec.magnitudes_db;
-    };
-    const spectra = {
-      frequencies: [] as number[],
-      input_l: cfg.spectra.input_l ? fdOf(cap.left) : null,
-      input_r: cfg.spectra.input_r ? fdOf(cap.right) : null,
-      output_l: tone && cfg.spectra.output_l ? fdOf(left) : null,
-      output_r: tone && cfg.spectra.output_r ? fdOf(right) : null,
-    };
-    spectra.frequencies = frequencies;
-
-    // Harmonic metrics per requested input channel — mirrors the backend
-    // stream: linear magnitudes from the dB spectrum, fundamental = loudest
-    // bin ≥ 20 Hz, `None` when the spectrum wasn't requested.
-    const metricsOf = (signal: number[], magsDb: number[] | null) => {
-      if (!magsDb || magsDb.length === 0) return null;
-      const linear = magsDb.map((db) => Math.pow(10, db / 20));
-      let fi = -1;
-      for (let i = 0; i < linear.length; i++) {
-        if (frequencies[i] >= 20 && (fi < 0 || linear[i] > linear[fi])) fi = i;
-      }
-      if (fi < 0) return null;
-      return analyzeAudio(signal, linear, frequencies, frequencies[fi]);
-    };
-    // Harmonic series located on the emitted spectrum — mirrors the backend's
-    // harmonics_from_spectrum (±3% / ±3-bin peak window around n×f0, 10 max).
-    const harmonicsOf = (magsDb: number[] | null) => {
-      if (!magsDb || magsDb.length < 2 || frequencies.length < 2) return null;
-      const linear = magsDb.map((db) => Math.pow(10, db / 20));
-      const binHz = frequencies[1] - frequencies[0];
-      if (!(binHz > 0)) return null;
-      const peakIn = (center: number): [number, number] => {
-        const half = Math.max(center * 0.03, binHz * 3);
-        const lo = Math.max(1, Math.floor((center - half) / binHz));
-        const hi = Math.min(linear.length - 1, Math.ceil((center + half) / binHz));
-        let bi = lo;
-        for (let i = lo; i <= hi; i++) if (linear[i] > linear[bi]) bi = i;
-        return [frequencies[bi], linear[bi]];
-      };
-      let fi = -1;
-      for (let i = 0; i < linear.length; i++) {
-        if (frequencies[i] >= 20 && (fi < 0 || linear[i] > linear[fi])) fi = i;
-      }
-      if (fi < 0) return null;
-      const [f0, m0raw] = peakIn(frequencies[fi]);
-      const m0 = Math.max(m0raw, 1e-12);
-      const fEnd = frequencies[frequencies.length - 1];
-      const marks = [];
-      for (let n = 1; n <= 10; n++) {
-        const target = f0 * n;
-        if (target >= fEnd) break;
-        const [freq, mag] = peakIn(target);
-        marks.push({
-          n,
-          frequency: freq,
-          magnitude_db: 20 * Math.log10(Math.max(mag, 1e-12)),
-          magnitude_dbc: 20 * Math.log10(Math.max(mag, 1e-12) / m0),
-        });
-      }
-      return marks;
-    };
-    const metrics = {
-      input_l: metricsOf(cap.left, spectra.input_l),
-      input_r: metricsOf(cap.right, spectra.input_r),
-      harmonics_l: harmonicsOf(spectra.input_l),
-      harmonics_r: harmonicsOf(spectra.input_r),
-    };
-
-    // ---- trigger alignment (reads cap.left/right and the stimulus only —
-    // never gates spectra/metrics above, mirrors the stream.rs module doc) --
-    const offsetInputDb = inputDbvOffsetDb(this.config.input_gain);
-    const offsetOutputDb = this.config.output_gain + 20 * Math.log10(Math.SQRT2);
-    const trig = cfg.triggers;
-    const trigger = {
-      input_l: trig.input_l ? this.evaluateTrigger("input_l", trig.input_l, cap.left, offsetInputDb) : null,
-      input_r: trig.input_r ? this.evaluateTrigger("input_r", trig.input_r, cap.right, offsetInputDb) : null,
-      output_l:
-        tone && trig.output_l ? this.evaluateTrigger("output_l", trig.output_l, left, offsetOutputDb) : null,
-      output_r:
-        tone && trig.output_r ? this.evaluateTrigger("output_r", trig.output_r, right, offsetOutputDb) : null,
-    };
-
-    // ---- scope measurement suite (lot B — same read-only, non-gating
-    // contract as the trigger scan above) -------------------------------
-    const meas = cfg.measures ?? { input_l: false, input_r: false, output_l: false, output_r: false };
-    const measures = {
-      input_l: this.measureEndpoint("input_l", meas.input_l ? cap.left : null, sr),
-      input_r: this.measureEndpoint("input_r", meas.input_r ? cap.right : null, sr),
-      output_l: this.measureEndpoint("output_l", meas.output_l && tone ? left : null, sr),
-      output_r: this.measureEndpoint("output_r", meas.output_r && tone ? right : null, sr),
-    };
-
-    this.streamSeq += 1;
-    ch.onmessage({
-      type: "frame",
-      seq: this.streamSeq,
-      // Issue #25 lot C: every frame carries its device identity — the fake
-      // exercises the same contract as the real registry-stamped payload.
-      device_id: "virtual/E2E-FAKE-0001",
-      captured: { left_channel: cap.left, right_channel: cap.right, sample_rate: sr },
-      stimulus: tone ? { left, right } : null,
-      spectra,
-      metrics,
-      trigger,
-      measures,
-      mix: {
-        sigma_peak_dbv: sigmaPeakDbv,
-        clip_input: clipInput,
-        clip_output: clipOutput,
-        fitted_output_range_dbv: this.config.output_gain,
-      },
-      offsets: {
-        input_l: offsetInputDb,
-        input_r: offsetInputDb,
-        output_l: offsetOutputDb,
-        output_r: offsetOutputDb,
-        calibrated: true,
-      },
-      stats: { frames: this.streamSeq, fps: 8, frame_ms: 120 },
-      errors: this.streamSlotErrors,
-    });
-  }
-
-  /** Sum every enabled slot per its route; peak of the sum in level-volts. */
-  private renderMix(
-    sampleRate: number,
-    bufferSize: number,
-    withSlots: boolean
-  ): {
-    left: number[];
-    right: number[];
-    peak: number;
-    errors: MixSlotError[];
-    slots?: { id: string; left: number[]; right: number[] }[];
-  } {
-    const left = new Array<number>(bufferSize).fill(0);
-    const right = new Array<number>(bufferSize).fill(0);
-    const perSlot: { id: string; left: number[]; right: number[] }[] = [];
-    for (const slot of this.slots) {
-      if (!slot.enabled || slot.route === "off") {
-        if (withSlots)
-          perSlot.push({
-            id: slot.id,
-            left: new Array<number>(bufferSize).fill(0),
-            right: new Array<number>(bufferSize).fill(0),
-          });
-        continue;
-      }
-      const buf = renderSlot(slot.source, sampleRate, bufferSize);
-      const toL = slot.route === "left" || slot.route === "both";
-      const toR = slot.route === "right" || slot.route === "both";
-      for (let i = 0; i < bufferSize; i++) {
-        if (toL) left[i] += buf[i];
-        if (toR) right[i] += buf[i];
-      }
-      if (withSlots)
-        perSlot.push({
-          id: slot.id,
-          left: toL ? buf : new Array<number>(bufferSize).fill(0),
-          right: toR ? buf.slice() : new Array<number>(bufferSize).fill(0),
-        });
-    }
-    let peak = 0;
-    for (let i = 0; i < bufferSize; i++) {
-      const m = Math.max(Math.abs(left[i]), Math.abs(right[i]));
-      if (m > peak) peak = m;
-    }
-    const out: ReturnType<FakeDevice["renderMix"]> = { left, right, peak, errors: [] };
-    if (withSlots) out.slots = perSlot;
-    return out;
   }
 }

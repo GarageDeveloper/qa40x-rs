@@ -687,6 +687,11 @@ export interface DevicesState {
   primary: string | null;
   /** An enumeration is in flight (the bar keeps showing the last list). */
   enumerating: boolean;
+  /** Registry ids with a `connect_additional_device` in flight (issue #25
+   * lot E4) — an ARRAY, not a singleton, by the no-new-device-globals
+   * rule. Members are excluded from the add-device picker and gate a
+   * double-click; never persisted (transient by nature). */
+  adding: string[];
   /** Per-slot sessions (lot E2). Always holds SLOT0 — created at boot,
    * never removed (the connect/demo flows reuse it). Added units get their
    * sessions in lot E4. */
@@ -921,6 +926,7 @@ export function initialState(): AppState {
       pick: null,
       primary: null,
       enumerating: false,
+      adding: [],
       sessions: { [SLOT0]: initialSession(0) },
       focus: SLOT0,
       aliases: {},

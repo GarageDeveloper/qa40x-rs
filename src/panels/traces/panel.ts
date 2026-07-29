@@ -1,34 +1,49 @@
 /**
- * Traces panel: the pool of displayable traces. The 4 hardware endpoints
- * (Input L/R, Output L/R) are always present and never deletable (Traces
- * V2); frozen ❄ memory traces and transform endpoints (M4) can be deleted.
- * Program result traces are NOT listed here — they live in the Programs
- * panel. What a tile SHOWS is tile membership (grid panel / gear dialog) —
- * the FD badge tells the truth about the display-derived FFT budget (#52):
- * dimmed means "no fd graph shows this trace", symmetrically per channel.
+ * Traces panel: the pool of displayable traces, grouped per DEVICE (issue
+ * #25 lot E4). Each group wraps one slot's 4 hardware endpoints (Input
+ * L/R, Output L/R — always present for a live slot, never deletable) under
+ * a header carrying the device's identity, alias editor, per-group
+ * Run/Stop and Remove; memory/transform traces sit in a flat tail below
+ * (decision B2 — they are bench artifacts, not device endpoints). Program
+ * result traces are NOT listed here — they live in the Programs panel.
+ * What a tile SHOWS is tile membership (grid panel / gear dialog) — the FD
+ * badge tells the truth about the display-derived FFT budget (#52).
+ *
+ * Row rendering lives in row.ts; the group chrome in devicegroup.ts.
  */
 import "./panel.css";
 import type { Store } from "../../store/store";
-import type { AppState, TraceMeta } from "../../store/state";
-import { hwSlotOfTraceId } from "../../store/state";
+import type { AppState } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
-import {
-  addTransformTrace,
-  addWeightedCopy,
-  deleteTrace,
-  setTraceColor,
-} from "../../store/actions/traces";
+import type { TraceId } from "../../core/model";
+import { addTransformTrace } from "../../store/actions/traces";
+import { addDevice } from "../../store/actions/device";
 import { fdShownTraceIds } from "../../store/selectors/layout";
-import { exportTraceCsv } from "../../export/export";
-import type { Domain } from "../../core/model";
+import { deviceGroups, ungroupedTraceIds } from "../../store/selectors/traces";
+import {
+  addableEntries,
+  deviceLabel,
+  reviveCandidateId,
+  sessionInputRanges,
+  sessionLabel,
+  sessionOutputRanges,
+  sessionRates,
+} from "../../store/selectors/devices";
+import { isRoutable } from "../../store/selectors/session";
 import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openTransformDialog } from "./transformdialog";
+import { createTraceRow, updateTraceRow, type Row } from "./row";
+import {
+  createDeviceGroup,
+  traceGroupCollapseKey,
+  type GroupVM,
+  type GroupView,
+} from "./devicegroup";
 
-interface Row {
-  meta: TraceMeta;
-  /** Some displayed spectrum tile shows this trace (fd budget member). */
-  fdShown: boolean;
+interface GroupItem {
+  vm: GroupVM;
+  rows: Row[];
 }
 
 export function mountTracesPanel(
@@ -36,7 +51,28 @@ export function mountTracesPanel(
   store: Store<AppState>,
   ipc: Ipc
 ): void {
-  const list = el("div.traces__list", { "data-testid": "traces-list" });
+  const groupsHost = el("div.traces__groups");
+  const tailHost = el("div.traces__tail");
+  const list = el(
+    "div.traces__list",
+    { "data-testid": "traces-list" },
+    groupsHost,
+    tailHost
+  );
+  // Add-device (lot E4): opens an enumerated unit ALONGSIDE the current one
+  // (connect_additional_device — never a supersede). Quiet-select idiom
+  // like the rows' ＋wt: the closed face is the affordance.
+  const addDev = el("select.traces__wt.traces__adddev", {
+    "data-testid": "traces-add-device",
+    title:
+      "Add a measurement device to the bench — opens it alongside the " +
+      "connected one, capture-only until focused",
+  }) as HTMLSelectElement;
+  addDev.onchange = () => {
+    const id = addDev.value;
+    addDev.value = "";
+    if (id) void addDevice(store, ipc, id);
+  };
   const addFx = el(
     "button.btn.btn--small",
     {
@@ -48,185 +84,132 @@ export function mountTracesPanel(
     },
     "+ transform"
   );
-  const head = el("div.traces__head", {}, el("h2.sidebar__title", {}, "Traces"), addFx);
+  const head = el(
+    "div.traces__head",
+    {},
+    el("h2.sidebar__title", {}, "Traces"),
+    el("div.traces__head-actions", {}, addDev, addFx)
+  );
   const section = el("section.traces", { "data-testid": "traces-panel" }, head, list);
   host.append(section);
   collapsiblePanel(store, section, head, "traces");
 
+  const rowRenderer = {
+    create: (r: Row) => createTraceRow(store, ipc, r),
+    update: (node: HTMLElement, r: Row) => updateTraceRow(node, r),
+  };
+  /** Retained group views by session key (keyedList holds only the DOM). */
+  const groupViews = new Map<string, GroupView>();
+
   store.select(
     (s) => {
       const fdShown = fdShownTraceIds(s);
-      return s.traces.order
-        .map((id) => s.traces.byId[id])
-        .filter((t): t is TraceMeta => !!t && t.source.kind !== "program")
-        .map((meta): Row => ({ meta, fdShown: fdShown.has(meta.id) }));
+      // Narrowed projection (review #9): exactly what the row renderer
+      // reads — never the whole TraceMeta, whose `seq` would re-render the
+      // pool on every ingested frame through the JSON comparison below.
+      const rowOf = (id: TraceId): Row | null => {
+        const meta = s.traces.byId[id];
+        if (!meta || meta.source.kind === "program") return null;
+        // Hover provenance for bench artifacts (❄/transform): which
+        // device produced this data, at what rate, when — from the
+        // capture snapshot (issue #40; `derived` marks a transform's
+        // inherited provenance).
+        const kind = meta.source.kind;
+        const cap =
+          kind === "memory" || kind === "transform" ? meta.capture : null;
+        const tip = cap?.device
+          ? `${cap.derived ? "Derived from" : "Captured on"} ${cap.device.model} · ${cap.device.serial}` +
+            (cap.sampleRateHz !== null ? ` @ ${cap.sampleRateHz / 1000} kHz` : "") +
+            (cap.capturedAt !== null
+              ? ` — ${cap.capturedAt.slice(0, 16).replace("T", " ")}`
+              : "")
+          : null;
+        return {
+          id,
+          kind,
+          color: meta.color,
+          label: meta.label,
+          domains: meta.domains,
+          fdShown: fdShown.has(id),
+          tip,
+        };
+      };
+      const groups: GroupItem[] = deviceGroups(s).map((g) => {
+        const sess = s.devices.sessions[g.key];
+        return {
+          vm: {
+            key: g.key,
+            slot: g.slot,
+            live: g.live,
+            deviceId: g.deviceId,
+            label: sessionLabel(s, g.key),
+            alias: g.deviceId !== null ? s.devices.aliases[g.deviceId] ?? "" : "",
+            status: sess?.device.status ?? "disconnected",
+            // Deliberately NO per-frame field here (run.stats, telemetry):
+            // this projection re-renders the pool via its JSON signature.
+            streaming: sess?.run.streaming ?? false,
+            stopping: sess?.run.stopping ?? false,
+            locked: (sess?.run.programLock ?? null) !== null,
+            routable: isRoutable(s, g.key),
+            collapsed: s.workspace.collapsed.includes(
+              traceGroupCollapseKey(g.slot)
+            ),
+            reviveId:
+              !g.live || sess?.device.status === "disconnected"
+                ? reviveCandidateId(s, g.slot)
+                : null,
+            inputRanges: sessionInputRanges(s, g.key),
+            outputRanges: sessionOutputRanges(s, g.key),
+            rates: sessionRates(s, g.key),
+            inputGain: sess?.device.config?.input_gain ?? null,
+            outputGain: sess?.device.config?.output_gain ?? null,
+            sampleRate: sess?.device.config?.sample_rate ?? null,
+          },
+          rows: g.traceIds.map(rowOf).filter((r): r is Row => r !== null),
+        };
+      });
+      const tail = ungroupedTraceIds(s)
+        .map(rowOf)
+        .filter((r): r is Row => r !== null);
+      const addable = addableEntries(s).map((d) => ({
+        id: d.id,
+        label: deviceLabel(s, d),
+      }));
+      return { groups, tail, addable, addBusy: s.devices.adding.length > 0 };
     },
-    (rows) => {
-      keyedList(list, rows, (r) => r.meta.id, {
-        create: (r) => {
-          const id = r.meta.id;
-          const kind = r.meta.source.kind;
-          // The color dot IS the picker (M6 gap 10a) — native color input
-          // styled as the classic dot; the swatch itself shows the color.
-          const dot = el("input.traces__dot", {
-            type: "color",
-            "data-testid": `trace-color-${id}`,
-            title: "Trace color — click to change",
-          }) as HTMLInputElement;
-          dot.addEventListener("input", () => setTraceColor(store, id, dot.value));
-          const hwSlot = hwSlotOfTraceId(id);
-          const row = el(
-            "div.traces__row",
-            // Hw endpoint rows carry their device slot (lot E3) — the hook
-            // E4's device grouping and multi-device e2e will key on; slot-0
-            // rows are otherwise byte-identical.
-            hwSlot === null ? {} : { "data-slot": String(hwSlot) },
-            dot,
-            el("span.traces__label"),
-            el("span.traces__badges")
-          );
-          // One-click weighted copy (M6 discoverability): same per-trace
-          // transform model as "+ transform", without the dialog trip.
-          const wtSel = el("select.traces__wt", {
-            "data-testid": `trace-wt-${id}`,
-            title:
-              "Add a weighted copy of this trace — a transform trace " +
-              "(backend DSP), same as + transform with a weighting step",
-          }) as HTMLSelectElement;
-          wtSel.append(
-            el("option", { value: "" }, "＋wt"),
-            el("option", { value: "a" }, "A-weighted copy"),
-            el("option", { value: "c" }, "C-weighted copy"),
-            el("option", { value: "riaa" }, "RIAA copy")
-          );
-          wtSel.onchange = () => {
-            const mode = wtSel.value as "a" | "c" | "riaa" | "";
-            wtSel.value = "";
-            if (mode) addWeightedCopy(store, ipc, id, mode);
-          };
-          row.append(wtSel);
-          // CSV export (issue #30): one option per domain this trace
-          // currently carries frames for — options live in update() (the
-          // badges' domains sig), the wire units + provenance header in
-          // export/csv.ts.
-          const exSel = el("select.traces__wt", {
-            "data-testid": `trace-export-${id}`,
-            title:
-              "Export this trace's data as CSV — wire units plus a " +
-              "provenance header (device identity, acquisition settings)",
-          }) as HTMLSelectElement;
-          exSel.onchange = () => {
-            const domain = exSel.value as Domain | "";
-            exSel.value = "";
-            if (domain) void exportTraceCsv(store, ipc, id, domain);
-          };
-          row.append(exSel);
-          if (kind === "transform") {
-            row.append(
-              el(
-                "button.traces__gear",
-                {
-                  title: "Transformer chain (input + steps)",
-                  "data-testid": `trace-gear-${id}`,
-                  onclick: () => openTransformDialog(store, ipc, id),
-                },
-                "⚙"
-              )
-            );
-          }
-          if (kind === "memory" || kind === "transform") {
-            row.append(
-              el(
-                "button.traces__delete",
-                {
-                  title:
-                    kind === "memory"
-                      ? "Delete this frozen trace"
-                      : "Delete this transform trace",
-                  "data-testid": `trace-del-${id}`,
-                  onclick: () => deleteTrace(store, ipc, id),
-                },
-                "✕"
-              )
-            );
-          }
-          return row;
-        },
-        update(node, r) {
-          const [dot, label, badges] = Array.from(node.children) as [
-            HTMLInputElement,
-            HTMLElement,
-            HTMLElement,
-          ];
-          if (dot.value !== r.meta.color) dot.value = r.meta.color;
-          label.textContent = r.meta.label;
+    ({ groups, tail, addable, addBusy }) => {
+      const sig = JSON.stringify(addable);
+      if (addDev.dataset.sig !== sig) {
+        addDev.dataset.sig = sig;
+        addDev.replaceChildren(
+          el("option", { value: "" }, "+ device"),
+          ...addable.map((d) => el("option", { value: d.id }, d.label))
+        );
+      }
+      addDev.toggleAttribute("disabled", addable.length === 0 || addBusy);
 
-          // Badges: TD/SW when frames carry those domains; FD lit when a
-          // spectrum landed, dimmed-with-reason when the display budget
-          // excludes this trace — the #52 truthful-badge rule.
-          const hasTd = r.meta.domains.includes("td");
-          const hasFd = r.meta.domains.includes("fd");
-          const hasSw = r.meta.domains.includes("sweep");
-          const isMemory = r.meta.source.kind === "memory";
-          const sig = `${hasTd}:${hasFd}:${hasSw}:${r.fdShown}:${isMemory}`;
-          if (badges.dataset.sig === sig) return;
-          badges.dataset.sig = sig;
-          // Export options track the SAME domains sig as the badges — a
-          // trace offers exactly the CSVs it has frames for.
-          const exSel = node.querySelector<HTMLSelectElement>(
-            `[data-testid="trace-export-${r.meta.id}"]`
-          );
-          if (exSel) {
-            exSel.replaceChildren(
-              el("option", { value: "" }, "⤓"),
-              ...(hasTd ? [el("option", { value: "td" }, "Waveform CSV")] : []),
-              ...(hasFd ? [el("option", { value: "fd" }, "Spectrum CSV")] : []),
-              ...(hasSw ? [el("option", { value: "sweep" }, "Sweep CSV")] : [])
-            );
-            exSel.disabled = !hasTd && !hasFd && !hasSw;
-          }
-          badges.replaceChildren();
-          if (hasTd) {
-            badges.append(
-              el(
-                "span.traces__badge",
-                { "data-testid": "badge-td", title: "Time-domain frame" },
-                "TD"
-              )
-            );
-          }
-          if (hasFd) {
-            badges.append(
-              el(
-                "span.traces__badge",
-                { "data-testid": "badge-fd", title: "Frequency-domain frame" },
-                "FD"
-              )
-            );
-          } else if (!isMemory && !r.fdShown) {
-            badges.append(
-              el(
-                "span.traces__badge.traces__badge--dim",
-                {
-                  "data-testid": "badge-fd-dim",
-                  title:
-                    "No spectrum: no frequency-domain graph shows this trace — add it to a spectrum tile to compute its FFT",
-                },
-                "FD"
-              )
-            );
-          }
-          if (hasSw) {
-            badges.append(
-              el(
-                "span.traces__badge",
-                { "data-testid": "badge-sw", title: "Swept-measurement frame" },
-                "SW"
-              )
-            );
-          }
+      keyedList(groupsHost, groups, (g) => g.vm.key, {
+        create: (g) => {
+          const view = createDeviceGroup(store, ipc, g.vm.key, g.vm.slot);
+          groupViews.set(g.vm.key, view);
+          return view.root;
+        },
+        update: (_node, g) => {
+          const view = groupViews.get(g.vm.key);
+          if (!view) return;
+          view.update(g.vm);
+          keyedList(view.rowHost, g.rows, (r) => r.id, rowRenderer);
         },
       });
+      keyedList(tailHost, tail, (r) => r.id, rowRenderer);
+      // Prune views whose group keyedList just removed. Membership in
+      // groupsHost, NOT isConnected: the panel may live in a detached host
+      // (jsdom tests) where isConnected is false for everything — the
+      // first render would purge every live view and later updates would
+      // silently no-op.
+      for (const [k, v] of groupViews) {
+        if (v.root.parentElement !== groupsHost) groupViews.delete(k);
+      }
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)
   );
