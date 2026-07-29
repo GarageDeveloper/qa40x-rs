@@ -553,14 +553,37 @@ describe("program-lock guards on the deliberate teardown paths (issue #25 lot F2
 });
 
 describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus twin of the trace purge", () => {
-  it("removeDevice drops the slot's pinned targets and leaves the rest of the matrix alone", async () => {
+  it("removeDevice drops the slot's pinned targets; the surviving lone focus cell compacts to the legacy form (lot F3, D-F3-4)", async () => {
     const store = slot1Store();
     store.update("test/pin-target", withSlot1Target);
     const { ipc } = fakeIpc();
     await removeDevice(store, ipc, "slot-1");
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    // Canonicalized like every matrix write since F3: the row returns to
+    // the plain L/R pair, route carrying the focus cell's value.
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
+  });
+
+  it("a drop that EMPTIES the matrix stores the silent compact form — never the bare [] whose legacy-route fallback would re-bind the stimulus onto the focus (lot F3)", async () => {
+    const store = slot1Store();
+    store.update("test/pin-target-slot1-only", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": {
+            ...s.sources.byId["src-sine-1"],
+            route: "left" as const, // would silently play on focus if read
+            targets: [{ slot: 1, route: "both" as const }],
+          },
+        },
+      },
+    }));
+    const { ipc } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("off");
   });
 
   const oldUnit = {
@@ -604,9 +627,8 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
       get_device_info: () => ({ ...oldUnit, serial: "NEW-0002" }),
     });
     await addDevice(store, ipc, "usb/NEW", { slot: 1 });
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
   });
 
   it("the revive path — SAME model+serial — keeps the pinned targets", async () => {
@@ -631,9 +653,8 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
       get_device_info: () => null,
     });
     await addDevice(store, ipc, "usb/UNKNOWN", { slot: 1 });
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
   });
 });
 

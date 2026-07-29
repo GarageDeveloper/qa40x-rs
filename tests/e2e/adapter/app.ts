@@ -471,6 +471,127 @@ export class AppV2 {
     await this.drv.click(`[data-testid="src-play-${id}"]`);
   }
 
+  /* ---- per-device routing editor (issue #25 lot F3) ------------------- */
+
+  /** Whether the row renders the matrix summary (matrix mode) at all. */
+  async hasSourceRouting(id: string): Promise<boolean> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`) !== null,
+      { testid: `src-routing-${id}` }
+    );
+  }
+
+  /** The collapsed routing summary text ("→ focus L · #2 R"). */
+  async sourceRoutingSummary(id: string): Promise<string> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? "",
+      { testid: `src-routing-${id}` }
+    );
+  }
+
+  /** Toggle the routing editor open/closed from the summary button. */
+  async openSourceRouting(id: string): Promise<void> {
+    await this.drv.click(`[data-testid="src-routing-${id}"]`);
+  }
+
+  /** Set one target row's channels via its L/R pair (like setSineRoute).
+   * `tag` is "focus" or the decimal slot. Nothing checked = the off cell. */
+  async setSourceTargetRoute(
+    id: string,
+    tag: string,
+    route: "left" | "right" | "both" | "off"
+  ): Promise<void> {
+    const wantL = route === "left" || route === "both";
+    const wantR = route === "right" || route === "both";
+    for (const [side, want] of [["l", wantL], ["r", wantR]] as const) {
+      await this.drv.eval(
+        (a: { testid: string; want: boolean }) => {
+          const box = document.querySelector(
+            `[data-testid="${a.testid}"]`
+          ) as HTMLInputElement;
+          if (box.checked !== a.want) box.click();
+        },
+        { testid: `src-tgt-${side}-${id}-${tag}`, want }
+      );
+    }
+  }
+
+  /** Remove one target row's cell (the row ✕). */
+  async removeSourceTarget(id: string, tag: string): Promise<void> {
+    await this.drv.click(`[data-testid="src-tgt-del-${id}-${tag}"]`);
+  }
+
+  /** One target row's grid readout text ("1000.4883 Hz", "—", or ""). */
+  async sourceTargetPlayed(id: string, tag: string): Promise<string> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? "",
+      { testid: `src-tgt-played-${id}-${tag}` }
+    );
+  }
+
+  /** One target row's status note ("not connected", "off (no channel)"…). */
+  async sourceTargetNote(id: string, tag: string): Promise<string> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? "",
+      { testid: `src-tgt-note-${id}-${tag}` }
+    );
+  }
+
+  /** The params-line grid readout ("→ 1000.4883 Hz", "→ 2 values", "→ —"). */
+  async sourceSnapped(id: string): Promise<string> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? "",
+      { testid: `src-snapped-${id}` }
+    );
+  }
+
+  /** The play/pause button's disabled state and title (the named reason). */
+  async sourcePlayState(id: string): Promise<{ disabled: boolean; title: string }> {
+    return this.drv.eval(
+      (a: { testid: string }) => {
+        const btn = document.querySelector(
+          `[data-testid="${a.testid}"]`
+        ) as HTMLButtonElement;
+        return { disabled: btn.disabled, title: btn.title };
+      },
+      { testid: `src-play-${id}` }
+    );
+  }
+
+  /** The sources-footer device prefix ("" at one live session). */
+  async footerDevice(): Promise<string> {
+    return this.drv.eval(
+      () =>
+        document.querySelector('[data-testid="sources-footer-device"]')
+          ?.textContent ?? "",
+      undefined as void
+    );
+  }
+
+  /** Fake-side truth: `slot`'s last-adopted mixer slots with their routes
+   * and (waveform) frequencies — null while the unit never saw a config. */
+  async unitStreamSlots(
+    slot: number
+  ): Promise<{ id: string; route: string; frequencyHz: number | null }[] | null> {
+    return this.drv.eval((v: number) => {
+      const cfg = window.__qa40xE2E.device.streamConfigOf(v);
+      if (cfg === null) return null;
+      return cfg.slots.map((s) => ({
+        id: s.id,
+        route: s.route as string,
+        frequencyHz:
+          "frequency_hz" in s.source
+            ? (s.source as { frequency_hz: number }).frequency_hz
+            : null,
+      }));
+    }, slot);
+  }
+
   /** The Σ-peak / clip / fitted-range footer, as the user sees it. */
   async mixReadout(): Promise<{
     peakDbv: number | null;

@@ -121,10 +121,19 @@ export function dropSourceTargetsForSlot(s: AppState, slot: number): AppState {
   let byId: Record<string, SourceMeta> | null = null;
   for (const [id, src] of Object.entries(s.sources.byId)) {
     if (!src.targets.some((t) => t.slot === slot)) continue;
-    (byId ??= { ...s.sources.byId })[id] = {
-      ...src,
-      targets: src.targets.filter((t) => t.slot !== slot),
-    };
+    const targets = src.targets.filter((t) => t.slot !== slot);
+    // Re-canonicalize like every matrix write (issue #25 lot F3, D-F3-4):
+    // a lone focus cell compacts back to the legacy form (the row returns
+    // to the plain L/R pair), and an EMPTIED matrix stores the silent
+    // compact form — never the bare `[]`, whose legacy-route fallback
+    // would silently re-bind the stimulus onto the focused device (the
+    // exact re-target class D5 exists to refuse).
+    (byId ??= { ...s.sources.byId })[id] =
+      targets.length === 0
+        ? { ...src, targets: [], route: "off" }
+        : targets.length === 1 && targets[0].slot === null
+          ? { ...src, targets: [], route: targets[0].route }
+          : { ...src, targets };
   }
   return byId ? { ...s, sources: { ...s.sources, byId } } : s;
 }
