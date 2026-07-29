@@ -759,7 +759,14 @@ export function stopProgram(store: Store<AppState>, ipc: Ipc, id: string): void 
     const s = store.get();
     const key = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
     sweepCancel.add(id);
-    if (key) void ipc.call("sweep_stop", sessionArgs(s, key)).catch(() => {});
+    // isRoutable guards the sessionArgs THROW (lot F2): stopProgram runs
+    // synchronously in a click handler, and a lock-holding session whose
+    // adopted id a stale enumeration just cleared must degrade to the
+    // frontend flag alone (which already ends the pass loop) — not a dead
+    // ⏹ button.
+    if (key && isRoutable(s, key)) {
+      void ipc.call("sweep_stop", sessionArgs(s, key)).catch(() => {});
+    }
     toast(store, "info", "Stopping…");
   } else {
     void ipc.call("script_stop", {}).catch(() => {});

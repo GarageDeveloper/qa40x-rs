@@ -182,14 +182,19 @@ export function anyBusy(s: AppState): boolean {
 
 /**
  * The `deviceId` a device-scoped command for `key` carries on the wire.
- * SLOT 0 STAYS ARG-LESS in lot E2: the backend's default runtime IS slot 0
+ * SLOT 0 STAYS ARG-LESS: the backend's default runtime IS slot 0
  * (registry.rs::runtime_for(None)), routing it by id would (a) break
  * devices.pw.ts's `connectDeviceIds() === [null]` pin and (b) expose every
  * command to a transiently stale enumeration answer → `Unknown device`.
- * A slot ≥ 1 session routes by its adopted id (lot E4 starts opening
- * those); one whose id hasn't been adopted yet stays arg-less too — the
- * command then drives the default runtime, which is wrong for slot ≥ 1,
- * but no E2 caller passes a non-SLOT0 key before E4 wires adoption-first.
+ * A slot ≥ 1 session routes by its adopted id.
+ *
+ * THROWS for a slot ≥ 1 key with no adopted id (issue #25 lot F2, the E2
+ * bookkeeping's hardening ask): the old `{}` fallback silently drove the
+ * DEFAULT runtime — a command for one device landing on ANOTHER, the worst
+ * routing failure this codebase knows (E2 review #2). Every legitimate
+ * caller pre-checks `isRoutable` (or, for programs, converts to a
+ * user-facing refusal in `routedArgs`); the throw is the backstop that
+ * keeps the class closed, never a control-flow path.
  */
 export function sessionArgs(
   s: AppState,
@@ -197,7 +202,13 @@ export function sessionArgs(
 ): { deviceId?: string } {
   if (key === SLOT0) return {};
   const id = session(s, key)?.deviceId;
-  return id ? { deviceId: id } : {};
+  if (!id) {
+    throw new Error(
+      `Session ${key} has no routable device id — an arg-less command would ` +
+        "drive the default runtime (gate on isRoutable before the wire)"
+    );
+  }
+  return { deviceId: id };
 }
 
 /**
