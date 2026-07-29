@@ -21,8 +21,10 @@ import type {
   SourceRoute,
   SourceTarget,
 } from "../state";
+import { MAX_SOURCE_TARGETS } from "../state";
 import { focusedRun, session, sessionKeys } from "../selectors/session";
 import { sessionsForSource } from "../selectors/sources";
+import { writeTarget } from "../../core/routing";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 
@@ -250,6 +252,44 @@ export function setSourceRoute(
   route: SourceRoute
 ): void {
   patch(store, "sources/route", id, (src) => ({ ...src, route }));
+  syncSourcesEverywhere(store, ipc);
+}
+
+/**
+ * Write one cell of a source's device × channel matrix (issue #25 lot F3 —
+ * the row editor's checkbox handler): create-or-update the target's cell
+ * with `route` (an "off" write KEEPS the cell: a silent DAC program, the
+ * legacy Off meaning). The sync is the full fan-out, never a direct wire
+ * call: a retarget reshapes the mix of the session that LOST the source
+ * too, and the DAC must only ever be reached through outputonly's `sync`
+ * (its program-lock gate is the F2 MUST-FIX-1 fix).
+ */
+export function setSourceTargetRoute(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null,
+  route: SourceRoute
+): void {
+  patch(store, "sources/target-route", id, (src) => ({
+    ...src,
+    ...writeTarget(src, slot, route, MAX_SOURCE_TARGETS),
+  }));
+  syncSourcesEverywhere(store, ipc);
+}
+
+/** Remove one cell (the row editor's ✕) — the matrix re-canonicalizes per
+ * `writeTarget` (last cell out ⇒ the legacy compact silent form). */
+export function removeSourceTarget(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null
+): void {
+  patch(store, "sources/target-remove", id, (src) => ({
+    ...src,
+    ...writeTarget(src, slot, null, MAX_SOURCE_TARGETS),
+  }));
   syncSourcesEverywhere(store, ipc);
 }
 

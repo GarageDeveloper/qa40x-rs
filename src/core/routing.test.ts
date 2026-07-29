@@ -1,7 +1,13 @@
 // Port of the mixer.test.ts routing-matrix invariants (M2).
 import { describe, expect, it } from "vitest";
 import type { SourceRoute, SourceTarget } from "../store/state";
-import { routeChecks, routeFromChecks, sourceRouting, unionRoutes } from "./routing";
+import {
+  routeChecks,
+  routeFromChecks,
+  sourceRouting,
+  unionRoutes,
+  writeTarget,
+} from "./routing";
 
 describe("routing matrix: route ↔ Out L / Out R checkboxes", () => {
   it("maps every check pair to its route, and back (a bijection)", () => {
@@ -44,6 +50,96 @@ describe("sourceRouting — the device × channel matrix's one read path (issue 
   it("is idempotent over its own materialization", () => {
     const once = sourceRouting({ route: "left", targets: [] });
     expect(sourceRouting({ route: "off", targets: once })).toBe(once);
+  });
+});
+
+describe("writeTarget — the matrix's one write path (issue #25 lot F3)", () => {
+  const CAP = 9;
+
+  it("adding a slot cell to the legacy compact form makes the implicit focus cell explicit", () => {
+    expect(writeTarget({ route: "left", targets: [] }, 1, "right", CAP)).toEqual({
+      route: "left",
+      targets: [
+        { slot: null, route: "left" },
+        { slot: 1, route: "right" },
+      ],
+    });
+  });
+
+  it("updates an existing cell in place — order kept", () => {
+    const src = {
+      route: "left" as const,
+      targets: [
+        { slot: null, route: "both" as const },
+        { slot: 1, route: "left" as const },
+      ],
+    };
+    expect(writeTarget(src, 1, "both", CAP).targets).toEqual([
+      { slot: null, route: "both" },
+      { slot: 1, route: "both" },
+    ]);
+  });
+
+  it("an 'off' write KEEPS the cell (silent DAC program); only null removes it", () => {
+    const src = {
+      route: "left" as const,
+      targets: [
+        { slot: null, route: "left" as const },
+        { slot: 1, route: "both" as const },
+      ],
+    };
+    const off = writeTarget(src, 1, "off", CAP);
+    expect(off.targets).toContainEqual({ slot: 1, route: "off" });
+    const gone = writeTarget(src, 1, null, CAP);
+    expect(gone).toEqual({ route: "left", targets: [] }); // focus-only ⇒ compacted
+  });
+
+  it("a matrix of exactly one focus cell compacts back to the legacy form (round trip)", () => {
+    const start = { route: "left" as const, targets: [] };
+    const widened = writeTarget(start, 1, "right", CAP);
+    const shrunk = writeTarget(widened, 1, null, CAP);
+    expect(shrunk).toEqual(start);
+    // The compact route follows the focus CELL's current value, not history.
+    const retoned = writeTarget(widened, null, "both", CAP);
+    expect(writeTarget(retoned, 1, null, CAP)).toEqual({ route: "both", targets: [] });
+  });
+
+  it("removing the LAST cell stores the silent legacy form", () => {
+    const src = { route: "left" as const, targets: [{ slot: 2, route: "both" as const }] };
+    expect(writeTarget(src, 2, null, CAP)).toEqual({ route: "off", targets: [] });
+  });
+
+  it("a doc-loaded Off cell on another slot survives edits that don't touch it", () => {
+    const src = { route: "left" as const, targets: [{ slot: 1, route: "off" as const }] };
+    const out = writeTarget(src, null, "both", CAP);
+    expect(out.targets).toEqual([
+      { slot: 1, route: "off" },
+      { slot: null, route: "both" },
+    ]);
+  });
+
+  it("removing a cell the matrix never had is a no-op in content", () => {
+    const src = {
+      route: "left" as const,
+      targets: [
+        { slot: null, route: "left" as const },
+        { slot: 1, route: "both" as const },
+      ],
+    };
+    expect(writeTarget(src, 7, null, CAP)).toEqual(src);
+  });
+
+  it("cell creation beyond the cap is refused unchanged (the sanitizer's cap-9 rule)", () => {
+    const full = {
+      route: "left" as const,
+      targets: Array.from({ length: 9 }, (_, i) => ({
+        slot: i,
+        route: "left" as const,
+      })),
+    };
+    expect(writeTarget(full, 42, "both", 9)).toEqual(full);
+    // Updating an EXISTING cell at the cap still works.
+    expect(writeTarget(full, 0, "both", 9).targets[0]).toEqual({ slot: 0, route: "both" });
   });
 });
 
