@@ -23,7 +23,7 @@ import type {
 } from "../state";
 import { MAX_SOURCE_TARGETS } from "../state";
 import { focusedRun, session, sessionKeys } from "../selectors/session";
-import { sessionsForSource } from "../selectors/sources";
+import { sessionsForSource, targetSessionKey } from "../selectors/sources";
 import { writeTarget } from "../../core/routing";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -290,26 +290,38 @@ export function setSourceTargetRoute(
   // second gesture — exactly setSourcePlaying's rule, which only covers the
   // play-then-route ordering. Without this, the editor prints a confident
   // per-device grid value while the target's DAC stays silent until its
-  // group Run. Output-only sessions are already handled (the fan-out's
-  // generator branch), and startRun re-checks every gate (routable, lock,
-  // connected) itself.
+  // group Run. Scoped to the EDITED cell's session only (re-review a: an
+  // edit aimed at B must never resurrect A's deliberately-stopped capture)
+  // and never for an "off" write (re-review b: de-routing means the same
+  // as ✕ to the user, which deliberately abstains). Output-only sessions
+  // are already handled (the fan-out's generator branch), and startRun
+  // re-checks every gate (routable, lock, connected) after its await.
   const s = store.get();
   const src = s.sources.byId[id];
-  if (src?.playing) {
-    for (const key of sessionsForSource(s, id)) {
-      const sess = session(s, key);
-      if (
-        sess &&
-        !sess.run.outputOnly &&
-        !sess.run.streaming &&
-        sess.device.status === "connected" &&
-        sess.run.programLock === null
-      ) {
-        void startRun(store, ipc, { sessionKey: key });
-      }
+  if (src?.playing && route !== "off") {
+    const key = targetSessionKey(s, { slot, route });
+    const sess = session(s, key);
+    if (
+      sess &&
+      !sess.run.outputOnly &&
+      !sess.run.streaming &&
+      sess.device.status === "connected" &&
+      sess.run.programLock === null &&
+      !autoStartInFlight.has(key)
+    ) {
+      // Two quick cell writes (the L-then-R "both" gesture) land before
+      // run.streaming flips — dedupe here or the unit start-stops twice
+      // (benign backend-side, but a wasted round trip + frame hiccup).
+      autoStartInFlight.add(key);
+      void startRun(store, ipc, { sessionKey: key }).finally(() =>
+        autoStartInFlight.delete(key)
+      );
     }
   }
 }
+
+/** Auto-starts in flight per session (see setSourceTargetRoute). */
+const autoStartInFlight = new Set<string>();
 
 /** Remove one cell (the row editor's ✕) — the matrix re-canonicalizes per
  * `writeTarget` (last cell out ⇒ the legacy compact silent form). */

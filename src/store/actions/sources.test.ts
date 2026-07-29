@@ -23,7 +23,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../store";
 import type { AppState, SourceMeta } from "../state";
-import { initialSession, initialState } from "../state";
+import { initialSession, initialState, SLOT0 } from "../state";
 import { withDevice, withRun } from "./sessions.fixtures";
 import { removeSourceTarget, setSourcePlaying, setSourceTargetRoute } from "./sources";
 
@@ -183,6 +183,51 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     expect(calls.filter((c) => c.cmd === "stream_start")).toEqual([]);
   });
 
+  it("the auto-start is scoped to the EDITED cell's session — an edit aimed at B never resurrects A's stopped capture (re-review a)", async () => {
+    const s = twoSessionState(); // both connected, NEITHER streaming
+    s.sources = { order: ["a"], byId: { a: sine("a") } }; // playing, focus cell
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourceTargetRoute(store, ipc, "a", 1, "left");
+    await flush();
+    const starts = calls.filter((c) => c.cmd === "stream_start");
+    expect(starts.map((c) => c.args.deviceId)).toEqual(["usb/B"]);
+    expect(store.get().devices.sessions[SLOT0].run.streaming).toBe(false);
+  });
+
+  it("an 'off' write never auto-starts — de-routing means the same as ✕ (re-review b)", async () => {
+    const s = twoSessionState();
+    s.sources = {
+      order: ["a"],
+      byId: {
+        a: sine("a", {
+          targets: [
+            { slot: null, route: "left" },
+            { slot: 1, route: "right" },
+          ],
+        }),
+      },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourceTargetRoute(store, ipc, "a", 1, "off");
+    await flush();
+    expect(calls.filter((c) => c.cmd === "stream_start")).toEqual([]);
+  });
+
+  it("two quick cell writes (the L-then-R 'both' gesture) start one unit ONCE (re-review c)", async () => {
+    const s = twoSessionState();
+    s.sources = { order: ["a"], byId: { a: sine("a") } };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    setSourceTargetRoute(store, ipc, "a", 1, "left");
+    setSourceTargetRoute(store, ipc, "a", 1, "both"); // same tick, still !streaming
+    await flush();
+    expect(
+      calls.filter((c) => c.cmd === "stream_start" && c.args.deviceId === "usb/B")
+    ).toHaveLength(1);
+  });
+
   it("the play guard ignores a STALE lock on a disconnected session — the enabled button must not click into a silent refusal (review #2)", async () => {
     let s = twoSessionState();
     // An unplug mid-sweep keeps programLock set until the in-flight command
@@ -253,9 +298,9 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     const { ipc, calls } = recordingIpc();
     expect(() => setSourceTargetRoute(store, ipc, "a", 1, "left")).not.toThrow();
     await flush();
-    // Nothing may be ROUTED to the unadopted slot-1 (sessionArgs never
-    // runs); the arg-less calls that do happen belong to slot 0 — the
-    // playing source's focus cell legitimately auto-starts its capture.
-    expect(calls.filter((c) => c.args.deviceId !== undefined)).toEqual([]);
+    // Nothing reaches the wire at all: the unadopted slot-1 is unroutable
+    // (sessionArgs never runs), and the cell-scoped auto-start targets the
+    // EDITED session only — startRun's own isRoutable gate refuses it.
+    expect(calls).toEqual([]);
   });
 });

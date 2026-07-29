@@ -186,7 +186,9 @@ describe("sourceTargetVMs — row list and per-target state", () => {
     );
     s = withRun(s, { programLock: "prog-trace" }, "slot-1");
     const slot1 = sourceTargetVMs(s, "a").find((v) => v.tag === "1")!;
-    expect(slot1.note).toBe('measurement "program" is running — applies when it finishes');
+    expect(slot1.note).toBe(
+      'measurement "program" is running — the device is busy until it finishes'
+    );
     expect(slot1.noteErr).toBe(false);
     // A row with NO cell on the locked session carries no note — nothing
     // is supposed to play there.
