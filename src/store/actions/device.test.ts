@@ -31,7 +31,10 @@ import type { AddedDevice } from "../../gen";
 import { hwTraceIds } from "../hwtraces";
 import { fakeEntry } from "./devices.fixtures";
 import { addDevice, removeDevice } from "./device";
-import { reconcileHwTraces } from "./traces";
+import { reconcileHwTraces, stampSlotEndpointIdentity } from "./traces";
+import { snapshotWorkspace } from "../persist";
+import { applyWorkspaceDoc } from "./workspace";
+import { dormantGroupLabel, reviveCandidateId } from "../selectors/devices";
 
 /** An Ipc that records every call and lets a test override specific
  * methods' behavior (reject, deferred, custom answer) — the rest answer a
@@ -338,5 +341,97 @@ describe("removeDevice — keyed disconnect + eviction + purge (issue #25 lot E4
     await removeDevice(store, ipc, "slot-1");
     expect(calls.some(([m]) => m === "disconnect_device")).toBe(false); // no session ⇒ no wire disconnect
     expect(store.get().traces.byId["hw-in-left@1"]).toBeUndefined();
+  });
+});
+
+/**
+ * Identity from the OPEN, not just from frames (issue #25 lot F —
+ * Raphaël's second F1-validation round): B6's mint fresh-slate zeroes the
+ * slot's endpoint captures, and ingest only re-stamps on the first FRAME —
+ * so a device added but never streamed (e.g. only sweep programs ran on
+ * it, which land on their own trace) had NOTHING to persist: after a
+ * save/restart its dormant group lost its model+serial, the one-click
+ * revive had nothing to match ("Connect" greyed) and the header fell back
+ * to the anonymous "Device #2". `stampSlotEndpointIdentity` closes it at
+ * the add itself.
+ */
+describe("addDevice — a never-streamed device's identity survives for the revive (issue #25 lot F)", () => {
+  const VIRT_ID = "virtual/0DE0_0002";
+  const virtInfo = {
+    model: "QA403",
+    firmware_version: 60,
+    serial: "0DE0_0002",
+    product: "QA403 Audio Analyzer (virtual)",
+    sample_rates: [48000, 96000, 192000, 384000],
+    supports_flash: false,
+    capabilities: {} as never,
+    is_virtual: true,
+  };
+
+  function addIpc() {
+    return fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: VIRT_ID, slot: 1 }) as AddedDevice,
+      get_device_info: () => virtInfo,
+    });
+  }
+
+  it("stamps an identity-only capture on the slot's endpoints at add time — nothing guessed beyond the unit itself", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc } = addIpc();
+    await addDevice(store, ipc, VIRT_ID);
+
+    for (const id of Object.values(hwTraceIds(1))) {
+      const cap = store.get().traces.byId[id]?.capture;
+      expect(cap?.device).toEqual({
+        model: "QA403",
+        serial: "0DE0_0002",
+        firmware: 60,
+        isVirtual: true,
+      });
+      // Identity ONLY — rate/ranges/offsets/fft/window/averaging stay null
+      // (the programCapture "unknown, never guessed" rule): no frame has
+      // described this bench yet, and the first ingested frame replaces
+      // this with the full frame-bound snapshot.
+      expect(cap?.sampleRateHz).toBeNull();
+      expect(cap?.offsets).toBeNull();
+      expect(cap?.capturedAt).toBeNull();
+    }
+  });
+
+  it("a pre-existing (frame-bound) capture is never overwritten by the identity stamp", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc } = addIpc();
+    await addDevice(store, ipc, VIRT_ID);
+    const before = store.get().traces.byId["hw-in-left@1"]!.capture;
+    stampSlotEndpointIdentity(store, 1, { ...virtInfo, serial: "OTHER" });
+    expect(store.get().traces.byId["hw-in-left@1"]!.capture).toBe(before);
+  });
+
+  it("the identity survives the save/load round trip: a fresh boot resolves the revive AND names the dormant group", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    const { ipc } = addIpc();
+    await addDevice(store, ipc, VIRT_ID);
+    // NO streaming happened — the endpoints have no frames, only identity.
+    const doc = snapshotWorkspace(store.get());
+
+    // A fresh boot: the unit is enumerable (the built-in virtual always
+    // is) but nothing is open — the doc's group loads DORMANT.
+    const bootState: AppState = (() => {
+      const s = initialState();
+      return {
+        ...s,
+        devices: {
+          ...s.devices,
+          available: [VIRT_ID],
+          byId: { [VIRT_ID]: fakeEntry(VIRT_ID, { virtual: true, model: "QA403" }) },
+        },
+      };
+    })();
+    const boot = new Store(bootState, { freeze: true });
+    expect(applyWorkspaceDoc(boot, ipc, doc)).toBe(true);
+
+    expect(reviveCandidateId(boot.get(), 1)).toBe(VIRT_ID);
+    expect(dormantGroupLabel(boot.get(), 1)).toBe("QA403 · 0DE0_0002 (virtual)");
   });
 });

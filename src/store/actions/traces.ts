@@ -7,7 +7,7 @@
  */
 import type { Ipc } from "../../ipc/ipc";
 import type { TraceId } from "../../core/model";
-import type { TransformStep } from "../../gen";
+import type { DeviceMeta, TransformStep } from "../../gen";
 import { transformLabel } from "../../core/transforms";
 import { clearFrames, getFrames, putFrames } from "../../data/frames";
 import { resetChain, syncChains } from "../../data/chains";
@@ -117,6 +117,57 @@ export function resetSlotEndpointTraces(store: Store<AppState>, slot: number): v
         seq: t.seq + 1,
         offsetDb: null,
         capture: null,
+      };
+    }
+    return byId ? { ...s, traces: { ...s.traces, byId } } : s;
+  });
+}
+
+/**
+ * Stamp the OPENED unit's identity on `slot`'s endpoint traces (issue #25
+ * lot F, Raphaël's second F1-validation round): identity-only capture
+ * (device block set, everything else null — same shape as programCapture's
+ * "unknown, never guessed" rule), applied right after the add's
+ * `get_device_info` lands. Without it, a device ADDED BUT NEVER STREAMED
+ * has nothing to persist — the mint's fresh slate (B6) zeroed the previous
+ * capture, ingest only re-stamps on the first FRAME, and after a
+ * save/restart the dormant group had no model+serial for the one-click
+ * revive to match ("Connect" greyed, generic "Device #2" title). Identity
+ * comes from the OPEN, frames merely enrich it: the first ingested frame
+ * replaces this with the full frame-bound snapshot
+ * (`frameCaptureProvenance` — different bench signature, so the memo
+ * can't serve the identity-only object). Only fills a NULL capture — a
+ * frame-bound stamp already present always wins.
+ */
+export function stampSlotEndpointIdentity(
+  store: Store<AppState>,
+  slot: number,
+  info: DeviceMeta
+): void {
+  const ids = Object.values(hwTraceIds(slot));
+  store.update("traces/stamp-endpoint-identity", (s) => {
+    let byId: Record<TraceId, TraceMeta> | null = null;
+    for (const id of ids) {
+      const t = s.traces.byId[id];
+      if (!t || t.capture !== null) continue;
+      (byId ??= { ...s.traces.byId })[id] = {
+        ...t,
+        capture: {
+          device: {
+            model: info.model,
+            serial: info.serial,
+            firmware: info.firmware_version,
+            isVirtual: info.is_virtual,
+          },
+          sampleRateHz: null,
+          inputRangeDbv: null,
+          outputRangeDbv: null,
+          offsets: null,
+          fftSize: null,
+          window: null,
+          averaging: null,
+          capturedAt: null,
+        },
       };
     }
     return byId ? { ...s, traces: { ...s.traces, byId } } : s;

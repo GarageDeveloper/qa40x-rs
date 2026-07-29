@@ -41,8 +41,8 @@ pub struct GeneratorFlags {
 
 impl GeneratorFlags {
     /// Wrap a pre-existing flag pair — the bridge for the frozen
-    /// constructors (`ScriptControl::new`, `Session::new`) whose signatures
-    /// keep taking the loose Arcs for the examples' sake.
+    /// constructor (`Session::new`) whose signature keeps taking the loose
+    /// Arcs for the examples' sake.
     pub fn from_parts(running: Arc<AtomicBool>, stop: Arc<AtomicBool>) -> Self {
         Self { running, stop }
     }
@@ -77,6 +77,13 @@ impl GeneratorFlags {
         }
     }
 }
+
+/// Exclusive "a measurement program is running on this device" guard
+/// (issue #25 lot F): a program command holds it from entry to completion,
+/// release on drop. Owned so the guard can outlive the
+/// [`DeviceRuntime::try_program_lock`] call and travel into the command's
+/// async body.
+pub type ProgramGuard = tokio::sync::OwnedMutexGuard<()>;
 
 /// The unit currently open on this runtime, readable WITHOUT the device
 /// mutex (the `last_telemetry` rule: no cache reader ever queues behind a
@@ -137,6 +144,17 @@ struct RuntimeInner {
     /// entry and hands it to the capture pump, which aborts between USB
     /// blocks through the clean STREAM_STOP + drain exit.
     sweep_cancel: Arc<AtomicBool>,
+    /// Exclusive measurement-program gate (issue #25 lot F): one program per
+    /// device at a time, enforced HERE — the "only one exclusive program
+    /// runs" premise `sweep_cancel` relies on used to be frontend convention
+    /// only, so a wow & flutter invoke landing while a THD batch held the
+    /// device could wipe a pending Stop (the lot-C soundness caveat). tokio
+    /// Mutex behind an Arc: the guard is HELD ACROSS the whole program
+    /// (that is its purpose) and owned so it can travel into the command
+    /// body. Acquisition is `try_lock` only — never awaited (fail-fast).
+    /// Lock order: program gate → device mutex, never the reverse; never
+    /// nested with `lifecycle_gate`.
+    program_gate: Arc<TokioMutex<()>>,
     stream: StreamControl,
     open_unit: OpenUnitCell,
     /// Serializes open/close on this runtime: an open holds it for its WHOLE
@@ -191,6 +209,7 @@ impl DeviceRuntime {
                 mixer,
                 generator,
                 sweep_cancel: Arc::new(AtomicBool::new(false)),
+                program_gate: Arc::new(TokioMutex::new(())),
                 stream,
                 open_unit,
                 lifecycle_gate: LifecycleGate::new(()),
@@ -228,10 +247,37 @@ impl DeviceRuntime {
     }
 
     /// This device's cooperative sweep-cancel flag (shared between the THD
-    /// batch and wow & flutter — sound because only one exclusive program
-    /// runs per device at a time).
+    /// batch and wow & flutter — sound because [`Self::try_program_lock`]
+    /// admits one gated program command per device at a time; before lot F
+    /// this premise was frontend convention only, and none of the gate's
+    /// exempt paths (see its doc) ever writes this flag).
     pub fn sweep_cancel(&self) -> &Arc<AtomicBool> {
         &self.inner.sweep_cancel
+    }
+
+    /// Claim this device's exclusive measurement-program gate (issue #25
+    /// lot F). Fail-fast: [`DeviceError::ProgramBusy`] when a program
+    /// already holds it — never queued, so a second invoke reads as a
+    /// refusal, not a hang. The guard spans the whole program command: a
+    /// `sweep_cancel.store(false)` performed while holding it can only ever
+    /// consume a stale Stop, never another program's pending one. Lock
+    /// order: program gate → device mutex.
+    ///
+    /// Honest scope (recorded lot-F limits): the gate covers the five
+    /// `measure_*` commands only — REST acquisitions and Rhai measurement
+    /// scripts drive the device through their own `Session`s WITHOUT it, so
+    /// they can still interleave with a gated program between its device
+    /// locks (pre-existing; `sweep_cancel` itself stays sound — no exempt
+    /// path writes it). And it is per-INVOKE: a frontend program made of
+    /// several invokes (a "both channels" THD sweep is two) releases and
+    /// re-claims between them — cross-invoke exclusivity stays the
+    /// frontend's program-lock job (lot F4).
+    pub fn try_program_lock(&self) -> Result<ProgramGuard, DeviceError> {
+        self.inner
+            .program_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| DeviceError::ProgramBusy)
     }
 
     /// Trip the sweep cancel (the `sweep_stop` command / shutdown path).
@@ -905,6 +951,34 @@ mod tests {
             "the virtual import must have been released by the cleanup"
         );
         sim.release_import();
+    }
+
+    /// Issue #25 lot F: the program gate admits ONE exclusive program per
+    /// device — a second claim fails fast (`ProgramBusy`, never queued), the
+    /// gate frees on guard drop, a clone shares the same gate, and sibling
+    /// runtimes have INDEPENDENT gates (a sweep on device A must never
+    /// refuse a program on device B).
+    #[test]
+    fn the_program_gate_is_exclusive_per_runtime_and_frees_on_drop() {
+        let rt = DeviceRuntime::new();
+        let guard = rt.try_program_lock().expect("a free gate must be claimable");
+        assert!(
+            matches!(rt.try_program_lock(), Err(DeviceError::ProgramBusy)),
+            "a second program on the same device must be refused"
+        );
+        // A clone shares the inner state — same gate, same refusal.
+        assert!(matches!(rt.clone().try_program_lock(), Err(DeviceError::ProgramBusy)));
+
+        // A sibling runtime's gate is its own.
+        let rt2 = DeviceRuntime::new();
+        let _other = rt2
+            .try_program_lock()
+            .expect("device B's gate must be independent of device A's");
+
+        drop(guard);
+        let _again = rt
+            .try_program_lock()
+            .expect("the gate must free when the program's guard drops");
     }
 
     #[test]

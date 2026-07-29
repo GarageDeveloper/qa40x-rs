@@ -42,8 +42,10 @@ pub struct AppState {
     /// Bound localhost-only by default; the UI can expose it on the network.
     rest: Arc<Mutex<rest::RestControl>>,
     /// In-app Rhai scripting (task #22) — the scripting counterpart to the
-    /// REST server, sharing the default runtime's device handle (per-device
-    /// script selection is lot F).
+    /// REST server. Device-agnostic since issue #25 lot F: `script_run`
+    /// resolves its optional `device_id` to a runtime and hands the control
+    /// a session built from it (`None` ⇒ the default device, as
+    /// everywhere); only the bench-wide run/cancel flags live here.
     script: script::ScriptControl,
 }
 
@@ -54,16 +56,13 @@ impl AppState {
         // capture Arcs out of it at construction — sound because the
         // runtime is created once and never replaced.
         let devices = device::DeviceRegistry::new();
-        let rt = devices.default_runtime();
-        let device = rt.handle();
+        let device = devices.default_runtime().handle();
         Self {
             firmware_images: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            rest: Arc::new(Mutex::new(rest::RestControl::new(device.clone()))),
-            script: script::ScriptControl::new(
-                device,
-                rt.generator().running_flag().clone(),
-                rt.generator().stop_flag().clone(),
-            ),
+            rest: Arc::new(Mutex::new(rest::RestControl::new(device))),
+            // Holds no device (issue #25 lot F): `script_run` builds the
+            // session from the runtime its `device_id` resolves to.
+            script: script::ScriptControl::new(),
             devices,
         }
     }
@@ -441,19 +440,28 @@ async fn rest_set_token(
 }
 
 /// Run a Rhai automation script (task #22). Returns immediately; the run
-/// streams `script-log` / `script-state` events. One script at a time. The
-/// `role` selects the family (Traces V2 Phase E): a "source" script produces
-/// a signal (no device access); a "measurement" script (the default, for old
-/// callers) drives the instrument through an exclusive session.
+/// streams `script-log` / `script-state` events. One script at a time,
+/// bench-wide. The `role` selects the family (Traces V2 Phase E): a "source"
+/// script produces a signal (no device access); a "measurement" script (the
+/// default, for old callers) drives the instrument through an exclusive
+/// session — built here from the runtime `device_id` resolves to (issue #25
+/// lot F; `None` ⇒ the default device, every pre-lot-F caller unchanged).
 #[tauri::command]
 async fn script_run(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     source: String,
     role: Option<dashboard::ScriptRole>,
+    device_id: Option<String>,
 ) -> Result<(), String> {
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    let session = measurement::Session::new(
+        rt.handle(),
+        rt.generator().running_flag().clone(),
+        rt.generator().stop_flag().clone(),
+    );
     let ctl = { state.lock().await.script.clone() };
-    ctl.start(app, source, role.unwrap_or_default())
+    ctl.start(app, session, source, role.unwrap_or_default())
 }
 
 /// Request the running script to stop (takes effect at its next operation).
@@ -932,6 +940,9 @@ async fn measure_frequency_response_multi(
 ) -> Result<Vec<qa40x::FrequencyResponseTrace>, String> {
     use measurement::MeasurementProgram;
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F) — held to the end
+    // of the command, fail-fast on contention.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let mut session = measurement::Session::new(
         rt.handle(),
         rt.generator().running_flag().clone(),
@@ -972,6 +983,13 @@ async fn run_thd_batch(
     input_channel: qa40x::Channel,
     swept: &str,
     cancel: &Arc<AtomicBool>,
+    // The swept unit's id, stamped into every progress payload (issue #25
+    // lot F): with programs running concurrently on different devices, lot
+    // F4's frontend routes each event to ITS program (today's listener
+    // still resolves by focus — the field is forward wiring). Additive JSON
+    // field — an old frontend ignores it. `None` only for a device opened
+    // outside the registry.
+    device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     // A fresh batch consumes any stale stop click from a previous run.
     cancel.store(false, Ordering::SeqCst);
@@ -983,7 +1001,7 @@ async fn run_thd_batch(
     let total = pts_spec.len();
     let _ = app.emit(
         "thd-sweep-progress",
-        serde_json::json!({ "done": 0, "total": total }),
+        serde_json::json!({ "done": 0, "total": total, "device_id": device_id }),
     );
 
     // Build one concatenated tone buffer of coherent (bin-snapped) segments.
@@ -1035,7 +1053,7 @@ async fn run_thd_batch(
         });
         let _ = app.emit(
             "thd-sweep-progress",
-            serde_json::json!({ "done": i + 1, "total": total, "frequency": *f_bin, "level": *dbfs }),
+            serde_json::json!({ "done": i + 1, "total": total, "frequency": *f_bin, "level": *dbfs, "device_id": device_id }),
         );
     }
 
@@ -1060,6 +1078,10 @@ async fn measure_thd_vs_frequency(
     device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F): claimed BEFORE the
+    // batch's sweep_cancel clear, so a stale-Stop consume can never wipe a
+    // Stop meant for another program in flight on this device.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -1094,6 +1116,7 @@ async fn measure_thd_vs_frequency(
         input_channel,
         "frequency",
         &sweep_cancel,
+        rt.device_id().map(|id| id.as_str().to_string()),
     )
     .await
 }
@@ -1117,6 +1140,9 @@ async fn measure_thd_vs_level(
     device_id: Option<String>,
 ) -> Result<audio::ThdSweepResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F) — same rationale as
+    // measure_thd_vs_frequency.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
@@ -1148,6 +1174,7 @@ async fn measure_thd_vs_level(
         input_channel,
         "level",
         &sweep_cancel,
+        rt.device_id().map(|id| id.as_str().to_string()),
     )
     .await
 }
@@ -1171,6 +1198,12 @@ async fn measure_wow_flutter(
     device_id: Option<String>,
 ) -> Result<audio::WowFlutterResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F): the gate is
+    // claimed BEFORE the stale-Stop consume below, closing the lot-C
+    // soundness caveat — a W&F invoke arriving while a THD batch holds the
+    // device is refused here and can no longer wipe the batch's pending
+    // Stop.
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     let sweep_cancel = rt.sweep_cancel().clone();
     rt.generator().ensure_stopped().await;
     // A fresh call consumes any stale Stop click from a previous run (same
@@ -1213,6 +1246,8 @@ async fn measure_levels(
     device_id: Option<String>,
 ) -> Result<audio::LevelResult, String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    // One exclusive program per device (issue #25 lot F).
+    let _program = rt.try_program_lock().map_err(|e| e.to_string())?;
     rt.generator().ensure_stopped().await;
     let device = rt.handle();
     let device = device.lock().await;
@@ -1539,6 +1574,54 @@ mod command_arg_tests {
         );
     }
 
+    /// The lot-C soundness caveat, closed by lot F's program gate and pinned
+    /// through the REAL IPC layer: `measure_wow_flutter` clears the shared
+    /// `sweep_cancel` on entry ("a fresh call consumes any stale Stop
+    /// click"), so before the gate existed, a W&F invoke landing while a THD
+    /// batch held the device WIPED the batch's pending Stop. Now the gate is
+    /// claimed BEFORE the clear: the invoke is refused (`ProgramBusy`,
+    /// fail-fast — never queued behind a minutes-long sweep) and the pending
+    /// Stop survives for the program that owns it.
+    #[test]
+    fn a_program_invoke_cannot_wipe_a_pending_stop_while_another_program_holds_the_device() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let rt = state.blocking_lock().devices.default_runtime();
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![measure_wow_flutter])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        // A THD batch is in flight on this device: it holds the program gate
+        // and the user has clicked Stop (the pending cooperative cancel).
+        let _batch = rt.try_program_lock().expect("the gate starts free");
+        rt.cancel_sweep();
+
+        let err = invoke(
+            &webview,
+            "measure_wow_flutter",
+            serde_json::json!({
+                "referenceFreq": 3150.0,
+                "durationSecs": 1.0,
+                "outputChannel": "Left",
+                "inputChannel": "Left",
+                "generate": true,
+            }),
+        )
+        .expect_err("a second program on the same device must be refused");
+        assert!(
+            format!("{err:?}").contains("A measurement program is already running on this device"),
+            "unexpected error payload: {err:?}"
+        );
+        assert!(
+            rt.sweep_cancel().load(Ordering::SeqCst),
+            "the refused invoke must not have consumed the batch's pending Stop"
+        );
+    }
+
     /// Issue #25 lot E: `open_additional` never treats an empty/garbage id as
     /// "pick something" — the guard against `connect_additional_device`'s
     /// `device_id: String` (REQUIRED, unlike every other device command's
@@ -1711,6 +1794,230 @@ mod command_arg_tests {
             serde_json::json!({ "deviceId": "virtual/0DE0_0002" }),
         )
         .expect_err("the disconnected second device's id must no longer route anywhere");
+    }
+
+    /// Issue #25 lot F, the positive complement to
+    /// `a_program_invoke_cannot_wipe_a_pending_stop...` above: per-device
+    /// independence at the command/registry level. A program held on device
+    /// A (its gate claimed, simulating an in-flight THD batch) must never
+    /// block a DIFFERENT program on device B — the gate is per-runtime, not
+    /// bench-wide. The gate is held MANUALLY rather than via a real
+    /// in-flight `measure_levels` call (this test cannot keep one suspended
+    /// to race against), same substitution the ProgramBusy test above
+    /// makes; the assertion that matters — device B's real `measure_levels`
+    /// invoke succeeds through the actual IPC layer while device A's gate
+    /// is held — is exercised for real.
+    ///
+    /// `multi_thread` flavor is NOT a style choice here: the virtual
+    /// device's endpoint worker (`VirtEp::new`, `qa40x/transport.rs`) is
+    /// spawned via a bare `tokio::spawn` at open time, landing on whatever
+    /// runtime is ambient at that call site — this test's own, since
+    /// `open_additional` is `.await`ed directly. `tauri::async_runtime`
+    /// separately latches its OWN process-wide runtime handle in a
+    /// `OnceLock` the first time any mock-IPC command is dispatched — under
+    /// the default single-threaded `current_thread` flavor, that one worker
+    /// thread ends up simultaneously blocked on `get_ipc_response`'s
+    /// synchronous `mpsc::recv()` AND needed to drive slot 1's endpoint
+    /// worker, so the command starves until its register I/O hits the
+    /// device layer's own 1 s timeouts (`QA40xError::Timeout`) — reproduced
+    /// directly against this test before adding `worker_threads`. A second
+    /// worker thread is all it takes; the default device (opened earlier in
+    /// the process, off a DIFFERENT already-running runtime in every OTHER
+    /// test here) never hits this.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_program_held_on_one_device_never_blocks_a_program_on_a_different_device() {
+        let app_state = Arc::new(Mutex::new(AppState::new()));
+        let app = tauri::test::mock_builder()
+            .manage(app_state.clone())
+            .invoke_handler(tauri::generate_handler![connect_virtual_device, measure_levels])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        invoke(&webview, "connect_virtual_device", serde_json::json!({}))
+            .expect("the demo unit opens on slot 0 through the real command");
+        {
+            let devices = { app_state.lock().await.devices.clone() };
+            devices
+                .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
+                .await
+                .expect("the built-in second virtual unit opens on a fresh slot");
+        }
+
+        let devices = { app_state.lock().await.devices.clone() };
+        let rt0 = devices.runtime_for(None).expect("default routes to slot 0");
+
+        // Device A has a program in flight.
+        let _held = rt0.try_program_lock().expect("device A's gate starts free");
+
+        // Device B's own measure_levels must proceed through the real
+        // command path — it claims a DIFFERENT runtime's gate.
+        invoke(
+            &webview,
+            "measure_levels",
+            serde_json::json!({
+                "inputChannel": "Left",
+                "outputChannel": "Left",
+                "durationSecs": 0.2,
+                "generate": true,
+                "stimulusFreq": 1000.0,
+                "stimulusDbfs": -20.0,
+                "deviceId": "virtual/0DE0_0002",
+            }),
+        )
+        .expect("a program on device B must proceed while device A's gate is held");
+
+        assert!(
+            rt0.try_program_lock().is_err(),
+            "device A's gate must still be held — untouched by device B's program"
+        );
+    }
+
+    /// Issue #25 lot F: the program gate is released when the program
+    /// COMPLETES, not just when a unit-test guard is dropped — pinned
+    /// through the real command path by running `measure_levels` twice in a
+    /// row against the same connected virtual device. If the first call's
+    /// `_program` guard failed to drop at the end of the command (e.g. held
+    /// past the `Ok`/`Err` return), the second call would see `ProgramBusy`.
+    #[test]
+    fn the_program_gate_frees_when_a_command_completes_so_a_second_call_succeeds() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![connect_virtual_device, measure_levels])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        invoke(&webview, "connect_virtual_device", serde_json::json!({}))
+            .expect("the demo unit opens on slot 0 through the real command");
+
+        let args = serde_json::json!({
+            "inputChannel": "Left",
+            "outputChannel": "Left",
+            "durationSecs": 0.2,
+            "generate": true,
+            "stimulusFreq": 1000.0,
+            "stimulusDbfs": -20.0,
+        });
+
+        invoke(&webview, "measure_levels", args.clone())
+            .expect("the first measure_levels call must succeed");
+        invoke(&webview, "measure_levels", args).expect(
+            "the gate must have freed when the first call completed — \
+             a second call must not see ProgramBusy",
+        );
+    }
+
+    /// Issue #25 lot F: `sweep_stop` does NOT take the program gate — by
+    /// design, it must be able to trip a running program's cooperative
+    /// cancel flag from OUTSIDE that program, so a held gate can never block
+    /// it (unlike the five `measure_*`/batch commands, which refuse to even
+    /// start a second program while the gate is held).
+    #[test]
+    fn sweep_stop_is_never_blocked_by_a_held_program_gate() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let rt = state.blocking_lock().devices.default_runtime();
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![sweep_stop])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        // A program (e.g. a THD batch) holds the gate.
+        let _held = rt.try_program_lock().expect("the gate starts free");
+        assert!(!rt.sweep_cancel().load(Ordering::SeqCst), "nothing cancelled yet");
+
+        invoke(&webview, "sweep_stop", serde_json::json!({})).expect(
+            "sweep_stop must never be refused by a held program gate — it has to be able to \
+             trip that very program's cancel flag",
+        );
+
+        assert!(
+            rt.sweep_cancel().load(Ordering::SeqCst),
+            "sweep_stop must have tripped the cancel flag despite the held program gate"
+        );
+        assert!(
+            rt.try_program_lock().is_err(),
+            "the program gate itself must be untouched by sweep_stop — still held"
+        );
+    }
+
+    /// Issue #25 lot F: `script_run` builds its measurement [`Session`] from
+    /// the runtime `device_id` resolves to (`None` ⇒ the default device, as
+    /// with every other command) — the fix for `ScriptControl` being
+    /// hard-wired to slot 0's handle pre-lot-F. NOTE: unlike this module's
+    /// other tests, this cannot be pinned through the mock-IPC `invoke()`
+    /// helper: `script_run` takes `app: tauri::AppHandle`, which resolves to
+    /// the concrete `AppHandle<Wry>` (`#[default_runtime(crate::Wry, wry)]`)
+    /// and cannot satisfy `CommandArg<MockRuntime>` under
+    /// `tauri::test::mock_builder()` — the SAME pre-existing limitation
+    /// documented on `open_additional_with_an_empty_id_never_silently_opens_something`
+    /// above for `connect_additional_device`. `ScriptControl::start` can't
+    /// be substituted either: it takes the same concrete `AppHandle` one
+    /// step further down, for the same reason — no Wry-backed `AppHandle`
+    /// exists in a unit test. So this pins the part of the lot-F change that
+    /// is actually new and IS testable without one: `script_run`'s
+    /// runtime-resolution + `Session::new(...)` construction, reproduced
+    /// verbatim against the real registry. (`ScriptControl::start`'s own
+    /// body is otherwise unchanged — it now takes that session as a
+    /// parameter instead of building it from its own removed device field.)
+    #[tokio::test]
+    async fn script_runs_session_targets_the_device_id_resolved_runtime() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let devices = { state.lock().await.devices.clone() };
+        devices.open_virtual().await.expect("the default virtual device opens on slot 0");
+        devices
+            .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
+            .await
+            .expect("the built-in second virtual unit opens on a fresh slot");
+
+        let rt0 = devices.runtime_for(None).expect("default routes to slot 0");
+        let rt1 = devices
+            .runtime_for(Some("virtual/0DE0_0002"))
+            .expect("the second id routes to slot 1");
+
+        // Exactly script_run's construction for `device_id: Some(id)`.
+        let session1 = measurement::Session::new(
+            rt1.handle(),
+            rt1.generator().running_flag().clone(),
+            rt1.generator().stop_flag().clone(),
+        );
+        // A distinct sample rate proves which runtime a session's device
+        // calls actually land on — the two virtual units start identical
+        // (both default to 48 kHz), so an unrelated read couldn't tell them
+        // apart.
+        session1
+            .apply_config(measurement::SessionConfig {
+                sample_rate: Some(qa40x::SampleRate::Rate192kHz),
+                ..Default::default()
+            })
+            .await
+            .expect("apply_config on the resolved runtime");
+        assert_eq!(
+            session1.sample_rate_hz().await,
+            192_000,
+            "a session built for the second device's id must land on device B"
+        );
+
+        // Exactly script_run's construction for `device_id: None`.
+        let session0 = measurement::Session::new(
+            rt0.handle(),
+            rt0.generator().running_flag().clone(),
+            rt0.generator().stop_flag().clone(),
+        );
+        assert_eq!(
+            session0.sample_rate_hz().await,
+            48_000,
+            "a `None` deviceId session must drive the default device — untouched by device B's config"
+        );
     }
 }
 

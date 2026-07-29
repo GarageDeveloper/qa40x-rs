@@ -21,6 +21,7 @@ import {
   purgeSlotEndpointTraces,
   reconcileHwTraces,
   resetSlotEndpointTraces,
+  stampSlotEndpointIdentity,
 } from "./traces";
 import { toast } from "./ui";
 
@@ -104,6 +105,12 @@ export async function connect(
     store.update("device/connected", (s) =>
       updateDevice(s, SLOT0, (d) => ({ ...d, status: "connected", present: true, info }))
     );
+    // Identity from the OPEN, slot-0 flavor (lot F, Raphaël's validation):
+    // a connected-then-disconnected unit that never streamed must still
+    // leave its name on its endpoint rows — the disconnected header/focus
+    // option and the slot-0 header Connect read it. In-session only:
+    // slot-0 captures are deliberately not persisted.
+    if (info) stampSlotEndpointIdentity(store, 0, info);
     // An explicit pick can open the VIRTUAL unit through this path too
     // (review #4): seed the demo hand-over baseline exactly like
     // connectVirtual, or a stale `false` baseline would read the existing
@@ -324,6 +331,11 @@ export async function addDevice(
     store.update("device/added", (s) =>
       updateDevice(s, key, (d) => ({ ...d, status: "connected", present: true, info }))
     );
+    // Identity from the OPEN, not just from frames (lot F, Raphaël's
+    // validation): an added device that never streams before the next
+    // save/restart must still leave its model+serial on its endpoint rows,
+    // or the dormant group's one-click revive has nothing to match.
+    if (info) stampSlotEndpointIdentity(store, slot, info);
     // EXPLICIT scope, not the session-keyed read (review #5): a stale
     // enumeration landing mid-add can transiently clear the adopted id,
     // and the gated read would then silently skip — leaving config and

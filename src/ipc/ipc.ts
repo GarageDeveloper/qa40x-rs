@@ -205,8 +205,11 @@ export interface Commands {
     result: WowFlutterResult;
   };
   // Measurement scripts (M4): the run streams `script-log` / `script-frame`
-  // / `script-state` events; one script at a time.
-  script_run: { args: { source: string; role: ScriptRole }; result: null };
+  // / `script-state` events; one script at a time, bench-wide. The exclusive
+  // device session is built from `deviceId`'s runtime (issue #25 lot F);
+  // callers routing it must gate with isRoutable() like every DeviceScoped
+  // verb (lot F4 wires the program's own session key through here).
+  script_run: { args: { source: string; role: ScriptRole } & DeviceScoped; result: null };
   script_stop: { args: Record<string, never>; result: null };
   script_status: { args: Record<string, never>; result: boolean };
 
