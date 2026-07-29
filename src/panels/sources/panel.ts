@@ -31,11 +31,13 @@ import {
   patchExtraTone,
   removeExtraTone,
   removeSource,
+  removeSourceTarget,
   setSourceFrequency,
   setSourceKind,
   setSourceLevel,
   setSourcePlaying,
   setSourceRoute,
+  setSourceTargetRoute,
   SOURCE_KINDS,
 } from "../../store/actions/sources";
 import { setOutputOnly } from "../../store/actions/outputonly";
@@ -43,6 +45,16 @@ import { setCoherentGen } from "../../store/actions/acquisition";
 import { playedFrequencyHz } from "../../store/actions/stream";
 import { programLockReason } from "../../store/actions/programs";
 import { focusedDevice, focusedRun } from "../../store/selectors/session";
+import { liveSessionCount } from "../../store/selectors/devices";
+import {
+  hasLiveTarget,
+  routingSummary,
+  rowErrorText,
+  snappedReadout,
+  sourceRowMode,
+  sourceTargetVMs,
+  type SourceTargetVM,
+} from "../../store/selectors/sourcetargets";
 import { routeChecks, routeFromChecks } from "../../core/routing";
 import { toneListStats } from "../../core/tonestats";
 import { el, keyedList } from "../../ui/dom";
@@ -53,14 +65,28 @@ import { openScriptDialog } from "./scriptdialog";
  * program-lock reason greying its transport (M4 — named, never silent). */
 interface RowVM {
   src: SourceMeta;
+  /** Which silhouette the row renders (issue #25 lot F3, decision D-F3-1):
+   * the legacy L/R pair at one session with an implicit matrix — byte-
+   * identical to pre-F3 — or the per-device routing editor. Joins the
+   * keyed-list key: a mode flip rebuilds the row's structure. */
+  mode: "legacy" | "matrix";
   error: string | null;
   lock: string | null;
   /** The frequency the mixer actually plays (bin-snapped when the coherent
    * toggle is on), or null for kinds without a frequency. Computed in the
    * selector so a change of FFT size, sample rate or the toggle re-renders
-   * the rows (issue #14). */
+   * the rows (issue #14). Legacy mode only — matrix rows read `snapped`
+   * (per-target, on each TARGET session's rate). */
   played: number | null;
+  /* Matrix mode only (empty/null in legacy): */
+  targets: SourceTargetVM[];
+  summary: { text: string; title: string } | null;
+  snapped: { text: string; title: string } | null;
+  noLiveTarget: boolean;
 }
+
+const NO_LIVE_TARGET_REASON =
+  "Routed only to devices that are not connected — open Routing to retarget it";
 
 /** The phased tone list a sine source plays (primary tone at phase 0 + the
  * enabled extras) — the input of the headroom readout. */
@@ -234,17 +260,45 @@ export function mountSourcesPanel(
     }
   };
 
+  // Which rows have their routing editor open — view state (the summary
+  // line already tells the whole story collapsed), keyed by source id so it
+  // survives the keyed-list rebuild on a mode flip; deliberately not
+  // persisted, unlike the tone editors' `expanded`.
+  const routingOpen = new Set<string>();
+
   const buildRow = (vm: RowVM): HTMLElement => {
     const src = vm.src;
     const id = src.id;
 
     // ---- top line: identical silhouette for every kind -----------------
-    const routeL = el("input", { type: "checkbox", "data-testid": `src-route-l-${id}` });
-    const routeR = el("input", { type: "checkbox", "data-testid": `src-route-r-${id}` });
-    const onRouteChange = (): void =>
-      setSourceRoute(store, ipc, id, routeFromChecks(routeL.checked, routeR.checked));
-    routeL.addEventListener("change", onRouteChange);
-    routeR.addEventListener("change", onRouteChange);
+    // The routing cell is the ONE structural difference between the two row
+    // modes (issue #25 lot F3): the byte-identical legacy Out L/R pair at
+    // one session, the routing summary + per-device editor otherwise.
+    let routeCell: HTMLElement;
+    if (vm.mode === "legacy") {
+      const routeL = el("input", { type: "checkbox", "data-testid": `src-route-l-${id}` });
+      const routeR = el("input", { type: "checkbox", "data-testid": `src-route-r-${id}` });
+      const onRouteChange = (): void =>
+        setSourceRoute(store, ipc, id, routeFromChecks(routeL.checked, routeR.checked));
+      routeL.addEventListener("change", onRouteChange);
+      routeR.addEventListener("change", onRouteChange);
+      routeCell = el(
+        "span.sources__route",
+        { title: "Route to Out L / Out R (nothing checked = Off)" },
+        el("label.sources__route-ch", {}, routeL, "L"),
+        el("label.sources__route-ch", {}, routeR, "R")
+      );
+    } else {
+      routeCell = el("button.sources__routing-sum", {
+        type: "button",
+        "data-testid": `src-routing-${id}`,
+        onclick: () => {
+          if (routingOpen.has(id)) routingOpen.delete(id);
+          else routingOpen.add(id);
+          render();
+        },
+      });
+    }
 
     const play = el("button.btn.btn--small", {
       "data-testid": `src-play-${id}`,
@@ -287,12 +341,7 @@ export function mountSourcesPanel(
       el("span.sources__name"),
       el("span.sources__spacer"),
       play,
-      el(
-        "span.sources__route",
-        { title: "Route to Out L / Out R (nothing checked = Off)" },
-        el("label.sources__route-ch", {}, routeL, "L"),
-        el("label.sources__route-ch", {}, routeR, "R")
-      ),
+      routeCell,
       remove
     );
 
@@ -347,7 +396,7 @@ export function mountSourcesPanel(
     const errBadge = el("span.sources__err", { "data-testid": `src-error-${id}` });
     const row = el(
       "div.sources__row",
-      {},
+      vm.mode === "matrix" ? { "data-routing-mode": "matrix" } : {},
       head,
       el("div.sources__params", {}, ...params),
       errBadge
@@ -380,8 +429,102 @@ export function mountSourcesPanel(
         )
       );
     }
+
+    // ---- the per-device routing editor (matrix mode) --------------------
+    if (vm.mode === "matrix") {
+      row.append(
+        el("div.sources__detail.sources__routing", {
+          "data-testid": `src-routing-panel-${id}`,
+        })
+      );
+    }
     return row;
   };
+
+  /** One row of the routing editor: a POTENTIAL target with its own L/R
+   * pair, its own grid readout and a note saying why it is silent. Every
+   * cell is always rendered (empty text when idle) — presence never
+   * changes with a toggle, only with the bench (no-layout-shift rule). */
+  const targetRenderer = (srcId: string, hasFreq: boolean) => ({
+    create: (t: SourceTargetVM): HTMLElement => {
+      const tgtL = el("input", {
+        type: "checkbox",
+        "data-testid": `src-tgt-l-${srcId}-${t.tag}`,
+      });
+      const tgtR = el("input", {
+        type: "checkbox",
+        "data-testid": `src-tgt-r-${srcId}-${t.tag}`,
+      });
+      const slot = t.slot;
+      const onChange = (): void =>
+        setSourceTargetRoute(
+          store,
+          ipc,
+          srcId,
+          slot,
+          routeFromChecks(tgtL.checked, tgtR.checked)
+        );
+      tgtL.addEventListener("change", onChange);
+      tgtR.addEventListener("change", onChange);
+      const del = el(
+        "button.btn.btn--small",
+        {
+          "data-testid": `src-tgt-del-${srcId}-${t.tag}`,
+          title: "Remove this device from the source's routing",
+          onclick: () => removeSourceTarget(store, ipc, srcId, slot),
+          "aria-label": "Remove routing target",
+        },
+        "✕"
+      );
+      return el(
+        "div.sources__tgt",
+        {},
+        el("span.sources__tgt-name"),
+        el("label.sources__route-ch", {}, tgtL, "L"),
+        el("label.sources__route-ch", {}, tgtR, "R"),
+        el("span.sources__tgt-played", {
+          "data-testid": `src-tgt-played-${srcId}-${t.tag}`,
+        }),
+        el("span.sources__tgt-note", {
+          "data-testid": `src-tgt-note-${srcId}-${t.tag}`,
+        }),
+        del
+      );
+    },
+    update: (node: HTMLElement, t: SourceTargetVM): void => {
+      node.querySelector<HTMLElement>(".sources__tgt-name")!.textContent = t.label;
+      const tgtL = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-tgt-l-${srcId}-${t.tag}"]`
+      )!;
+      const tgtR = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-tgt-r-${srcId}-${t.tag}"]`
+      )!;
+      tgtL.checked = t.left;
+      tgtR.checked = t.right;
+      const played = node.querySelector<HTMLElement>(
+        `[data-testid="src-tgt-played-${srcId}-${t.tag}"]`
+      )!;
+      // "" for a source with no frequency (and for an unconfigured row); an
+      // honest — while a routed target's converter (hence its grid) is
+      // unknown — never a substituted rate (the deviceForTrace lesson).
+      played.textContent = !hasFreq
+        ? ""
+        : t.present && t.playedHz !== null
+          ? `${t.playedHz.toFixed(4)} Hz`
+          : t.present
+            ? "—"
+            : "";
+      const note = node.querySelector<HTMLElement>(
+        `[data-testid="src-tgt-note-${srcId}-${t.tag}"]`
+      )!;
+      note.textContent = t.note;
+      note.classList.toggle("sources__tgt-note--err", t.noteErr);
+      const del = node.querySelector<HTMLButtonElement>(
+        `[data-testid="src-tgt-del-${srcId}-${t.tag}"]`
+      )!;
+      del.disabled = !t.present;
+    },
+  });
 
   const updateRow = (node: HTMLElement, vm: RowVM): void => {
     const src = vm.src;
@@ -398,56 +541,86 @@ export function mountSourcesPanel(
     if (src.kind !== "script") syncField(node, `src-level-${id}`, String(src.levelDbv));
 
     const snapped = node.querySelector<HTMLElement>(`[data-testid="src-snapped-${id}"]`);
-    if (snapped && vm.played !== null && "frequencyHz" in src) {
+    if (snapped && "frequencyHz" in src) {
       // Always shown, both toggle states: an appearing/disappearing hint
       // would shift the whole params line on every toggle flip.
-      const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
-      snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
-      snapped.title = moved
-        ? "Actually-played frequency: the tone is rounded onto the FFT bin " +
-          "grid (Round to eliminate leakage)"
-        : "Actually-played frequency (the ask, played verbatim)";
+      if (vm.mode === "matrix" && vm.snapped) {
+        // Per-target grids (issue #25 lot F3): the shared value when every
+        // live target agrees, a count when they disagree, — when nothing
+        // connected plays this source. Byte-identical wording at one value.
+        snapped.textContent = vm.snapped.text;
+        snapped.title = vm.snapped.title;
+      } else if (vm.played !== null) {
+        const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
+        snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
+        snapped.title = moved
+          ? "Actually-played frequency: the tone is rounded onto the FFT bin " +
+            "grid (Round to eliminate leakage)"
+          : "Actually-played frequency (the ask, played verbatim)";
+      }
     }
 
-    // A source with an EXPLICIT routing matrix (issue #25 lot F2 — only
-    // reachable via a loaded doc until F3 ships the row editor): the two
-    // legacy checkboxes describe the IMPLICIT target only, so they would
-    // both lie about what plays and write a dead field (`route` is never
-    // read while `targets` is non-empty). Disabled with the reason —
-    // legible, never silently inert (v1 invariant C).
-    const pinned = src.targets.length > 0;
-    const routeLBox = node.querySelector<HTMLInputElement>(
-      `[data-testid="src-route-l-${id}"]`
-    )!;
-    const routeRBox = node.querySelector<HTMLInputElement>(
-      `[data-testid="src-route-r-${id}"]`
-    )!;
-    const checks = pinned ? { left: false, right: false } : routeChecks(src.route);
-    routeLBox.checked = checks.left;
-    routeRBox.checked = checks.right;
-    routeLBox.disabled = pinned;
-    routeRBox.disabled = pinned;
-    const pinnedTitle =
-      "This source has per-device routing (from the loaded workspace) — " +
-      "the per-device editor arrives with the next lot";
-    routeLBox.title = pinned ? pinnedTitle : "";
-    routeRBox.title = pinned ? pinnedTitle : "";
+    if (vm.mode === "legacy") {
+      // One session, implicit matrix: the byte-identical pre-F3 pair. The
+      // F2 disabled-with-reason state is gone — an explicit matrix now
+      // renders the routing editor instead (sourceRowMode), whatever the
+      // session count: the editor IS the way out for a doc from a bigger
+      // bench.
+      const routeLBox = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-route-l-${id}"]`
+      )!;
+      const routeRBox = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-route-r-${id}"]`
+      )!;
+      const checks = routeChecks(src.route);
+      routeLBox.checked = checks.left;
+      routeRBox.checked = checks.right;
+    } else {
+      const sum = node.querySelector<HTMLButtonElement>(
+        `[data-testid="src-routing-${id}"]`
+      )!;
+      if (vm.summary) {
+        sum.textContent = vm.summary.text;
+        sum.title = vm.summary.title;
+      }
+      const panel = node.querySelector<HTMLElement>(
+        `[data-testid="src-routing-panel-${id}"]`
+      )!;
+      panel.classList.toggle("sources__detail--open", routingOpen.has(id));
+      keyedList(
+        panel,
+        vm.targets,
+        (t) => t.tag,
+        targetRenderer(id, src.kind !== "script" && "frequencyHz" in src)
+      );
+    }
 
     const play = node.querySelector<HTMLButtonElement>(`[data-testid="src-play-${id}"]`)!;
     // While a program holds the device, the playing intent shows as PAUSED
     // (data kept, resumes on completion) and the transport is locked with
     // the program's name — legible, never silently inert (v1 invariant C).
+    // A matrix routed only at dead targets cannot be STARTED (nothing would
+    // play — never a silent retarget) but can always be paused (D-F3-7).
+    const unstartable = vm.noLiveTarget && !src.playing;
     play.textContent = src.playing ? "⏸" : "▶";
     play.classList.toggle("btn--primary", src.playing && vm.lock === null);
     play.classList.toggle("sources__play--held", src.playing && vm.lock !== null);
-    play.disabled = vm.lock !== null;
-    play.title = vm.lock ?? (src.playing ? "Pause this source" : "Play this source");
+    play.disabled = vm.lock !== null || unstartable;
+    play.title =
+      vm.lock ??
+      (unstartable
+        ? NO_LIVE_TARGET_REASON
+        : src.playing
+          ? "Pause this source"
+          : "Play this source");
 
     const err = node.querySelector<HTMLElement>(`[data-testid="src-error-${id}"]`)!;
     err.textContent = vm.error ?? "";
     err.classList.toggle("sources__err--on", vm.error !== null);
 
-    const detail = node.querySelector<HTMLElement>(".sources__detail");
+    const detail = node.querySelector<HTMLElement>(
+      ".sources__detail:not(.sources__routing)"
+    );
     if (detail) detail.classList.toggle("sources__detail--open", expanded.has(id));
 
     if (src.kind === "sine") {
@@ -525,7 +698,9 @@ export function mountSourcesPanel(
   const render = (): void => {
     // The kind joins the key: a waveform switch REBUILDS the row (its params
     // line is kind-specific — freq/tones for periodic, level-only broadband).
-    keyedList(list, lastRows, (vm) => `${vm.src.id}:${vm.src.kind}`, {
+    // The MODE too (lot F3): the routing cell is structural, so crossing the
+    // one-session boundary (or minting/clearing a matrix) rebuilds the row.
+    keyedList(list, lastRows, (vm) => `${vm.src.id}:${vm.src.kind}:${vm.mode}`, {
       create: buildRow,
       update: updateRow,
     });
@@ -535,18 +710,41 @@ export function mountSourcesPanel(
     (s) => {
       const errors = new Map(focusedRun(s).slotErrors.map((e) => [e.id, e.error]));
       const lock = programLockReason(s);
+      const multi = liveSessionCount(s) >= 2;
       return s.sources.order
         .map((id) => s.sources.byId[id])
         .filter((src): src is SourceMeta => !!src)
-        .map((src) => ({
-          src,
-          error: errors.get(src.id) ?? null,
-          lock,
-          played:
-            src.kind !== "script" && "frequencyHz" in src
-              ? playedFrequencyHz(s, src.frequencyHz)
-              : null,
-        }));
+        .map((src): RowVM => {
+          const mode = sourceRowMode(s, src);
+          const hasFreq = src.kind !== "script" && "frequencyHz" in src;
+          if (mode === "legacy") {
+            return {
+              src,
+              mode,
+              error: errors.get(src.id) ?? null,
+              lock,
+              played: hasFreq ? playedFrequencyHz(s, src.frequencyHz) : null,
+              targets: [],
+              summary: null,
+              snapped: null,
+              noLiveTarget: false,
+            };
+          }
+          // Matrix mode: readouts and errors are PER TARGET (each on its
+          // own session's grid/errors — sourcetargets.ts).
+          const targets = sourceTargetVMs(s, src.id);
+          return {
+            src,
+            mode,
+            error: rowErrorText(targets, multi),
+            lock,
+            played: null,
+            targets,
+            summary: routingSummary(targets),
+            snapped: hasFreq ? snappedReadout(targets, src.frequencyHz) : null,
+            noLiveTarget: !hasLiveTarget(targets),
+          };
+        });
     },
     (rows) => {
       lastRows = rows;

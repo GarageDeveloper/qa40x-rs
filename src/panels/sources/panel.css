@@ -215,6 +215,61 @@
   gap: 6px;
 }
 
+/* The collapsed routing summary (matrix mode, issue #25 lot F3): reads like
+   a readout — "→ focus LR · #2 L" — and opens the per-device editor. */
+.sources__routing-sum {
+  max-width: 130px;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__routing-sum:hover {
+  color: var(--accent);
+}
+
+/* One row of the routing editor: name + L/R + grid readout + note + ✕. */
+.sources__tgt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sources__tgt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__tgt-played {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.sources__tgt-note {
+  max-width: 40%;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__tgt-note--err {
+  color: var(--err);
+}
+
 .sources__route-ch {
   display: flex;
   align-items: center;
