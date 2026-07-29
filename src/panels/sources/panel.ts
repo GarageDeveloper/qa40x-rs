@@ -818,6 +818,9 @@ export function mountSourcesPanel(
     }),
     ({ multi, label }) => {
       footDev.textContent = multi ? label : "";
+      // The prefix is the footer's designated shrinker — the full name
+      // stays reachable on hover once the ellipsis bites.
+      footDev.title = multi ? `These readouts describe ${label} (the focused device)` : "";
       // R3 keeps the one checkbox; at ≥ 2 devices its scope deserves words.
       outOnlyLabel.title = multi
         ? `${OUT_ONLY_TITLE} Applies to the focused device.`

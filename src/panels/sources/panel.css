@@ -291,9 +291,13 @@
 
 /* Which device the footer describes (issue #25 lot F3) — present only at
    ≥ 2 live sessions; :empty keeps the single-device footer pixel-identical
-   (the .sources__params:empty precedent). */
+   (the .sources__params:empty precedent). The prefix is the one flex item
+   allowed to SHRINK (ellipsis + title), so the Σ/clip/range readouts never
+   wrap internally in the narrow sidebar. */
 .sources__footdev {
-  max-width: 34%;
+  flex: 0 1 auto;
+  min-width: 18px;
+  max-width: 40%;
   overflow: hidden;
   color: var(--ink-3);
   text-overflow: ellipsis;
@@ -302,6 +306,11 @@
 
 .sources__footdev:empty {
   display: none;
+}
+
+.sources__sigma {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sources__clip {
@@ -319,7 +328,9 @@
 }
 
 .sources__range {
+  flex-shrink: 0;
   color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .sources__spacer {
