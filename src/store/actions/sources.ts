@@ -21,7 +21,8 @@ import type {
   SourceRoute,
   SourceTarget,
 } from "../state";
-import { focusedDevice, focusedRun } from "../selectors/session";
+import { focusedRun, session, sessionKeys } from "../selectors/session";
+import { sessionsForSource } from "../selectors/sources";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 
@@ -91,10 +92,18 @@ function defaultSource(kind: SourceKind, id: string, label: string): SourceMeta 
   }
 }
 
-/** Sync whichever loop owns the DAC after a source mutation. */
-function syncActive(store: Store<AppState>, ipc: Ipc): void {
-  if (focusedRun(store.get()).outputOnly) syncOutputOnly(store, ipc);
-  else syncStream(store, ipc);
+/** Sync whichever loop owns each session's DAC after a source mutation
+ * (issue #25 lot F2): with the routing matrix a single edit can reshape the
+ * mix of SEVERAL devices, so the sync fans out — one wire call per session,
+ * each on its own owner branch (generator while that session's output-only
+ * mode is on, stream otherwise; syncStream no-ops for a session that isn't
+ * streaming). At one session this is exactly the pre-F2 single call. */
+function syncSourcesEverywhere(store: Store<AppState>, ipc: Ipc): void {
+  const s = store.get();
+  for (const key of sessionKeys(s)) {
+    if (session(s, key)?.run.outputOnly) syncOutputOnly(store, ipc, key);
+    else syncStream(store, ipc, key);
+  }
 }
 
 export function addSource(store: Store<AppState>, ipc: Ipc, kind: SourceKind): string {
@@ -111,7 +120,7 @@ export function addSource(store: Store<AppState>, ipc: Ipc, kind: SourceKind): s
       byId: { ...s.sources.byId, [id]: source },
     },
   }));
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
   return id;
 }
 
@@ -124,7 +133,7 @@ export function removeSource(store: Store<AppState>, ipc: Ipc, id: string): void
       sources: { order: s.sources.order.filter((x) => x !== id), byId },
     };
   });
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 function patch(
@@ -184,7 +193,7 @@ export function setSourceKind(
     }
     return { ...base, kind, levelDbv: src.levelDbv };
   });
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function setSourceFrequency(
@@ -197,7 +206,7 @@ export function setSourceFrequency(
   patch(store, "sources/frequency", id, (src) =>
     "frequencyHz" in src ? { ...src, frequencyHz } : src
   );
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function setSourceLevel(
@@ -210,7 +219,7 @@ export function setSourceLevel(
   patch(store, "sources/level", id, (src) =>
     src.kind === "script" ? src : { ...src, levelDbv }
   );
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function setSourceRoute(
@@ -220,7 +229,7 @@ export function setSourceRoute(
   route: SourceRoute
 ): void {
   patch(store, "sources/route", id, (src) => ({ ...src, route }));
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function setSourcePlaying(
@@ -231,22 +240,29 @@ export function setSourcePlaying(
 ): void {
   // A running measurement program owns the device: the UI greys the
   // transports with the reason, and the action refuses as backstop.
+  // Focus-based on purpose (lot F2 decision D7 — matches the greyed
+  // button); per-target lock display is lot F4.
   if (focusedRun(store.get()).programLock !== null) return;
   patch(store, playing ? "sources/play" : "sources/pause", id, (src) => ({
     ...src,
     playing,
   }));
+  // Fan out over the LIVE sessions this source's matrix resolves onto
+  // (issue #25 lot F2) — each takes its own owner branch: generator while
+  // that session's output-only mode is on; play auto-starts the stream
+  // (see module docs); otherwise the running loop just follows the new
+  // membership.
   const s = store.get();
-  if (focusedRun(s).outputOnly) {
-    syncOutputOnly(store, ipc);
-    return;
-  }
-  // Play auto-starts the stream (see module docs); otherwise the running
-  // loop just follows the new membership.
-  if (playing && !focusedRun(s).streaming && focusedDevice(s).status === "connected") {
-    void startRun(store, ipc);
-  } else {
-    syncStream(store, ipc);
+  for (const key of sessionsForSource(s, id)) {
+    const sess = session(s, key);
+    if (!sess) continue;
+    if (sess.run.outputOnly) {
+      syncOutputOnly(store, ipc, key);
+    } else if (playing && !sess.run.streaming && sess.device.status === "connected") {
+      void startRun(store, ipc, { sessionKey: key });
+    } else {
+      syncStream(store, ipc, key);
+    }
   }
 }
 
@@ -261,7 +277,7 @@ export function setScriptSource(
   patch(store, "sources/script", id, (src) =>
     src.kind === "script" ? ({ ...src, source } satisfies ScriptSource) : src
   );
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 /* ---- extra tones (sine → phased tone list) --------------------------- */
@@ -284,7 +300,7 @@ export function addExtraTone(store: Store<AppState>, ipc: Ipc, id: string): void
     ...tones,
     { enabled: true, frequencyHz: 2000, levelDbv: -24, phaseDeg: 0 },
   ]);
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function removeExtraTone(
@@ -296,7 +312,7 @@ export function removeExtraTone(
   patchTones(store, "sources/tone-remove", id, (tones) =>
     tones.filter((_, i) => i !== index)
   );
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }
 
 export function patchExtraTone(
@@ -309,5 +325,5 @@ export function patchExtraTone(
   patchTones(store, "sources/tone-edit", id, (tones) =>
     tones.map((t, i) => (i === index ? { ...t, ...changes } : t))
   );
-  syncActive(store, ipc);
+  syncSourcesEverywhere(store, ipc);
 }

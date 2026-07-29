@@ -27,6 +27,7 @@ import {
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
 import { anyProgramLock } from "../selectors/session";
+import { syncAllOutputOnly } from "./outputonly";
 import { syncAllStreams } from "./stream";
 import { reconcileHwTraces } from "./traces";
 import { toast } from "./ui";
@@ -135,7 +136,11 @@ export function applyWorkspaceDoc(
 
   // A running stream keeps running and simply follows the new bench (its
   // slots empty out — nothing plays; its display budget follows the tiles).
+  // Generators follow too (lot F2): nothing plays after a load, so a
+  // session left in output-only takes the stop branch — before this, a
+  // load left a running generator looping the OLD bench's mix.
   syncAllStreams(store, ipc);
+  syncAllOutputOnly(store, ipc);
   syncChains(store, ipc);
   return true;
 }

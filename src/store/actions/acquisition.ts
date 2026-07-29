@@ -8,7 +8,7 @@ import type { Store } from "../store";
 import type { AppState, AveragingMode, WindowKind } from "../state";
 import { FFT_SIZES } from "../state";
 import { syncAllStreams } from "./stream";
-import { syncOutputOnly } from "./outputonly";
+import { syncAllOutputOnly } from "./outputonly";
 import { toast } from "./ui";
 
 export function setFftSize(store: Store<AppState>, ipc: Ipc, fftSize: number): void {
@@ -42,16 +42,17 @@ export function setWindow(store: Store<AppState>, ipc: Ipc, window: WindowKind):
 }
 
 /** The coherent-generator toggle (issue #14). Both DAC owners must follow:
- * the stream loop rebuilds via syncStream, and the gap-free generator —
- * which only rebuilds on source/mode actions — via syncOutputOnly, so a
- * flip while "Output only" is on retunes the loop buffer too. */
+ * running streams rebuild via syncAllStreams, and every session's gap-free
+ * generator — which only rebuilds on source/mode actions — via
+ * syncAllOutputOnly (lot F2: bin snapping is per-device, so EVERY
+ * generator retunes, not just the focused one's). */
 export function setCoherentGen(store: Store<AppState>, ipc: Ipc, coherentGen: boolean): void {
   store.update("acq/coherent-gen", (s) => ({
     ...s,
     acquisition: { ...s.acquisition, coherentGen },
   }));
   syncAllStreams(store, ipc);
-  syncOutputOnly(store, ipc);
+  syncAllOutputOnly(store, ipc);
 }
 
 /** Peak hold is display-side (the chart keeps the per-bin max) — no stream
