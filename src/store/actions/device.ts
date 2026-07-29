@@ -251,11 +251,15 @@ export async function disconnect(
   // OTHER device (E4 review #1). Refuse the whole gesture; the id is one
   // enumeration away.
   if (!isRoutable(store.get(), sessionKey)) return;
-  // Program-lock guard (lot F2, the F1 bookkeeping item): the UI disables
-  // its Disconnect affordances under the session's lock, but REST/debug
-  // callers reach this action directly — an eviction mid-program releases
-  // anyProgramLock early and strands the orphaned invoke (F1 review #5).
-  if (session(store.get(), sessionKey)?.run.programLock) {
+  // Program-lock guard for the EVICTING path only (lot F2, the F1
+  // bookkeeping item): a slot ≥ 1 disconnect drops the session, which
+  // releases anyProgramLock early and strands the orphaned invoke (F1
+  // review #5). SLOT 0 is deliberately exempt (F2 review MUST-FIX #2):
+  // its disconnect keeps the session (mark-disconnected below), and the
+  // backend's quiesce trips the sweep cancel on purpose — the top-bar
+  // Disconnect is the documented escape hatch for a wedged sweep (the
+  // PR #35 follow-up in lib.rs).
+  if (sessionKey !== SLOT0 && session(store.get(), sessionKey)?.run.programLock) {
     toast(store, "info", "A measurement is running on this device — stop it first.");
     return;
   }
@@ -379,20 +383,26 @@ export async function addDevice(
     // save/restart must still leave its model+serial on its endpoint rows,
     // or the dormant group's one-click revive has nothing to match.
     if (info) stampSlotEndpointIdentity(store, slot, info);
-    // A DIFFERENT unit landed on a slot whose doc pinned a stimulus to the
-    // previous tenant (lot F2, decision D5): drop that slot's source
-    // targets — the evict→re-add path is reachable via a loaded doc even
-    // before F3 ships a target-editing UI. Same model+serial (the revive
-    // path) keeps them.
-    if (
-      info &&
-      prior &&
-      (prior.model !== info.model || prior.serial !== info.serial)
-    ) {
-      store.update("sources/drop-slot-targets", (s) =>
-        dropSourceTargetsForSlot(s, slot)
-      );
-      syncAllDacOwners(store, ipc);
+    // Unless the landed unit is PROVABLY the one the doc pinned a stimulus
+    // to (same model+serial — the revive path), drop this slot's source
+    // targets (lot F2, decision D5; fail CLOSED per review SHOULD-FIX #5:
+    // an unknown identity — info denied, or rows predating the identity
+    // stamp — must not let a pinned stimulus re-bind onto whatever unit
+    // took the slot). The evict→re-add path is reachable via a loaded doc
+    // even before F3 ships a target-editing UI.
+    const identityKnownSame =
+      info !== null &&
+      prior !== null &&
+      prior.model === info.model &&
+      prior.serial === info.serial;
+    if (!identityKnownSame) {
+      let dropped = false;
+      store.update("sources/drop-slot-targets", (s) => {
+        const next = dropSourceTargetsForSlot(s, slot);
+        dropped = next !== s;
+        return next;
+      });
+      if (dropped) syncAllDacOwners(store, ipc);
     }
     // EXPLICIT scope, not the session-keyed read (review #5): a stale
     // enumeration landing mid-add can transiently clear the adopted id,

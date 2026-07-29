@@ -409,11 +409,29 @@ export function mountSourcesPanel(
         : "Actually-played frequency (the ask, played verbatim)";
     }
 
-    const checks = routeChecks(src.route);
-    node.querySelector<HTMLInputElement>(`[data-testid="src-route-l-${id}"]`)!.checked =
-      checks.left;
-    node.querySelector<HTMLInputElement>(`[data-testid="src-route-r-${id}"]`)!.checked =
-      checks.right;
+    // A source with an EXPLICIT routing matrix (issue #25 lot F2 — only
+    // reachable via a loaded doc until F3 ships the row editor): the two
+    // legacy checkboxes describe the IMPLICIT target only, so they would
+    // both lie about what plays and write a dead field (`route` is never
+    // read while `targets` is non-empty). Disabled with the reason —
+    // legible, never silently inert (v1 invariant C).
+    const pinned = src.targets.length > 0;
+    const routeLBox = node.querySelector<HTMLInputElement>(
+      `[data-testid="src-route-l-${id}"]`
+    )!;
+    const routeRBox = node.querySelector<HTMLInputElement>(
+      `[data-testid="src-route-r-${id}"]`
+    )!;
+    const checks = pinned ? { left: false, right: false } : routeChecks(src.route);
+    routeLBox.checked = checks.left;
+    routeRBox.checked = checks.right;
+    routeLBox.disabled = pinned;
+    routeRBox.disabled = pinned;
+    const pinnedTitle =
+      "This source has per-device routing (from the loaded workspace) — " +
+      "the per-device editor arrives with the next lot";
+    routeLBox.title = pinned ? pinnedTitle : "";
+    routeRBox.title = pinned ? pinnedTitle : "";
 
     const play = node.querySelector<HTMLButtonElement>(`[data-testid="src-play-${id}"]`)!;
     // While a program holds the device, the playing intent shows as PAUSED

@@ -62,13 +62,14 @@ export function levelToAmplitude(levelDbv: number): number {
  *
  * `route` (issue #25 lot F2): the route THIS session receives — a matrix
  * cell's coalesced route (selectors/sources.ts), not necessarily the
- * source's legacy field. Defaults to `src.route` for direct callers (the
- * pre-matrix behavior, and the pinned single-device path).
+ * source's legacy field. REQUIRED (review note #11): a defaulted read of
+ * `src.route` would be a second live read path beside `sourceRouting`,
+ * waiting for a caller that forgets the argument.
  */
 export function slotFromSource(
   src: SourceMeta,
   snap: (hz: number) => number,
-  route: SourceRoute = src.route
+  route: SourceRoute
 ): MixerSlotDesc {
   let source: MixerSlotDesc["source"];
   switch (src.kind) {
@@ -505,6 +506,14 @@ export function __resetSessionGlobals(): void {
   warnedFrameMismatches.clear();
 }
 
+/** Extra per-session teardown hooks from modules stream.ts must not
+ * import (lot F2: outputonly.ts registers its rebuild-chain cleanup here —
+ * the import edge runs outputonly → stream, never the reverse). */
+const sessionDisposers: Array<(key: SessionKey) => void> = [];
+export function registerSessionDisposer(fn: (key: SessionKey) => void): void {
+  sessionDisposers.push(fn);
+}
+
 /**
  * Drop every per-session module entry for an EVICTED session (issue #25
  * lot E4 — the teardown twin of the maps above): the capture memo has no
@@ -528,6 +537,7 @@ export function disposeSession(key: SessionKey): void {
   for (const sig of [...warnedFrameMismatches]) {
     if (sig.startsWith(`${key}|`)) warnedFrameMismatches.delete(sig);
   }
+  for (const dispose of sessionDisposers) dispose(key);
 }
 
 export async function startRun(
@@ -580,6 +590,17 @@ export async function startRun(
     }));
     s = store.get();
     sess = session(s, key)!; // re-read past our own update (hygiene)
+    // The flip changed EVERY source's playing flag, so every OTHER
+    // streaming session's mix moved too — a doc-pinned target on a
+    // monitoring device must not keep its previously-pushed empty slot
+    // set until some unrelated edit syncs it (F2 review SHOULD-FIX #4).
+    // This session's own config is built below. Known limit: another
+    // session sitting in output-only mode with everything paused is not
+    // re-armed from here (stream.ts cannot import the generator module
+    // without a cycle) — its generator starts on the next source gesture.
+    for (const other of sessionKeys(s)) {
+      if (other !== key) syncStream(store, ipc, other);
+    }
   }
   if (sess.run.outputOnly || sess.run.generatorRunning) {
     // Run is an explicit ask for capture: it takes the DAC back (stream_start

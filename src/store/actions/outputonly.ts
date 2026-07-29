@@ -22,7 +22,12 @@ import {
   updateRun,
 } from "../selectors/session";
 import { sessionHasSources } from "../selectors/sources";
-import { slotsFromSources, startRun, syncAllStreams } from "./stream";
+import {
+  registerSessionDisposer,
+  slotsFromSources,
+  startRun,
+  syncAllStreams,
+} from "./stream";
 import { toast } from "./ui";
 
 /** Rebuild chains PER SESSION (issue #25 lot E2): several changes landing
@@ -32,6 +37,12 @@ import { toast } from "./ui";
  * `run.outputOnly` is on, and its slot set is what the routing matrix
  * resolves onto that session (selectors/sources.ts). */
 const chains = new Map<SessionKey, Promise<void>>();
+
+// Session eviction drops this map's entry too (lot F2 review note #8 —
+// the "per-session module maps get disposed" rule): a session re-minted
+// on the same slot must not queue its first rebuild behind the dead
+// session's settled chain.
+registerSessionDisposer((key) => chains.delete(key));
 
 /** Flip a session's mode (default: the focused one — the footer checkbox
  * stays focus-bound, Raphaël R3 2026-07-29). With sources routed here this
@@ -107,6 +118,14 @@ async function sync(store: Store<AppState>, ipc: Ipc, key: SessionKey): Promise<
   // the gap-free generator on the OTHER device's DAC — a stimulus on an
   // unintended converter (and possibly a DUT).
   if (!isRoutable(s, key)) return;
+  // A measurement program owns this session's device EXCLUSIVELY (F2
+  // review MUST-FIX #1): `output_only_start` stops the device's capture
+  // and rewrites the output-range register, so a rebuild queued by a
+  // source edit — or by a focus change fanning out to a locked session —
+  // would garble the sweep mid-batch. runProgram keeps `outputOnly` set
+  // for the whole run and clears the lock BEFORE its keyed resume call,
+  // so the legitimate resume passes this gate.
+  if (sess.run.programLock !== null) return;
   // Per-session since lot F2: the mode wants a generator only when the
   // routing matrix resolves something onto THIS session — a session in
   // output-only with nothing routed must take the stop branch below, never

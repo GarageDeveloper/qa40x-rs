@@ -18,6 +18,10 @@ export function setFftSize(store: Store<AppState>, ipc: Ipc, fftSize: number): v
     acquisition: { ...s.acquisition, fftSize },
   }));
   syncAllStreams(store, ipc);
+  // Generators too (F2 review note #9): the coherent bin grid is
+  // fftSize-dependent (playedFrequencyHz), so a running gap-free loop
+  // would otherwise keep playing tones snapped to the OLD grid.
+  syncAllOutputOnly(store, ipc);
 }
 
 export function setAveraging(

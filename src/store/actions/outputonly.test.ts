@@ -217,3 +217,41 @@ describe("syncSourcesEverywhere — the fan-out (issue #25 lot F2)", () => {
     expect(start.args.deviceId).toBe("usb/B");
   });
 });
+
+describe("program lock vs the generator path (F2 review MUST-FIX #1)", () => {
+  it("a rebuild queued against a LOCKED session never calls output_only_start — the program owns the DAC and the range register", async () => {
+    let s = twoSessionState();
+    // The runProgram shape: outputOnly stays on for the whole run, the
+    // generator is already stopped, the lock names the program.
+    s = withRun(
+      s,
+      { outputOnly: true, generatorRunning: false, programLock: "prog-1" },
+      "slot-1"
+    );
+    s.sources = {
+      order: ["b"],
+      byId: { b: sine("b", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    // Both the direct rebuild and the bench-global sweep must no-op.
+    syncOutputOnly(store, ipc, "slot-1");
+    syncAllOutputOnly(store, ipc);
+    await flush();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("the keyed resume AFTER the lock clears still rebuilds (runProgram releases before it resumes)", async () => {
+    let s = twoSessionState();
+    s = withRun(s, { outputOnly: true, programLock: null }, "slot-1");
+    s.sources = {
+      order: ["b"],
+      byId: { b: sine("b", { targets: [{ slot: 1, route: "both" }] }) },
+    };
+    const store = new Store<AppState>(s, { freeze: true });
+    const { ipc, calls } = recordingIpc();
+    syncOutputOnly(store, ipc, "slot-1");
+    await flush();
+    expect(calls.map((c) => c.cmd)).toEqual(["output_only_start"]);
+  });
+});

@@ -214,7 +214,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("a plain sine keeps the classic waveform slot, bin-snapped", () => {
     const snap = (hz: number): number => Math.round(hz / 100) * 100;
-    const slot = slotFromSource(sineSource("s", { frequencyHz: 997 }), snap);
+    const slot = slotFromSource(sineSource("s", { frequencyHz: 997 }), snap, "left");
     expect(slot).toEqual({
       id: "s",
       source: {
@@ -230,7 +230,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("routes follow the source's declared route — including off (muted)", () => {
     for (const route of ["left", "right", "both", "off"] as const) {
-      const slot = slotFromSource(sineSource("s", { route }), noSnap);
+      const slot = slotFromSource(sineSource("s", { route }), noSnap, route);
       expect(slot.route).toBe(route);
       expect(slot.enabled).toBe(true);
     }
@@ -246,7 +246,8 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
           { enabled: false, frequencyHz: 5000, levelDbv: -6, phaseDeg: 0 }, // skipped
         ],
       }),
-      snap
+      snap,
+      "left"
     );
     // The primary {frequency, level} tone rides at phase 0; each enabled
     // extra is bin-snapped and converted dBV → Vrms at this boundary.
@@ -274,7 +275,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     // measurement was pinned on — it must not silently reroute.
     const disabled = [{ enabled: false, frequencyHz: 2000, levelDbv: -6, phaseDeg: 0 }];
     for (const extraTones of [[], disabled]) {
-      const slot = slotFromSource(sineSource("g", { extraTones }), noSnap);
+      const slot = slotFromSource(sineSource("g", { extraTones }), noSnap, "left");
       expect(slot.source.kind).toBe("waveform");
     }
   });
@@ -283,7 +284,8 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     for (const kind of ["square", "triangle", "sawtooth"] as const) {
       const slot = slotFromSource(
         sineSource("g", { kind, frequencyHz: 440, levelDbv: -20 }),
-        noSnap
+        noSnap,
+        "left"
       );
       expect(slot.source).toEqual({
         kind: "waveform",
@@ -296,7 +298,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
 
   it("extra tones apply to sine only — a square with tones stays a square", () => {
     const extraTones = [{ enabled: true, frequencyHz: 2000, levelDbv: -6, phaseDeg: 0 }];
-    const slot = slotFromSource(sineSource("g", { kind: "square", extraTones }), noSnap);
+    const slot = slotFromSource(sineSource("g", { kind: "square", extraTones }), noSnap, "left");
     expect(slot.source.kind).toBe("waveform");
   });
 
@@ -304,7 +306,8 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
     for (const kind of ["multitone", "noise", "chirp"] as const) {
       const slot = slotFromSource(
         { id: "b", label: kind, kind, levelDbv: -12, route: "both", targets: [], playing: true },
-        noSnap
+        noSnap,
+        "both"
       );
       expect(slot.source).toEqual({ kind, amplitude: levelToAmplitude(-12) });
     }
@@ -320,7 +323,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
       targets: [],
       playing: true,
     };
-    const slot = slotFromSource(script, noSnap);
+    const slot = slotFromSource(script, noSnap, script.route);
     expect(slot.source).toEqual({ kind: "script", source: "fn render(ctx) { [] }" });
     expect(slot.route).toBe("both");
   });

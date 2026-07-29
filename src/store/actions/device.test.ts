@@ -623,3 +623,26 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
     });
   });
 });
+
+describe("slot-0 disconnect stays the wedged-sweep escape hatch (F2 review MUST-FIX #2)", () => {
+  it("disconnects EVEN under a program lock — the backend quiesce trips the sweep cancel by design", async () => {
+    const store = new Store(initialState(), { freeze: true });
+    store.update("test/slot0-locked-sweep", (s) => ({
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          [SLOT0]: {
+            ...s.devices.sessions[SLOT0],
+            device: { ...s.devices.sessions[SLOT0].device, status: "connected" as const },
+            run: { ...s.devices.sessions[SLOT0].run, programLock: "prog-1" },
+          },
+        },
+      },
+    }));
+    const { ipc, calls } = fakeIpc();
+    await disconnect(store, ipc, SLOT0);
+    expect(calls.some(([m]) => m === "disconnect_device")).toBe(true);
+    expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
+  });
+});

@@ -67,7 +67,7 @@ export function setFocusedSession(
       store,
       "info",
       `Output only turned off on ${sessionLabel(store.get(), outgoing)} — ` +
-        "no source routes to it anymore."
+        "no playing source routes to it anymore."
     );
   }
   syncAllDacOwners(store, ipc);
