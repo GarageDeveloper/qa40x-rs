@@ -33,7 +33,7 @@ pub enum DeviceError {
     /// design — the frontend refuses a second program with a toast, so a
     /// queued invoke parked behind a minutes-long sweep would read as a
     /// hang, never as a refusal.
-    #[error("a measurement program is already running on this device")]
+    #[error("A measurement program is already running on this device")]
     ProgramBusy,
 
     /// A source failed to enumerate or open (bus scan error, simulator

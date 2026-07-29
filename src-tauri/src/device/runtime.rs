@@ -248,8 +248,9 @@ impl DeviceRuntime {
 
     /// This device's cooperative sweep-cancel flag (shared between the THD
     /// batch and wow & flutter — sound because [`Self::try_program_lock`]
-    /// admits one exclusive program per device at a time; before lot F this
-    /// premise was frontend convention only).
+    /// admits one gated program command per device at a time; before lot F
+    /// this premise was frontend convention only, and none of the gate's
+    /// exempt paths (see its doc) ever writes this flag).
     pub fn sweep_cancel(&self) -> &Arc<AtomicBool> {
         &self.inner.sweep_cancel
     }
@@ -257,10 +258,20 @@ impl DeviceRuntime {
     /// Claim this device's exclusive measurement-program gate (issue #25
     /// lot F). Fail-fast: [`DeviceError::ProgramBusy`] when a program
     /// already holds it — never queued, so a second invoke reads as a
-    /// refusal, not a hang. The guard spans the whole program: a
+    /// refusal, not a hang. The guard spans the whole program command: a
     /// `sweep_cancel.store(false)` performed while holding it can only ever
     /// consume a stale Stop, never another program's pending one. Lock
     /// order: program gate → device mutex.
+    ///
+    /// Honest scope (recorded lot-F limits): the gate covers the five
+    /// `measure_*` commands only — REST acquisitions and Rhai measurement
+    /// scripts drive the device through their own `Session`s WITHOUT it, so
+    /// they can still interleave with a gated program between its device
+    /// locks (pre-existing; `sweep_cancel` itself stays sound — no exempt
+    /// path writes it). And it is per-INVOKE: a frontend program made of
+    /// several invokes (a "both channels" THD sweep is two) releases and
+    /// re-claims between them — cross-invoke exclusivity stays the
+    /// frontend's program-lock job (lot F4).
     pub fn try_program_lock(&self) -> Result<ProgramGuard, DeviceError> {
         self.inner
             .program_gate

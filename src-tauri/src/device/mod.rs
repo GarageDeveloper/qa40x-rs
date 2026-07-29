@@ -53,12 +53,15 @@
 //!
 //! - Lot E: N open devices (runtime map + N stream loops, ingest routed by
 //!   `device_id`), a second virtual unit, slot-keyed endpoint ids.
-//! - Lot F: programs/REST/scripts per device.
+//! - Lot F: programs/REST/scripts per device. F1 delivered the per-device
+//!   program gate ([`runtime::DeviceRuntime::try_program_lock`]) and
+//!   device-keyed `script_run` (`ScriptControl` no longer retains a device;
+//!   the command builds each run's `Session` from its resolved runtime).
 //!
-//! Lot-C residues, deliberate: `RestControl`/`ScriptControl`/`Session` keep
-//! their loose-Arc constructors (frozen for the examples + A/B bench) and
-//! are built FROM the default runtime — lot F re-keys them. The
-//! QA40x-compatible REST scheme stays default-device-bound by specification.
+//! Lot-C residues, deliberate: `RestControl` and `Session` keep their
+//! loose-Arc constructors (frozen for the examples + A/B bench);
+//! `RestControl` is built FROM the default runtime — the QA40x-compatible
+//! REST scheme stays default-device-bound by specification.
 
 pub mod analyzer;
 pub mod caps;
