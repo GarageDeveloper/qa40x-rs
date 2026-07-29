@@ -253,6 +253,22 @@ let progSeq = 0;
 
 const sweepCancel = new Set<string>();
 
+/** `sessionArgs` re-read FRESH at each wire call, refusing a key that lost
+ * its routing identity mid-run (adversarial review MUST-FIX #1): a slot ≥ 1
+ * session evicted between a program's passes (unplug, group ✕ on another
+ * surface, an enumeration clearing the adopted id) would otherwise reduce
+ * to `{}` — and the NEXT invoke would silently drive the DEFAULT runtime's
+ * converter (a both-channels THD sweep landing Left from device B and
+ * Right from device A in one trace, stimulus included). The throw lands in
+ * runProgram's catch → "Program failed: …" and the finally cleans up. */
+function routedArgs(store: Store<AppState>, key: SessionKey): { deviceId?: string } {
+  const s = store.get();
+  if (!isRoutable(s, key) || !session(s, key)) {
+    throw new Error("the device this program runs on is no longer available");
+  }
+  return sessionArgs(s, key);
+}
+
 /** The in-flight script run's resolver (`script-state` event) + trace id
  * + the session it runs against (progressively landed frames must stamp
  * THAT session's identity, wherever the focus has moved meanwhile). */
@@ -382,7 +398,7 @@ async function runSweep(
       wantRight: wantR,
       durationSecs: p.durationS,
       amplitudeDbfs: p.levelDbfs,
-      ...sessionArgs(store.get(), key),
+      ...routedArgs(store, key),
     });
     if (traces.length === 0) throw new Error("no frequency-response trace returned");
     freqs = traces[0].data.frequencies;
@@ -402,7 +418,7 @@ async function runSweep(
       outputChannel: outCh,
       inputChannel: inCh,
       generate: p.wowGenerate,
-      ...sessionArgs(store.get(), key),
+      ...routedArgs(store, key),
     });
     // "rateHz", not "Hz": a DIFFERENT quantity (modulation rate, not
     // stimulus frequency) with its own axis floor (findings #3/#7) — never
@@ -439,7 +455,7 @@ async function runSweep(
               frequencyHz: p.toneHz,
               outputChannel: ch,
               inputChannel: ch,
-              ...sessionArgs(store.get(), key),
+              ...routedArgs(store, key),
             })
           : await ipc.call("measure_thd_vs_frequency", {
               startFreq: p.startHz,
@@ -448,7 +464,7 @@ async function runSweep(
               amplitudeDbfs: p.levelDbfs,
               outputChannel: ch,
               inputChannel: ch,
-              ...sessionArgs(store.get(), key),
+              ...routedArgs(store, key),
             });
       // The sweep frame's x-axis is generic (freqs field, any swept
       // quantity) — level_dbfs for a level-axis sweep, frequency otherwise.
@@ -518,7 +534,7 @@ async function runScript(
     await ipc.call("script_run", {
       source: prog.source,
       role: prog.role,
-      ...sessionArgs(store.get(), key),
+      ...routedArgs(store, key),
     });
     const error = await done;
     if (error !== null) {
@@ -557,8 +573,15 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     return;
   }
   const sess = session(s, key);
-  if (sess?.device.status !== "connected" || !isRoutable(s, key)) {
+  if (sess?.device.status !== "connected") {
     toast(store, "error", "Connect the device first — a program drives the hardware.");
+    return;
+  }
+  if (!isRoutable(s, key)) {
+    // Connected but the registry id is not adopted yet (the one-enumeration
+    // window) — a different situation than "not connected", said as such
+    // (review note #6).
+    toast(store, "error", "Device id not adopted yet — retry in a moment.");
     return;
   }
   if (prog.kind === "script" && !prog.source.trim()) {
@@ -596,7 +619,7 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     // then the stream loop — `stream_stop` returns only once it fully
     // exited (single-stream hard rule; the device wedges otherwise).
     if (wasOutputOnly) {
-      await ipc.call("stop_generator", sessionArgs(store.get(), key));
+      await ipc.call("stop_generator", routedArgs(store, key));
       store.update("programs/generator-stopped", (st) =>
         updateRun(st, key, (r) => ({ ...r, generatorRunning: false }))
       );
@@ -621,10 +644,16 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     if (isUserCancel) toast(store, "info", `${kindLabel} stopped.`);
     else if (msg.includes("A measurement program is already running on this device"))
       // The backend's per-device gate (lot F1) — only reachable around the
-      // frontend's own bench-global refusal (REST/scripting holding the
-      // device); same friendly wording as that refusal, not "Program
-      // failed".
-      toast(store, "info", "Another measurement is running on this device — try again once it finishes.");
+      // frontend's own bench-global refusal (a REST/Rhai session holding
+      // the device). ERROR kind, not info (review note #4): a mid-run
+      // refusal discards the passes already captured (a both-channels
+      // sweep's completed Left), and an auto-dismissing toast would hide
+      // that loss.
+      toast(
+        store,
+        "error",
+        "Program aborted: a measurement is already running on this device — try again once it finishes."
+      );
     else toast(store, "error", `Program failed: ${e}`);
   } finally {
     sweepCancel.delete(id);
@@ -655,12 +684,12 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     );
     // Resume the session that ran before — the playing flags were never
     // touched, so the same mix comes back (or nothing, if nothing ran).
-    // Output-only resume is still focus-bound (`syncOutputOnly` is keyed in
-    // lot F2): if the focus moved away from the program's session mid-run,
-    // skip it rather than arm the generator on a DIFFERENT device.
-    if (wasOutputOnly) {
-      if (store.get().devices.focus === key) syncOutputOnly(store, ipc);
-    } else if (wasStreaming) void startRun(store, ipc, { sessionKey: key });
+    // Both resumes are KEYED to the program's session (review note #3: a
+    // focus-bound resume after a mid-run focus move would either arm the
+    // generator on a different device or strand this one "mode on, DAC
+    // silent"); `sync`'s own gates handle an evicted session.
+    if (wasOutputOnly) syncOutputOnly(store, ipc, key);
+    else if (wasStreaming) void startRun(store, ipc, { sessionKey: key });
   }
 }
 
@@ -721,13 +750,16 @@ export function stopProgram(store: Store<AppState>, ipc: Ipc, id: string): void 
     // the backend cancel that aborts the in-flight batched capture between
     // USB blocks (maintainer report: ⏹ used to let the whole batch finish).
     // Routed to the SESSION holding this program's lock (the sweep drives
-    // that device, wherever the focus is now) — arg-less only if no session
-    // claims it (defensive; the arg-less call cancels the default runtime,
-    // today's pre-lot-F behaviour).
+    // that device, wherever the focus is now). NO arg-less fallback
+    // (adversarial review MUST-FIX #2): a missing lock-holder means the
+    // program's session was evicted mid-run — an arg-less sweep_stop would
+    // trip the DEFAULT runtime's cancel and abort whatever unrelated sweep
+    // runs there; the frontend `sweepCancel` flag alone already ends this
+    // program's pass loop, and the orphaned invoke dies with its device.
     const s = store.get();
     const key = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
     sweepCancel.add(id);
-    void ipc.call("sweep_stop", key ? sessionArgs(s, key) : {}).catch(() => {});
+    if (key) void ipc.call("sweep_stop", sessionArgs(s, key)).catch(() => {});
     toast(store, "info", "Stopping…");
   } else {
     void ipc.call("script_stop", {}).catch(() => {});
@@ -769,7 +801,9 @@ export function initProgramEvents(store: Store<AppState>): void {
   void listen<Frame>("script-frame", (e) => {
     landScriptFrame(store, e.payload);
   });
-  void listen<{ done: number; total: number }>("thd-sweep-progress", (e) => {
+  void listen<{ done: number; total: number; device_id?: string | null }>(
+    "thd-sweep-progress",
+    (e) => {
     // The batched sweep captures ALL points in ONE stream (the anti-relay-
     // click design): `done: 0` fires before that long capture and `1..N`
     // only during the fast analysis at the end. Showing "0/30" for the
@@ -779,11 +813,21 @@ export function initProgramEvents(store: Store<AppState>): void {
     const s = store.get();
     // The one running program, whichever session holds its lock — resolving
     // through the FOCUSED session lost the progress the moment the user
-    // switched focus mid-sweep. (One program at a time bench-wide is
-    // runProgram's own refusal; per-device concurrent progress routes by
-    // the payload's device_id in lot F4.)
+    // switched focus mid-sweep. (One UI program at a time bench-wide is
+    // runProgram's own refusal.)
     const id = anyProgramLock(s);
     if (!id || s.programs.byId[id]?.run !== "running") return;
+    // The payload names the swept unit (lot F1, additive field): a sweep
+    // driven OUTSIDE the UI (REST/Rhai) on another device must not write
+    // its counts into this program's row (review note #8). No payload id
+    // (old backend / e2e fake) or no adopted id on the holder ⇒ accept,
+    // as before — nothing to discriminate by.
+    const evId = e.payload.device_id;
+    if (typeof evId === "string") {
+      const holder = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
+      const holderId = holder ? (session(s, holder)?.deviceId ?? null) : null;
+      if (holderId !== null && holderId !== evId) return;
+    }
     patchProgram(store, "programs/progress", id, (p) => ({
       ...p,
       progress: `${e.payload.done}/${e.payload.total}`,

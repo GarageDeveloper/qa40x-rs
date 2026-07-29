@@ -890,6 +890,114 @@ describe("actions/programs — session-keyed programs (issue #25 lot F)", () => 
     await run;
   });
 
+  function evictSlot1(store: Store<AppState>): void {
+    store.update("test/evict", (s) => {
+      const sessions = { ...s.devices.sessions };
+      delete sessions["slot-1"];
+      return { ...s, devices: { ...s.devices, sessions } };
+    });
+  }
+
+  it("a session evicted between passes ABORTS the program — the next invoke must never fall back to the default runtime (review MUST-FIX #1)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    store.update("test/both", (s) => {
+      const p = s.programs.byId[id];
+      if (p.kind !== "sweep") return s;
+      return {
+        ...s,
+        programs: {
+          ...s.programs,
+          byId: { ...s.programs.byId, [id]: { ...p, params: { ...p.params, channel: "both" as const } } },
+        },
+      };
+    });
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    // Device B vanishes while pass 1 (Left) is in flight.
+    evictSlot1(store);
+    release();
+    await run;
+
+    // Pass 2 (Right) was refused BEFORE the wire — one measure call only,
+    // and none of them arg-less (which would have driven slot 0's device).
+    const sweeps = calls.filter((c) => c.cmd === "measure_thd_vs_frequency");
+    expect(sweeps).toHaveLength(1);
+    expect((sweeps[0].args as { deviceId?: string }).deviceId).toBe("usb/B");
+    expect(
+      store.get().ui.toasts.some(
+        (t) => t.kind === "error" && t.message.includes("no longer available")
+      )
+    ).toBe(true);
+    expect(store.get().programs.byId[id].run).toBe("idle");
+  });
+
+  it("stopProgram sends NO sweep_stop when the lock-holding session was evicted — an arg-less stop would cancel an unrelated default-runtime sweep (review MUST-FIX #2)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    evictSlot1(store);
+    stopProgram(store, ipc, id);
+
+    expect(calls.some((c) => c.cmd === "sweep_stop")).toBe(false);
+    release();
+    await run;
+  });
+
+  it("a backend ProgramBusy mid-run surfaces as a PERSISTENT error toast, not auto-dismissing info (review note #4 — completed passes were discarded)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    focusOn(store, "slot-1");
+    const id = addProgram(store, "thd");
+    const ipc: Ipc = {
+      async call<K extends keyof Commands>(cmd: K): Promise<Commands[K]["result"]> {
+        if (cmd === "measure_thd_vs_frequency") {
+          throw new Error(
+            "A measurement program is already running on this device"
+          );
+        }
+        return null as Commands[K]["result"];
+      },
+    };
+    await runProgram(store, ipc, id);
+    const t = store.get().ui.toasts.find((x) => x.message.includes("Program aborted"));
+    expect(t).toBeDefined();
+    expect(t!.kind).toBe("error");
+  });
+
+  it("a progress event stamped with ANOTHER device's id never writes into the running program's row (review note #8)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const registrations = (listen as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => c[0] === "thd-sweep-progress"
+    );
+    const progressHandler = registrations[registrations.length - 1]?.[1] as (e: {
+      payload: { done: number; total: number; device_id?: string | null };
+    }) => void;
+
+    focusOn(store, "slot-1");
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    const run = runProgram(store, ipc, id);
+    await flush();
+
+    // An external (REST/Rhai) sweep on the OTHER device reports progress.
+    progressHandler({ payload: { done: 1, total: 9, device_id: "usb/OTHER" } });
+    expect(store.get().programs.byId[id].progress).toBeNull();
+    // The program's own device reports — accepted.
+    progressHandler({ payload: { done: 2, total: 3, device_id: "usb/B" } });
+    expect(store.get().programs.byId[id].progress).toBe("2/3");
+    release();
+    await run;
+  });
+
   it("the refusal stays BENCH-global until F4's per-device surfaces: a program on slot 0 refuses one on slot 1", async () => {
     const store = new Store(
       withConnectedSlot1(withDevice(initialState(), { status: "connected" }))

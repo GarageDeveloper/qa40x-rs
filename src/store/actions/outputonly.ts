@@ -51,9 +51,13 @@ export function setOutputOnly(store: Store<AppState>, ipc: Ipc, on: boolean): vo
  * Source actions call this instead of `syncStream` while the mode is on.
  * The session key is captured ONCE, here — `sync` acts on that key, never
  * on focus-at-execution-time (E2 review #6: two rebuilds queued around a
- * focus change must not both land on whichever session is focused later). */
-export function syncOutputOnly(store: Store<AppState>, ipc: Ipc): void {
-  const key = store.get().devices.focus;
+ * focus change must not both land on whichever session is focused later).
+ * `sessionKey` (issue #25 lot F): an explicit target for the one
+ * non-focus-bound caller — a program's output-only resume must re-arm the
+ * session that RAN it, wherever the focus moved meanwhile; the full
+ * per-session keying of this module is lot F2. */
+export function syncOutputOnly(store: Store<AppState>, ipc: Ipc, sessionKey?: SessionKey): void {
+  const key = sessionKey ?? store.get().devices.focus;
   const chain = (chains.get(key) ?? Promise.resolve())
     .then(() => sync(store, ipc, key))
     .catch((e) => toast(store, "error", `Output-only: ${e}`));
