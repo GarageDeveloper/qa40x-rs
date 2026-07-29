@@ -30,7 +30,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { AddedDevice } from "../../gen";
 import { hwTraceIds } from "../hwtraces";
 import { fakeEntry } from "./devices.fixtures";
-import { addDevice, disconnect, removeDevice } from "./device";
+import { addDevice, disconnect, removeDevice, setSampleRate } from "./device";
 import { reconcileHwTraces, stampSlotEndpointIdentity } from "./traces";
 import { snapshotWorkspace } from "../persist";
 import { applyWorkspaceDoc } from "./workspace";
@@ -657,5 +657,81 @@ describe("slot-0 disconnect stays the wedged-sweep escape hatch (F2 review MUST-
     await disconnect(store, ipc, SLOT0);
     expect(calls.some(([m]) => m === "disconnect_device")).toBe(true);
     expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
+  });
+});
+
+describe("setSampleRate — per-session generator retune (issue #25 lot F3)", () => {
+  /** Slot 0 connected with a playing focus-following sine. */
+  function generatorBench(run: Partial<AppState["devices"]["sessions"][string]["run"]>): Store<AppState> {
+    const s = initialState();
+    s.devices.sessions = {
+      [SLOT0]: {
+        ...s.devices.sessions[SLOT0],
+        device: {
+          ...s.devices.sessions[SLOT0].device,
+          status: "connected",
+          config: { input_gain: 0, output_gain: 18, sample_rate: 48000 },
+        },
+        run: { ...s.devices.sessions[SLOT0].run, ...run },
+      },
+    };
+    // The boot source ("Sine 1", route left) plays: the generator has a mix.
+    s.sources.byId["src-sine-1"] = { ...s.sources.byId["src-sine-1"], playing: true };
+    return new Store<AppState>(s, { freeze: true });
+  }
+
+  const flushChain = async (): Promise<void> => {
+    for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("a rate change on a GENERATING session rebuilds its loop on the NEW grid", async () => {
+    const store = generatorBench({ outputOnly: true, generatorRunning: true });
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 192000 }),
+      output_only_start: () => ({
+        sigma_peak_dbv: -12,
+        clipped: false,
+        fitted_output_range_dbv: 8,
+        errors: [],
+      }),
+    });
+    await setSampleRate(store, ipc, 192000);
+    await flushChain();
+    const starts = calls.filter(([m]) => m === "output_only_start");
+    expect(starts).toHaveLength(1);
+    const slots = (starts[0][1] as { slots: { source: { frequency_hz: number } }[] }).slots;
+    // 1 kHz snapped on the NEW 192 kHz grid (32768 bins), not the old 48 k one.
+    expect(slots[0].source.frequency_hz).toBeCloseTo(1001.953125, 9);
+  });
+
+  it("a rate change on a PROGRAM-LOCKED session never rebuilds the generator (the F2 gate)", async () => {
+    const store = generatorBench({
+      outputOnly: true,
+      generatorRunning: true,
+      programLock: "THD sweep running",
+    });
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 192000 }),
+    });
+    await setSampleRate(store, ipc, 192000);
+    await flushChain();
+    expect(calls.filter(([m]) => m === "output_only_start")).toEqual([]);
+    // The register write itself went through — only the DAC rebuild waits.
+    expect(calls.some(([m]) => m === "set_sample_rate")).toBe(true);
+  });
+
+  it("a rate change on an IDLE session touches no generator (no resume-to-capture surprise)", async () => {
+    const store = generatorBench({});
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 96000 }),
+    });
+    await setSampleRate(store, ipc, 96000);
+    await flushChain();
+    // Neither DAC-owner verb fires: no rebuild, and no resume-to-capture
+    // surprise (the tail of outputonly's sync belongs to explicit gestures).
+    expect(
+      calls.filter(([m]) => m === "output_only_start" || m === "stop_generator")
+    ).toEqual([]);
+    expect(calls.some(([m]) => m === "set_sample_rate")).toBe(true);
   });
 });

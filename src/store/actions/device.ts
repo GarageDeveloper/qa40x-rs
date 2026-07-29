@@ -16,7 +16,7 @@ import {
   updateRun,
 } from "../selectors/session";
 import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
-import { syncAllDacOwners } from "./outputonly";
+import { syncAllDacOwners, syncOutputOnly } from "./outputonly";
 import { dropSourceTargetsForSlot } from "./sources";
 import { disposeSession, syncStream } from "./stream";
 import {
@@ -610,6 +610,17 @@ export async function setSampleRate(
     // device sample rate: a step here must reach a live loop, same as every
     // other capture-affecting change (pre-existing gap, surfaced by Lot A).
     syncStream(store, ipc, sessionKey);
+    // THIS session's gap-free generator too (issue #25 lot F3 — the rate
+    // twin of setFftSize's F2 note): the coherent bin grid and the Nyquist
+    // clamp are properties of this device's rate, so a running loop would
+    // otherwise keep playing tones snapped to the OLD grid while the row's
+    // readout shows the new one. Same owner gate as syncAllOutputOnly —
+    // an idle session is never touched (the resume-to-capture tail belongs
+    // to explicit mode/source gestures).
+    const run = session(store.get(), sessionKey)?.run;
+    if (run && (run.outputOnly || run.generatorRunning)) {
+      syncOutputOnly(store, ipc, sessionKey);
+    }
   } catch (e) {
     toast(store, "error", `Sample rate: ${e}`);
   }
