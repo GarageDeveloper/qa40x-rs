@@ -140,10 +140,18 @@ test("a dormant target is silent and says so — never a silent retarget", async
   await app.groupRun(0); // A monitors alongside
   await expect.poll(() => app.unitFrameCount(0)).toBeGreaterThan(0);
 
+  // B's Input L on the first tile: live chip, no dormant mark.
+  await app.setTraceVisible("hw-in-left@1", true);
+  expect(await app.legendDormant("hw-in-left@1")).toBe(false);
+
   await app.unplugUnit(UNIT_B);
   await expect
     .poll(async () => (await app.sessions()).byKey["slot-1"])
     .toBeUndefined();
+
+  // The held curve is MARKED (validation round 4): dashed chip + title —
+  // a frozen picture must not read as live data.
+  await expect.poll(() => app.legendDormant("hw-in-left@1")).toBe(true);
 
   // The row KEEPS its pinned cell (evict-on-disconnect preserves targets —
   // the revive contract) and says why nothing plays.

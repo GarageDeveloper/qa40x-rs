@@ -894,6 +894,17 @@ export class AppV2 {
   }
 
   /** Whether a legend chip is in its hidden (struck-through) state. */
+  /** Whether a legend chip is marked DORMANT (device gone — curve held). */
+  async legendDormant(traceId: string, tileId = "tile-1"): Promise<boolean> {
+    return this.drv.eval(
+      (a: { sel: string }) =>
+        document
+          .querySelector(a.sel)
+          ?.classList.contains("tile__trace--dormant") === true,
+      { sel: `[data-testid="tile-trace-${tileId}-${traceId}"]` }
+    );
+  }
+
   async legendOff(traceId: string, tileId = "tile-1"): Promise<boolean> {
     return this.drv.eval(
       (a: { sel: string }) =>

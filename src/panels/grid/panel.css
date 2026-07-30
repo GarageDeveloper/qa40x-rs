@@ -340,6 +340,14 @@ select.field--small {
   color: var(--warn);
 }
 
+/* A device endpoint whose unit is gone/disconnected (issue #25 lot F3):
+   the curve is real but HELD at the last capture — dashed outline in the
+   neutral ink (distinct from the warn tint: nothing is wrong, the device
+   is just absent). Same constant-border trick, no layout shift. */
+.tile__trace--dormant {
+  border-color: var(--ink-3);
+}
+
 .tile__dot {
   width: 8px;
   height: 8px;
