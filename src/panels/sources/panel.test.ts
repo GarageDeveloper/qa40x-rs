@@ -121,7 +121,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     await flush();
     expect(q(host, `src-route-l-${SRC_ID}`)).toBeNull();
     const sum = q<HTMLButtonElement>(host, `src-routing-${SRC_ID}`)!;
-    expect(sum.textContent).toContain("#1");
+    expect(sum.textContent).toBe("Routing ⚠"); // slot-0 cell, session disconnected
+    expect(sum.title).toContain("#1"); // the map lives in the title
     // One session, but the matrix names slot 0 explicitly: the editor shows
     // the focus pseudo-row plus the slot-0 row carrying the cell.
     expect(q(host, `src-tgt-l-${SRC_ID}-focus`)).not.toBeNull();
@@ -134,7 +135,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     await flush();
     expect(q(host, `src-route-l-${SRC_ID}`)).toBeNull();
     const sum = q<HTMLButtonElement>(host, `src-routing-${SRC_ID}`)!;
-    expect(sum.textContent).toBe("→ focus L"); // route "left", implicit
+    expect(sum.textContent).toBe("Routing"); // stable label, no ⚠ (all live)
+    expect(sum.title).toMatch(/^→ focus L\n/); // route "left", implicit
     const focusL = q<HTMLInputElement>(host, `src-tgt-l-${SRC_ID}-focus`)!;
     expect(focusL.checked).toBe(true);
     // The slot-1 row exists, unchecked — no cell yet.

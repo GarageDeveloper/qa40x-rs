@@ -215,18 +215,14 @@
   gap: 6px;
 }
 
-/* The collapsed routing summary (matrix mode, issue #25 lot F3): reads like
-   a readout — "→ focus LR · #2 L" — and opens the per-device editor. */
+/* The collapsed routing button (matrix mode, issue #25 lot F3): a stable
+   "Routing" label (+ ⚠), the full map in its title. */
 .sources__routing-sum {
-  max-width: 130px;
-  overflow: hidden;
   border: 0;
   background: none;
   color: var(--ink-2);
   cursor: pointer;
-  font-family: var(--mono);
-  font-size: 10px;
-  text-overflow: ellipsis;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -234,15 +230,19 @@
   color: var(--accent);
 }
 
-/* One row of the routing editor: name + L/R + grid readout + note + ✕. */
+/* One TARGET of the routing editor — a two-line grid: the name column can
+   ellipsize but never collapses (the checkboxes/✕ are fixed-size columns,
+   aligned across rows), and the readout/note live on their own sub-line so
+   long notes never squeeze line 1 or overflow the sidebar. */
 .sources__tgt {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(60px, 1fr) auto auto auto;
   align-items: center;
-  gap: 5px;
+  column-gap: 6px;
+  row-gap: 1px;
 }
 
 .sources__tgt-name {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   font-size: 11px;
@@ -250,7 +250,17 @@
   white-space: nowrap;
 }
 
+.sources__tgt-sub {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding-bottom: 2px;
+}
+
 .sources__tgt-played {
+  flex-shrink: 0;
   font-family: var(--mono);
   font-size: 10px;
   color: var(--ink-3);
@@ -258,9 +268,9 @@
 }
 
 .sources__tgt-note {
-  max-width: 40%;
+  min-width: 0;
   overflow: hidden;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;

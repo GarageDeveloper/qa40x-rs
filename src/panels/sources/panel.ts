@@ -487,23 +487,34 @@ export function mountSourcesPanel(
         },
         "✕"
       );
+      // Two-line grid (Raphaël, 2026-07-30 — the one-line flex row crushed
+      // the NAME to zero width whenever a note appeared, leaving orphan
+      // L/R pairs and horizontal overflow): line 1 = name | L | R | ✕ in
+      // aligned columns, line 2 = grid readout + note, free to ellipsize
+      // without squeezing anyone.
       return el(
         "div.sources__tgt",
         {},
         el("span.sources__tgt-name"),
         el("label.sources__route-ch", {}, tgtL, "L"),
         el("label.sources__route-ch", {}, tgtR, "R"),
-        el("span.sources__tgt-played", {
-          "data-testid": `src-tgt-played-${srcId}-${t.tag}`,
-        }),
-        el("span.sources__tgt-note", {
-          "data-testid": `src-tgt-note-${srcId}-${t.tag}`,
-        }),
-        del
+        del,
+        el(
+          "div.sources__tgt-sub",
+          {},
+          el("span.sources__tgt-played", {
+            "data-testid": `src-tgt-played-${srcId}-${t.tag}`,
+          }),
+          el("span.sources__tgt-note", {
+            "data-testid": `src-tgt-note-${srcId}-${t.tag}`,
+          })
+        )
       );
     },
     update: (node: HTMLElement, t: SourceTargetVM): void => {
-      node.querySelector<HTMLElement>(".sources__tgt-name")!.textContent = t.label;
+      const name = node.querySelector<HTMLElement>(".sources__tgt-name")!;
+      name.textContent = t.label;
+      name.title = t.label; // the full identity survives the ellipsis
       const tgtL = node.querySelector<HTMLInputElement>(
         `[data-testid="src-tgt-l-${srcId}-${t.tag}"]`
       )!;
@@ -529,6 +540,7 @@ export function mountSourcesPanel(
         `[data-testid="src-tgt-note-${srcId}-${t.tag}"]`
       )!;
       note.textContent = t.note;
+      note.title = t.note; // full text on hover once the ellipsis bites
       note.classList.toggle("sources__tgt-note--err", t.noteErr);
       const del = node.querySelector<HTMLButtonElement>(
         `[data-testid="src-tgt-del-${srcId}-${t.tag}"]`

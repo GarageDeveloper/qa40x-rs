@@ -36,7 +36,8 @@ test("a source pinned to B plays on B while A stays focused — no focus gesture
   await app.openSourceRouting(id);
   await app.setSourceTargetRoute(id, "1", "left");
   await app.removeSourceTarget(id, "focus");
-  expect(await app.sourceRoutingSummary(id)).toBe("→ #2 L");
+  expect(await app.sourceRoutingSummary(id)).toBe("Routing");
+  expect(await app.sourceRoutingTitle(id)).toContain("→ #2 L");
 
   // Play: the source AUTO-STARTS its own target's capture — device B —
   // while the focus never moves off A.
@@ -83,7 +84,8 @@ test("one source, two devices, two different channels", async ({ app }) => {
   const id = await app.addSine(); // implicit focus target, route "left"
   await app.openSourceRouting(id);
   await app.setSourceTargetRoute(id, "1", "right");
-  expect(await app.sourceRoutingSummary(id)).toBe("→ focus L · #2 R");
+  expect(await app.sourceRoutingSummary(id)).toBe("Routing");
+  expect(await app.sourceRoutingTitle(id)).toContain("→ focus L · #2 R");
 
   // Play auto-starts EVERY live target's capture: A (focus-followed cell)
   // and B (pinned cell) in the one gesture.
@@ -146,7 +148,8 @@ test("a dormant target is silent and says so — never a silent retarget", async
   // The row KEEPS its pinned cell (evict-on-disconnect preserves targets —
   // the revive contract) and says why nothing plays.
   await expect.poll(() => app.sourceTargetNote(id, "1")).toBe("not connected");
-  expect(await app.sourceRoutingSummary(id)).toBe("→ #2 LR ⚠");
+  expect(await app.sourceRoutingSummary(id)).toBe("Routing ⚠");
+  expect(await app.sourceRoutingTitle(id)).toContain("→ #2 LR ⚠");
   expect(await app.sourceSnapped(id)).toBe("→ —");
 
   // A's still-running capture never gained the source (no retarget)…
@@ -201,7 +204,8 @@ test("a routing matrix survives a save → reload, dormant until its device retu
   // One live session, but the matrix is explicit: the editor renders with
   // a dormant #2 row (slot-keyed doc — no device id, bench-portable).
   await expect.poll(() => app.hasSourceRouting(id)).toBe(true);
-  expect(await app.sourceRoutingSummary(id)).toBe("→ focus L · #2 R ⚠");
+  expect(await app.sourceRoutingSummary(id)).toBe("Routing ⚠");
+  expect(await app.sourceRoutingTitle(id)).toContain("→ focus L · #2 R ⚠");
   expect(await app.sourceTargetNote(id, "1")).toBe("not connected");
 
   // The unit returns: the cell goes live and plays there again.

@@ -182,16 +182,17 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
   });
 }
 
-/** The row's collapsed one-liner: `→ focus LR · #2 L` (a ⚠ marks a cell
- * whose target cannot play right now), with a per-cell title naming each
- * device in full. */
+/** The row's collapsed button: a STABLE `Routing` label (Raphaël,
+ * 2026-07-30 — the per-cell `→ focus LR · #2 L` text was cryptic and
+ * jittered as cells changed), plus a ⚠ when some cell's target cannot play
+ * right now — dead session OR a connected-but-unadopted slot ≥ 1 (every
+ * transport verb refuses it too, F3 review #5). The full map (compact line
+ * + one line per device) lives in the title. */
 export function routingSummary(vms: SourceTargetVM[]): { text: string; title: string } {
   const present = vms
     .filter((v) => v.present)
     .sort((a, b) => (a.slot === null ? -1 : b.slot === null ? 1 : a.slot - b.slot));
-  // ⚠ = "this cell's target cannot play right now" — dead session OR a
-  // connected-but-unadopted slot ≥ 1 (every transport verb refuses it too,
-  // F3 review #5).
+  const warn = present.some((v) => !(v.live && v.routable));
   const tokens = present.map((v) => {
     const tagText = v.slot === null ? "focus" : `#${v.n}`;
     return `${tagText} ${routeGlyph(v.route)}${v.live && v.routable ? "" : " ⚠"}`;
@@ -202,8 +203,12 @@ export function routingSummary(vms: SourceTargetVM[]): { text: string; title: st
     return `${name}: ${routeLong(v.route)}${v.routable ? "" : " (device id not adopted yet)"}`;
   });
   return {
-    text: tokens.length ? `→ ${tokens.join(" · ")}` : "→ off",
-    title: [...lines, "Click to edit where this source plays."].join("\n"),
+    text: `Routing${warn ? " ⚠" : ""}`,
+    title: [
+      tokens.length ? `→ ${tokens.join(" · ")}` : "→ off",
+      ...lines,
+      "Click to edit where this source plays.",
+    ].join("\n"),
   };
 }
 

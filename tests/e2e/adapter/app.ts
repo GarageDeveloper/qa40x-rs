@@ -482,11 +482,21 @@ export class AppV2 {
     );
   }
 
-  /** The collapsed routing summary text ("→ focus L · #2 R"). */
+  /** The routing button's stable label ("Routing" / "Routing ⚠"). */
   async sourceRoutingSummary(id: string): Promise<string> {
     return this.drv.eval(
       (a: { testid: string }) =>
         document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? "",
+      { testid: `src-routing-${id}` }
+    );
+  }
+
+  /** The routing button's title — the full map ("→ focus L · #2 R" + one
+   * line per device). */
+  async sourceRoutingTitle(id: string): Promise<string> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector<HTMLElement>(`[data-testid="${a.testid}"]`)?.title ?? "",
       { testid: `src-routing-${id}` }
     );
   }

@@ -221,14 +221,19 @@ describe("routingSummary", () => {
       [{ slot: 1, rate: 48000 }]
     );
     const { text, title } = routingSummary(sourceTargetVMs(s, "a"));
-    expect(text).toBe("→ focus LR · #2 R · #6 L ⚠");
+    // The button label is STABLE (Raphaël 2026-07-30) — the map lives in
+    // the title, compact line first.
+    expect(text).toBe("Routing ⚠");
+    expect(title).toMatch(/^→ focus LR · #2 R · #6 L ⚠\n/);
     expect(title).toMatch(/#6: not connected — nothing plays there/);
     expect(title).toMatch(/Click to edit where this source plays\./);
   });
 
-  it("an off-routed focus cell still summarizes (– glyph), an empty matrix cannot occur", () => {
+  it("an off-routed focus cell still maps (– glyph) with no ⚠, an empty matrix cannot occur", () => {
     const s = bench([sine("a", { route: "off" })]);
-    expect(routingSummary(sourceTargetVMs(s, "a")).text).toBe("→ focus –");
+    const { text, title } = routingSummary(sourceTargetVMs(s, "a"));
+    expect(text).toBe("Routing");
+    expect(title).toMatch(/^→ focus –\n/);
   });
 
   it("a connected-but-UNADOPTED target gets the ⚠ too — every transport verb refuses it (review #5)", () => {
@@ -247,7 +252,8 @@ describe("routingSummary", () => {
       },
     };
     const { text, title } = routingSummary(sourceTargetVMs(s, "a"));
-    expect(text).toBe("→ #2 R ⚠");
+    expect(text).toBe("Routing ⚠");
+    expect(title).toMatch(/^→ #2 R ⚠\n/);
     expect(title).toMatch(/device id not adopted yet/);
   });
 });
