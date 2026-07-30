@@ -15,6 +15,7 @@ import {
   isRatioTrace,
   type AppState,
   type CaptureProvenance,
+  type DeviceState,
   type TileConfig,
 } from "../store/state";
 import type { Ipc } from "../ipc/ipc";
@@ -28,7 +29,12 @@ import {
   sweepXUnit,
 } from "../store/selectors/chartvm";
 import { chipSourceTraceId, shownTraces } from "../store/selectors/layout";
-import { focusedDevice } from "../store/selectors/session";
+import {
+  exportDeviceRollCall,
+  exportOwnerDevice,
+  traceExportOwner,
+} from "../store/selectors/provenance";
+import { tileTriggerSourceId } from "../store/selectors/trigger";
 import { getFrames } from "../data/frames";
 import { toast } from "../store/actions/ui";
 import {
@@ -73,15 +79,25 @@ function slug(label: string): string {
   );
 }
 
+/** `owner` is the resolved export owner's device (lot F5): `null` = dormant
+ * owner (`device_model=none`), never `undefined` here — every lane resolves
+ * it explicitly through tileProvenanceContext / traceExportOwner. */
 function comments(
   s: AppState,
   extra: ProvenanceLine[],
-  capture: CaptureProvenance | null = null
+  capture: CaptureProvenance | null,
+  owner: DeviceState | null
 ): string[] {
   return provenanceComments([
-    ...traceProvenance(s, capture, APP_VERSION, new Date().toISOString()),
+    ...traceProvenance(s, capture, APP_VERSION, new Date().toISOString(), owner),
     ...extra,
   ]);
+}
+
+/** The owner DEVICE an export header describes for the data behind `id` —
+ * the focused session only for an unknown owner (see exportOwnerDevice). */
+function ownerDeviceFor(s: AppState, id: TraceId | null): DeviceState | null {
+  return exportOwnerDevice(s, traceExportOwner(s, id));
 }
 
 /**
@@ -100,44 +116,84 @@ function comments(
  * data contribute no columns and are ignored.
  */
 export function tileCapture(s: AppState, tile: TileConfig): CaptureProvenance | null {
-  const drawn = shownTraces(tile).filter((id) => {
+  const a = tileAnchor(s, tile);
+  return a.capture && a.mixed ? { ...a.capture, mixed: true } : a.capture;
+}
+
+/** The drawn members of a tile — shown AND holding data (members without
+ * data contribute no columns and are ignored, per tileCapture's doc). */
+function drawnTraceIds(s: AppState, tile: TileConfig): TraceId[] {
+  return shownTraces(tile).filter((id) => {
     const t = s.traces.byId[id];
     return !!t && t.domains.length > 0;
   });
+}
+
+/**
+ * The ANCHOR of a tile export (lot F5): the one member whose capture the
+ * `capture_*` block describes AND whose owner the bench block describes —
+ * a single member for both, so the two blocks can never disagree about
+ * which device they speak for. Selection: chip source if drawn with a
+ * capture → first drawn with a capture (identical to the pre-F5 capture
+ * pick) → chip source if drawn → first drawn (owner-only additions —
+ * pre-F5 there was no owner to name).
+ */
+export function tileAnchor(
+  s: AppState,
+  tile: TileConfig
+): { id: TraceId | null; capture: CaptureProvenance | null; mixed: boolean } {
+  const drawn = drawnTraceIds(s, tile);
   const chipId = chipSourceTraceId(tile);
-  let capture =
-    (chipId && drawn.includes(chipId) ? s.traces.byId[chipId]?.capture : null) ?? null;
+  const chipDrawn = chipId !== null && drawn.includes(chipId);
+  let id: TraceId | null = null;
+  let capture: CaptureProvenance | null = null;
+  if (chipDrawn) {
+    const c = s.traces.byId[chipId]?.capture ?? null;
+    if (c) {
+      id = chipId;
+      capture = c;
+    }
+  }
   if (!capture) {
-    for (const id of drawn) {
-      const c = s.traces.byId[id]?.capture;
+    for (const did of drawn) {
+      const c = s.traces.byId[did]?.capture;
       if (c) {
+        id = did;
         capture = c;
         break;
       }
     }
   }
+  if (id === null) id = chipDrawn ? chipId : (drawn[0] ?? null);
   const sigs = new Set<string>();
-  for (const id of drawn) {
-    const c = s.traces.byId[id]?.capture;
+  for (const did of drawn) {
+    const c = s.traces.byId[did]?.capture;
     sigs.add(c ? captureBenchSignature(c) : "unknown");
   }
-  if (capture && sigs.size > 1) return { ...capture, mixed: true };
-  return capture;
+  return { id, capture, mixed: sigs.size > 1 };
 }
 
 /**
- * The tile capture for the EXPORT lanes: a scope tile holding a trigger
- * snapshot draws THAT picture (chartvm slices the held arrays with the
- * snapshot's own rate/offsets, never the live frame) — its provenance is
- * the one latched with it, not whatever the endpoints refreshed to since
- * (review finding #3: a held NORMAL picture under a since-moved bench).
+ * Capture + owner for the tile EXPORT lanes (CSV/SVG/PNG share it): a scope
+ * tile holding a trigger snapshot draws THAT picture (chartvm slices the
+ * held arrays with the snapshot's own rate/offsets, never the live frame) —
+ * its provenance is the one latched with it, and its OWNER is the trigger
+ * source endpoint that latched it (always an endpoint id, so it resolves
+ * structurally). Otherwise both come from the tile anchor.
  */
-function tileExportCapture(
+function tileProvenanceContext(
   s: AppState,
   tile: TileConfig,
-  heldCapture: CaptureProvenance | null | undefined
-): CaptureProvenance | null {
-  return heldCapture ?? tileCapture(s, tile);
+  heldCapture?: CaptureProvenance | null
+): { capture: CaptureProvenance | null; owner: DeviceState | null } {
+  if (heldCapture) {
+    return { capture: heldCapture, owner: ownerDeviceFor(s, tileTriggerSourceId(s, tile)) };
+  }
+  const a = tileAnchor(s, tile);
+  return {
+    capture: a.capture && a.mixed ? { ...a.capture, mixed: true } : a.capture,
+    owner: ownerDeviceFor(s, a.id),
+  };
 }
 
 /** Save-dialog + backend write; false = user cancelled. */
@@ -170,16 +226,24 @@ function tileRootEl(tileId: string): HTMLElement | null {
 /* Tile view-models + their provenance lines (shared by CSV and SVG)    */
 /* ------------------------------------------------------------------ */
 
-function tileExtraLines(kind: string): ProvenanceLine[] {
-  return [
+function tileExtraLines(s: AppState, tile: TileConfig): ProvenanceLine[] {
+  const lines: ProvenanceLine[] = [
     { key: "export", value: "tile" },
-    { key: "graph", value: kind },
+    { key: "graph", value: tile.kind },
   ];
+  // A tile mixing members from ≥ 2 devices names them all (lot F5) — the
+  // bench/capture blocks describe the ANCHOR member only; this additive
+  // line is the file's answer to "which devices are in here".
+  const roll = exportDeviceRollCall(s, drawnTraceIds(s, tile));
+  if (roll.length >= 2) {
+    lines.push({ key: "export_devices", value: roll.join(", ") });
+  }
+  return lines;
 }
 
 function spectrumExport(s: AppState, tile: NonNullable<AppState["layout"]["tiles"][string]>) {
   const vm = spectrumVM(s, tile);
-  const lines = [...tileExtraLines(tile.kind), { key: "unit", value: vm.unitLabel }];
+  const lines = [...tileExtraLines(s, tile), { key: "unit", value: vm.unitLabel }];
   // A dBr file is meaningless without the subtracted reference (review
   // finding #4): with an AUTO reference it's a runtime peak recorded
   // nowhere else — write it in the tile's pre-dBr unit.
@@ -197,7 +261,7 @@ function scopeExport(s: AppState, tile: NonNullable<AppState["layout"]["tiles"][
   // the drawn extent, trigger aligned or not (review finding #3).
   const vm = clipScopeWindow(scopeVM(s, tile), tile.timeWindowMs);
   const lines = [
-    ...tileExtraLines(tile.kind),
+    ...tileExtraLines(s, tile),
     { key: "unit", value: vm.unitLabel },
     { key: "time_window_ms", value: tile.timeWindowMs === null ? "full" : String(tile.timeWindowMs) },
     // t=0 is the displayed window's start, not the trigger instant.
@@ -214,7 +278,7 @@ function scopeExport(s: AppState, tile: NonNullable<AppState["layout"]["tiles"][
 
 function sweepExport(s: AppState, tile: NonNullable<AppState["layout"]["tiles"][string]>) {
   const vm = sweepVM(s, tile);
-  return { vm, lines: [...tileExtraLines(tile.kind), { key: "unit", value: vm.unitLabel }] };
+  return { vm, lines: [...tileExtraLines(s, tile), { key: "unit", value: vm.unitLabel }] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -234,15 +298,20 @@ export async function exportTileCsv(
   let csv: string | null = null;
   if (tile.kind === "spectrum") {
     const { vm, lines } = spectrumExport(s, tile);
-    if (vm.series.length > 0) csv = tileSpectrumCsv(vm, comments(s, lines, tileCapture(s, tile)));
+    const ctx = tileProvenanceContext(s, tile);
+    if (vm.series.length > 0) {
+      csv = tileSpectrumCsv(vm, comments(s, lines, ctx.capture, ctx.owner));
+    }
   } else if (tile.kind === "scope") {
     const { vm, lines } = scopeExport(s, tile);
+    const ctx = tileProvenanceContext(s, tile, vm.trigger?.capture);
     if (vm.series.length > 0) {
-      csv = tileScopeCsv(vm, comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)));
+      csv = tileScopeCsv(vm, comments(s, lines, ctx.capture, ctx.owner));
     }
   } else {
     const { vm, lines } = sweepExport(s, tile);
-    if (vm.series.length > 0) csv = tileSweepCsv(vm, comments(s, lines, tileCapture(s, tile)));
+    const ctx = tileProvenanceContext(s, tile);
+    if (vm.series.length > 0) csv = tileSweepCsv(vm, comments(s, lines, ctx.capture, ctx.owner));
   }
   if (csv === null) {
     toast(store, "info", "Nothing to export yet — the graph has no data.");
@@ -280,10 +349,11 @@ export async function exportTileSvg(
   let svg: string | null = null;
   if (tile.kind === "spectrum") {
     const { vm, lines } = spectrumExport(s, tile);
+    const ctx = tileProvenanceContext(s, tile);
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines, tileCapture(s, tile)),
+      provenance: comments(s, lines, ctx.capture, ctx.owner),
       unitLabel: vm.unitLabel,
       xUnitLabel: "Hz",
       xLog: tile.axis.xLog,
@@ -292,10 +362,11 @@ export async function exportTileSvg(
     });
   } else if (tile.kind === "scope") {
     const { vm, lines } = scopeExport(s, tile);
+    const ctx = tileProvenanceContext(s, tile, vm.trigger?.capture);
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines, tileExportCapture(s, tile, vm.trigger?.capture)),
+      provenance: comments(s, lines, ctx.capture, ctx.owner),
       unitLabel: vm.unitLabel,
       xUnitLabel: "s",
       xLog: false,
@@ -310,10 +381,11 @@ export async function exportTileSvg(
     });
   } else {
     const { vm, lines } = sweepExport(s, tile);
+    const ctx = tileProvenanceContext(s, tile);
     svg = renderTileSvg({
       title,
       footer,
-      provenance: comments(s, lines, tileCapture(s, tile)),
+      provenance: comments(s, lines, ctx.capture, ctx.owner),
       unitLabel: vm.unitLabel,
       xUnitLabel: vm.xUnit === "rateHz" ? "Hz (rate)" : vm.xUnit,
       // Level sweeps are linear dB steps; Hz and rate-Hz axes are log —
@@ -358,6 +430,7 @@ export async function exportTraceCsv(
   const meta = s.traces.byId[traceId];
   const frames = getFrames(traceId);
   if (!meta) return;
+  const owner = ownerDeviceFor(s, traceId);
   const extra: ProvenanceLine[] = [
     { key: "export", value: "trace" },
     { key: "trace", value: meta.label },
@@ -366,16 +439,16 @@ export async function exportTraceCsv(
   ];
   let csv: string | null = null;
   if (domain === "td" && frames?.td) {
-    csv = traceTdCsv(meta, frames.td, comments(s, extra, meta.capture));
+    csv = traceTdCsv(meta, frames.td, comments(s, extra, meta.capture, owner));
   } else if (domain === "fd" && frames?.fd) {
-    csv = traceFdCsv(meta, frames.fd, comments(s, extra, meta.capture), isRatioTrace(meta));
+    csv = traceFdCsv(meta, frames.fd, comments(s, extra, meta.capture, owner), isRatioTrace(meta));
   } else if (domain === "sweep" && frames?.sweep) {
     // Units resolved with the tile's own frame-first-program-fallback rule
     // (chartvm), never a bare frame read (review finding #6).
     csv = traceSweepCsv(
       meta,
       frames.sweep,
-      comments(s, extra, meta.capture),
+      comments(s, extra, meta.capture, owner),
       sweepXUnit(s, traceId, frames.sweep),
       sweepUnitLabel(s, traceId, frames.sweep)
     );
@@ -404,7 +477,10 @@ export async function exportTraceCsv(
 /** Title + short provenance footer for the composed image. The footer
  * prefers the tile's capture snapshot (issue #40 — the PNG lane had the
  * same export-time-bench bug as the CSV header): device/rate/fft/window/avg
- * describe the bench that PRODUCED the drawn data whenever it's known. */
+ * describe the bench that PRODUCED the drawn data whenever it's known.
+ * The no-capture fallback and the rate are the OWNER's (lot F5), never the
+ * focused session's — a sweep result stamps no `sampleRateHz`, so pre-F5
+ * a slot-1 sweep printed the focused slot-0 rate here. */
 function tileImageText(s: AppState, tileId: string): { title: string; footer: string[] } {
   const tile = s.layout.tiles[tileId];
   const kind = tile ? KIND_LABELS[tile.kind] : "Graph";
@@ -412,12 +488,15 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
     .filter((id) => !tile?.hidden.includes(id))
     .map((id) => s.traces.byId[id]?.label)
     .filter((l): l is string => !!l);
-  const cap = tile
-    ? tile.kind === "scope"
-      ? tileExportCapture(s, tile, scopeVM(s, tile).trigger?.capture)
-      : tileCapture(s, tile)
-    : null;
-  const info = focusedDevice(s).info;
+  const ctx = tile
+    ? tileProvenanceContext(
+        s,
+        tile,
+        tile.kind === "scope" ? scopeVM(s, tile).trigger?.capture : undefined
+      )
+    : { capture: null, owner: ownerDeviceFor(s, null) };
+  const cap = ctx.capture;
+  const info = ctx.owner?.info ?? null;
   const device = cap?.device
     ? `${cap.device.model} #${cap.device.serial}` +
       (cap.device.firmware !== null ? ` fw${cap.device.firmware}` : "") +
@@ -426,7 +505,7 @@ function tileImageText(s: AppState, tileId: string): { title: string; footer: st
       ? `${info.model} #${info.serial} fw${info.firmware_version}${info.is_virtual ? " (virtual)" : ""}`
       : "no device";
   const acq = s.acquisition;
-  const rateHz = cap?.sampleRateHz ?? focusedDevice(s).config?.sample_rate ?? null;
+  const rateHz = cap?.sampleRateHz ?? ctx.owner?.config?.sample_rate ?? null;
   const fft = cap ? cap.fftSize : acq.fftSize;
   const window = cap ? cap.window : acq.window;
   const averaging = cap ? cap.averaging : acq.averaging;

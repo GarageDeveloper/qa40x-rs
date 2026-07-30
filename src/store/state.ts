@@ -239,13 +239,18 @@ export function captureBenchSignature(c: CaptureProvenance): string {
   ]);
 }
 
-/** The CURRENT bench as a capture snapshot — what a frame ingested right now
- * would be stamped with (config-side view; the ingest itself prefers the
- * frame's own sampleRate/offsets). The export compares a trace's snapshot
- * against this to decide whether the bench has moved since capture. */
-export function liveCaptureProvenance(s: AppState): CaptureProvenance {
-  const device = focusedDevice(s);
-  const info = device.info;
+/** The CURRENT bench as a capture snapshot for one DEVICE's converter —
+ * what a frame ingested right now on that device would be stamped with
+ * (config-side view; the ingest itself prefers the frame's own sampleRate/
+ * offsets). `null` device = no converter: identity/rates/offsets all null
+ * (issue #25 lot F5 — a dormant export owner must never borrow another
+ * session's numbers). `fftSize`/`window`/`averaging` stay bench-global
+ * (`s.acquisition`), they are not per-device state. */
+export function deviceCaptureProvenance(
+  s: AppState,
+  device: DeviceState | null
+): CaptureProvenance {
+  const info = device?.info ?? null;
   return {
     device: info
       ? {
@@ -255,15 +260,21 @@ export function liveCaptureProvenance(s: AppState): CaptureProvenance {
           isVirtual: info.is_virtual,
         }
       : null,
-    sampleRateHz: device.config?.sample_rate ?? null,
-    inputRangeDbv: device.config?.input_gain ?? null,
-    outputRangeDbv: device.config?.output_gain ?? null,
-    offsets: device.offsets,
+    sampleRateHz: device?.config?.sample_rate ?? null,
+    inputRangeDbv: device?.config?.input_gain ?? null,
+    outputRangeDbv: device?.config?.output_gain ?? null,
+    offsets: device?.offsets ?? null,
     fftSize: s.acquisition.fftSize,
     window: s.acquisition.window,
     averaging: { ...s.acquisition.averaging },
     capturedAt: null,
   };
+}
+
+/** The FOCUSED session's bench as a capture snapshot — the ingest
+ * memoization's comparison key and the export gate's pre-F5 shape. */
+export function liveCaptureProvenance(s: AppState): CaptureProvenance {
+  return deviceCaptureProvenance(s, focusedDevice(s));
 }
 
 /**
