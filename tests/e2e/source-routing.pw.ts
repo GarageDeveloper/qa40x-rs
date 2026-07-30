@@ -242,6 +242,43 @@ test("routing an ALREADY-PLAYING source onto B starts B's capture — no second 
   expect(await app.toastCount("Unknown device")).toBe(0);
 });
 
+test("reviving the pinned device under a PLAYING source resumes its capture — no routing re-check needed (validation round 3)", async ({
+  app,
+}) => {
+  await addUnitB(app);
+
+  const id = await app.addSine();
+  await app.openSourceRouting(id);
+  await app.setSourceTargetRoute(id, "1", "left");
+  await app.removeSourceTarget(id, "focus"); // pinned to #2 only
+  await app.playSine(id);
+  await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(0);
+
+  // Unplug: the session evicts, the source stays playing at a dead target.
+  await app.unplugUnit(UNIT_B);
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-1"])
+    .toBeUndefined();
+
+  // Revive from the group header (the D1 one-click path). The capture must
+  // come back BY ITSELF — the pre-fix symptom was a frozen curve until a
+  // routing uncheck/recheck kicked the editor's own auto-start.
+  await app.setPresent(true);
+  await expect.poll(() => app.groupRunLabel(1)).toBe("Connect");
+  await expect
+    .poll(() => app.groupRunDisabled(1), { timeout: 15_000 })
+    .toBe(false);
+  const framesBefore = await app.unitFrameCount(1);
+  await app.groupRun(1); // "Connect"
+  await expect
+    .poll(async () => (await app.sessions()).byKey["slot-1"]?.streaming)
+    .toBe(true);
+  await expect.poll(() => app.unitFrameCount(1)).toBeGreaterThan(framesBefore);
+  expect(await app.unitStreamSlots(1)).toEqual([
+    { id, route: "left", frequencyHz: expect.any(Number) },
+  ]);
+});
+
 test("screenshot: the routing editor at two devices", async ({ app }) => {
   await addUnitB(app);
   const id = await app.addSine();

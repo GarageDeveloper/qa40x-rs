@@ -16,6 +16,7 @@ import type {
   ExtraTone,
   PeriodicSource,
   ScriptSource,
+  SessionKey,
   SourceKind,
   SourceMeta,
   SourceRoute,
@@ -23,7 +24,11 @@ import type {
 } from "../state";
 import { MAX_SOURCE_TARGETS } from "../state";
 import { focusedRun, session, sessionKeys } from "../selectors/session";
-import { sessionsForSource, targetSessionKey } from "../selectors/sources";
+import {
+  sessionsForSource,
+  sourcesForSession,
+  targetSessionKey,
+} from "../selectors/sources";
 import { writeTarget } from "../../core/routing";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -293,35 +298,56 @@ export function setSourceTargetRoute(
   // group Run. Scoped to the EDITED cell's session only (re-review a: an
   // edit aimed at B must never resurrect A's deliberately-stopped capture)
   // and never for an "off" write (re-review b: de-routing means the same
-  // as ✕ to the user, which deliberately abstains). Output-only sessions
-  // are already handled (the fan-out's generator branch), and startRun
-  // re-checks every gate (routable, lock, connected) after its await.
+  // as ✕ to the user, which deliberately abstains).
   const s = store.get();
   const src = s.sources.byId[id];
   if (src?.playing && route !== "off") {
-    const key = targetSessionKey(s, { slot, route });
-    const sess = session(s, key);
-    if (
-      sess &&
-      !sess.run.outputOnly &&
-      !sess.run.streaming &&
-      sess.device.status === "connected" &&
-      sess.run.programLock === null &&
-      !autoStartInFlight.has(key)
-    ) {
-      // Two quick cell writes (the L-then-R "both" gesture) land before
-      // run.streaming flips — dedupe here or the unit start-stops twice
-      // (benign backend-side, but a wasted round trip + frame hiccup).
-      autoStartInFlight.add(key);
-      void startRun(store, ipc, { sessionKey: key }).finally(() =>
-        autoStartInFlight.delete(key)
-      );
-    }
+    armSessionForSources(store, ipc, targetSessionKey(s, { slot, route }));
   }
 }
 
-/** Auto-starts in flight per session (see setSourceTargetRoute). */
+/** Auto-starts in flight per session (see armSessionForSources). */
 const autoStartInFlight = new Set<string>();
+
+/**
+ * Start `key`'s capture when a PLAYING source AUDIBLY resolves onto it and
+ * the session sits connected-but-idle — the "a source declared playing must
+ * be audible without a second gesture" rule (module docs), for paths where
+ * the session APPEARS under an already-playing source: the routing editor's
+ * cell write above, and a device add/revive (Raphaël validation round 3: a
+ * revived unit with a pinned playing source came back connected but idle —
+ * the curve froze until a routing re-check kicked this very start).
+ * Off-routed resolutions don't count (a silent DAC program is startable by
+ * hand, never worth an unasked capture). Output-only sessions are the
+ * generator fan-out's job, and startRun re-checks every gate (routable,
+ * lock, connected) after its await. The in-flight set dedupes two quick
+ * triggers (the L-then-R "both" gesture) that would land before
+ * `run.streaming` flips — benign backend-side, but a wasted start/stop
+ * round trip and a frame hiccup.
+ */
+export function armSessionForSources(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key: SessionKey
+): void {
+  const s = store.get();
+  const sess = session(s, key);
+  if (
+    !sess ||
+    sess.run.outputOnly ||
+    sess.run.streaming ||
+    sess.device.status !== "connected" ||
+    sess.run.programLock !== null ||
+    autoStartInFlight.has(key)
+  ) {
+    return;
+  }
+  if (!sourcesForSession(s, key).some((r) => r.route !== "off")) return;
+  autoStartInFlight.add(key);
+  void startRun(store, ipc, { sessionKey: key }).finally(() =>
+    autoStartInFlight.delete(key)
+  );
+}
 
 /** Remove one cell (the row editor's ✕) — the matrix re-canonicalizes per
  * `writeTarget` (last cell out ⇒ the legacy compact silent form). */

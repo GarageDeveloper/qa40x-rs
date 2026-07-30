@@ -17,7 +17,7 @@ import {
 } from "../selectors/session";
 import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
 import { syncAllDacOwners, syncOutputOnly } from "./outputonly";
-import { dropSourceTargetsForSlot } from "./sources";
+import { armSessionForSources, dropSourceTargetsForSlot } from "./sources";
 import { disposeSession, syncStream } from "./stream";
 import {
   purgeSlotEndpointTraces,
@@ -409,6 +409,13 @@ export async function addDevice(
     // and the gated read would then silently skip — leaving config and
     // offsets null forever on a session nothing re-reads.
     await refreshConfig(store, ipc, key, { deviceId: device_id });
+    // A PLAYING source pinned to this slot (the revive path kept its
+    // targets) must be audible without a second gesture (lot F3, Raphaël
+    // validation round 3): the revived session came back connected but
+    // IDLE, and nothing else restarts its capture — the curve sat frozen
+    // until a routing re-check. After refreshConfig, so the first stream
+    // config snaps on the unit's real rate, never a null-config fallback.
+    armSessionForSources(store, ipc, key);
     toast(store, "success", `Added ${info?.model ?? "device"}`);
   } catch (e) {
     toast(store, "error", `Add device failed: ${e}`);

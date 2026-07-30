@@ -645,6 +645,53 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
     });
   });
 
+  it("a revive under a PLAYING pinned source re-arms the capture by itself (lot F3, validation round 3)", async () => {
+    const store = dormantWithIdentity();
+    store.update("test/play-pinned", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": { ...s.sources.byId["src-sine-1"], playing: true },
+        },
+      },
+    }));
+    const { ipc, calls } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/OLD", slot: 1 }) as AddedDevice,
+      get_device_info: () => oldUnit,
+    });
+    await addDevice(store, ipc, "usb/OLD", { slot: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    const starts = calls.filter(([m]) => m === "stream_start");
+    expect(starts).toHaveLength(1);
+    expect((starts[0][1] as { deviceId?: string }).deviceId).toBe("usb/OLD");
+    expect(store.get().devices.sessions["slot-1"].run.streaming).toBe(true);
+  });
+
+  it("…but an add whose D5 drop removed the targets arms nothing — no stimulus for an unproven unit", async () => {
+    const store = dormantWithIdentity();
+    store.update("test/play-pinned", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": { ...s.sources.byId["src-sine-1"], playing: true },
+        },
+      },
+    }));
+    const { ipc, calls } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/NEW", slot: 1 }) as AddedDevice,
+      get_device_info: () => ({ ...oldUnit, serial: "NEW-0002" }),
+    });
+    await addDevice(store, ipc, "usb/NEW", { slot: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.filter(([m]) => m === "stream_start")).toEqual([]);
+  });
+
   it("get_device_info answering null (identity UNKNOWN, not merely different) also drops the slot's targets — fail CLOSED per review SHOULD-FIX #5: an unproven identity must never let a pinned stimulus re-bind onto whatever unit took the slot", async () => {
     const store = dormantWithIdentity();
     const { ipc } = fakeIpc({
