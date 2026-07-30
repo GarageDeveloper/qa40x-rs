@@ -16,13 +16,20 @@ import type {
   ExtraTone,
   PeriodicSource,
   ScriptSource,
+  SessionKey,
   SourceKind,
   SourceMeta,
   SourceRoute,
   SourceTarget,
 } from "../state";
+import { MAX_SOURCE_TARGETS } from "../state";
 import { focusedRun, session, sessionKeys } from "../selectors/session";
-import { sessionsForSource } from "../selectors/sources";
+import {
+  sessionsForSource,
+  sourcesForSession,
+  targetSessionKey,
+} from "../selectors/sources";
+import { writeTarget } from "../../core/routing";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
 
@@ -119,10 +126,19 @@ export function dropSourceTargetsForSlot(s: AppState, slot: number): AppState {
   let byId: Record<string, SourceMeta> | null = null;
   for (const [id, src] of Object.entries(s.sources.byId)) {
     if (!src.targets.some((t) => t.slot === slot)) continue;
-    (byId ??= { ...s.sources.byId })[id] = {
-      ...src,
-      targets: src.targets.filter((t) => t.slot !== slot),
-    };
+    const targets = src.targets.filter((t) => t.slot !== slot);
+    // Re-canonicalize like every matrix write (issue #25 lot F3, D-F3-4):
+    // a lone focus cell compacts back to the legacy form (the row returns
+    // to the plain L/R pair), and an EMPTIED matrix stores the silent
+    // compact form — never the bare `[]`, whose legacy-route fallback
+    // would silently re-bind the stimulus onto the focused device (the
+    // exact re-target class D5 exists to refuse).
+    (byId ??= { ...s.sources.byId })[id] =
+      targets.length === 0
+        ? { ...src, targets: [], route: "off" }
+        : targets.length === 1 && targets[0].slot === null
+          ? { ...src, targets: [], route: targets[0].route }
+          : { ...src, targets };
   }
   return byId ? { ...s, sources: { ...s.sources, byId } } : s;
 }
@@ -253,17 +269,125 @@ export function setSourceRoute(
   syncSourcesEverywhere(store, ipc);
 }
 
+/**
+ * Write one cell of a source's device × channel matrix (issue #25 lot F3 —
+ * the row editor's checkbox handler): create-or-update the target's cell
+ * with `route` (an "off" write KEEPS the cell: a silent DAC program, the
+ * legacy Off meaning). The sync is the full fan-out, never a direct wire
+ * call: a retarget reshapes the mix of the session that LOST the source
+ * too, and the DAC must only ever be reached through outputonly's `sync`
+ * (its program-lock gate is the F2 MUST-FIX-1 fix).
+ */
+export function setSourceTargetRoute(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null,
+  route: SourceRoute
+): void {
+  patch(store, "sources/target-route", id, (src) => ({
+    ...src,
+    ...writeTarget(src, slot, route, MAX_SOURCE_TARGETS),
+  }));
+  syncSourcesEverywhere(store, ipc);
+  // Route-then-play parity (F3 review MUST-FIX 1): a PLAYING source routed
+  // onto a connected-but-idle capture session must be audible without a
+  // second gesture — exactly setSourcePlaying's rule, which only covers the
+  // play-then-route ordering. Without this, the editor prints a confident
+  // per-device grid value while the target's DAC stays silent until its
+  // group Run. Scoped to the EDITED cell's session only (re-review a: an
+  // edit aimed at B must never resurrect A's deliberately-stopped capture)
+  // and never for an "off" write (re-review b: de-routing means the same
+  // as ✕ to the user, which deliberately abstains).
+  const s = store.get();
+  const src = s.sources.byId[id];
+  if (src?.playing && route !== "off") {
+    armSessionForSources(store, ipc, targetSessionKey(s, { slot, route }));
+  }
+}
+
+/** Auto-starts in flight per session (see armSessionForSources). */
+const autoStartInFlight = new Set<string>();
+
+/**
+ * Start `key`'s capture when a PLAYING source AUDIBLY resolves onto it and
+ * the session sits connected-but-idle — the "a source declared playing must
+ * be audible without a second gesture" rule (module docs), for paths where
+ * the session APPEARS under an already-playing source: the routing editor's
+ * cell write above, and a device add/revive (Raphaël validation round 3: a
+ * revived unit with a pinned playing source came back connected but idle —
+ * the curve froze until a routing re-check kicked this very start).
+ * Off-routed resolutions don't count (a silent DAC program is startable by
+ * hand, never worth an unasked capture). Output-only sessions are the
+ * generator fan-out's job, and startRun re-checks every gate (routable,
+ * lock, connected) after its await. The in-flight set dedupes two quick
+ * triggers (the L-then-R "both" gesture) that would land before
+ * `run.streaming` flips — benign backend-side, but a wasted start/stop
+ * round trip and a frame hiccup.
+ */
+export function armSessionForSources(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key: SessionKey
+): void {
+  const s = store.get();
+  const sess = session(s, key);
+  if (
+    !sess ||
+    sess.run.outputOnly ||
+    sess.run.streaming ||
+    sess.device.status !== "connected" ||
+    sess.run.programLock !== null ||
+    autoStartInFlight.has(key)
+  ) {
+    return;
+  }
+  if (!sourcesForSession(s, key).some((r) => r.route !== "off")) return;
+  autoStartInFlight.add(key);
+  void startRun(store, ipc, { sessionKey: key }).finally(() =>
+    autoStartInFlight.delete(key)
+  );
+}
+
+/** Remove one cell (the row editor's ✕) — the matrix re-canonicalizes per
+ * `writeTarget` (last cell out ⇒ the legacy compact silent form). */
+export function removeSourceTarget(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null
+): void {
+  patch(store, "sources/target-remove", id, (src) => ({
+    ...src,
+    ...writeTarget(src, slot, null, MAX_SOURCE_TARGETS),
+  }));
+  syncSourcesEverywhere(store, ipc);
+}
+
 export function setSourcePlaying(
   store: Store<AppState>,
   ipc: Ipc,
   id: string,
   playing: boolean
 ): void {
-  // A running measurement program owns the device: the UI greys the
-  // transports with the reason, and the action refuses as backstop.
-  // Focus-based on purpose (lot F2 decision D7 — matches the greyed
-  // button); per-target lock display is lot F4.
-  if (focusedRun(store.get()).programLock !== null) return;
+  // A running measurement program owns ITS device: the UI greys the
+  // transports with the reason, and the action refuses as backstop. Scoped
+  // to the source's LIVE target sessions since lot F3 (step 8) — a sweep
+  // on A must not block a source pinned to B; with no live target the
+  // focused lock applies, exactly matching the row's greyed button (v1
+  // invariant C: display and guard must agree, no enabled-and-refusing).
+  // CONNECTED sessions only, like the row's own filter (F3 review #2: a
+  // disconnected focused session can hold a stale lock — an unplug
+  // mid-sweep keeps `programLock` until the in-flight command rejects —
+  // and the enabled button must not click into a silent refusal).
+  const s0 = store.get();
+  const targetKeys = sessionsForSource(s0, id).filter(
+    (k) => session(s0, k)?.device.status === "connected"
+  );
+  const locked = targetKeys.length
+    ? targetKeys.some((k) => session(s0, k)?.run.programLock !== null)
+    : focusedRun(s0).programLock !== null;
+  if (locked) return;
   patch(store, playing ? "sources/play" : "sources/pause", id, (src) => ({
     ...src,
     playing,

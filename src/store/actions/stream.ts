@@ -5,6 +5,7 @@
  * orchestration: the loop, the range fit and the clip latch live backend.
  */
 import type { MixerSlotDesc, StreamConfig } from "../../gen";
+import { playedFrequency } from "../../core/bins";
 import type { Ipc } from "../../ipc/ipc";
 import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
@@ -34,12 +35,10 @@ import {
 import { triggerRequest } from "../selectors/trigger";
 import { toast } from "./ui";
 
-/** Snap a sine to the nearest FFT bin (v1 behavior: a bin-exact tone keeps
- * the windowed FFT clean; the ask stays the user's, only the mix snaps). */
-export function snapToBin(freqHz: number, numSamples: number, sampleRate: number): number {
-  const bin = Math.max(1, Math.round((freqHz * numSamples) / sampleRate));
-  return (bin * sampleRate) / numSamples;
-}
+// Bin math lives in the core/bins.ts leaf since lot F3 (selectors need it
+// for per-target readouts and must not import an action module). Re-exported
+// so existing importers — including stream.test.ts — stay untouched.
+export { snapToBin } from "../../core/bins";
 
 /** A level in dBV as a linear level-volts amplitude (0 dBV ≙ 1.0). */
 export function levelToAmplitude(levelDbv: number): number {
@@ -137,10 +136,7 @@ export function playedFrequencyHz(
 ): number {
   const key = sessionKey ?? s.devices.focus;
   const sampleRate = session(s, key)?.device.config?.sample_rate ?? 48000;
-  const clamped = Math.min(Math.max(hz, 1), (sampleRate / 2) * 0.98);
-  return s.acquisition.coherentGen
-    ? snapToBin(clamped, s.acquisition.fftSize, sampleRate)
-    : clamped;
+  return playedFrequency(hz, sampleRate, s.acquisition.coherentGen, s.acquisition.fftSize);
 }
 
 /** The slot declarations `sessionKey`'s session receives (default: the

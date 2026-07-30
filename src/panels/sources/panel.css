@@ -215,6 +215,71 @@
   gap: 6px;
 }
 
+/* The collapsed routing button (matrix mode, issue #25 lot F3): a stable
+   "Routing" label (+ ⚠), the full map in its title. */
+.sources__routing-sum {
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sources__routing-sum:hover {
+  color: var(--accent);
+}
+
+/* One TARGET of the routing editor — a two-line grid: the name column can
+   ellipsize but never collapses (the checkboxes/✕ are fixed-size columns,
+   aligned across rows), and the readout/note live on their own sub-line so
+   long notes never squeeze line 1 or overflow the sidebar. */
+.sources__tgt {
+  display: grid;
+  grid-template-columns: minmax(60px, 1fr) auto auto auto;
+  align-items: center;
+  column-gap: 6px;
+  row-gap: 1px;
+}
+
+.sources__tgt-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__tgt-sub {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding-bottom: 2px;
+}
+
+.sources__tgt-played {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.sources__tgt-note {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__tgt-note--err {
+  color: var(--err);
+}
+
 .sources__route-ch {
   display: flex;
   align-items: center;
@@ -234,6 +299,30 @@
   color: var(--ink-2);
 }
 
+/* Which device the footer describes (issue #25 lot F3) — present only at
+   ≥ 2 live sessions; :empty keeps the single-device footer pixel-identical
+   (the .sources__params:empty precedent). The prefix is the one flex item
+   allowed to SHRINK (ellipsis + title), so the Σ/clip/range readouts never
+   wrap internally in the narrow sidebar. */
+.sources__footdev {
+  flex: 0 1 auto;
+  min-width: 18px;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sources__footdev:empty {
+  display: none;
+}
+
+.sources__sigma {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .sources__clip {
   width: 9px;
   height: 9px;
@@ -249,7 +338,9 @@
 }
 
 .sources__range {
+  flex-shrink: 0;
   color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .sources__spacer {

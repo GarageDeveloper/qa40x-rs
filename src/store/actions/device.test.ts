@@ -30,7 +30,7 @@ import type { Ipc } from "../../ipc/ipc";
 import type { AddedDevice } from "../../gen";
 import { hwTraceIds } from "../hwtraces";
 import { fakeEntry } from "./devices.fixtures";
-import { addDevice, disconnect, removeDevice } from "./device";
+import { addDevice, disconnect, removeDevice, setSampleRate } from "./device";
 import { reconcileHwTraces, stampSlotEndpointIdentity } from "./traces";
 import { snapshotWorkspace } from "../persist";
 import { applyWorkspaceDoc } from "./workspace";
@@ -553,14 +553,37 @@ describe("program-lock guards on the deliberate teardown paths (issue #25 lot F2
 });
 
 describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus twin of the trace purge", () => {
-  it("removeDevice drops the slot's pinned targets and leaves the rest of the matrix alone", async () => {
+  it("removeDevice drops the slot's pinned targets; the surviving lone focus cell compacts to the legacy form (lot F3, D-F3-4)", async () => {
     const store = slot1Store();
     store.update("test/pin-target", withSlot1Target);
     const { ipc } = fakeIpc();
     await removeDevice(store, ipc, "slot-1");
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    // Canonicalized like every matrix write since F3: the row returns to
+    // the plain L/R pair, route carrying the focus cell's value.
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
+  });
+
+  it("a drop that EMPTIES the matrix stores the silent compact form — never the bare [] whose legacy-route fallback would re-bind the stimulus onto the focus (lot F3)", async () => {
+    const store = slot1Store();
+    store.update("test/pin-target-slot1-only", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": {
+            ...s.sources.byId["src-sine-1"],
+            route: "left" as const, // would silently play on focus if read
+            targets: [{ slot: 1, route: "both" as const }],
+          },
+        },
+      },
+    }));
+    const { ipc } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("off");
   });
 
   const oldUnit = {
@@ -604,9 +627,8 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
       get_device_info: () => ({ ...oldUnit, serial: "NEW-0002" }),
     });
     await addDevice(store, ipc, "usb/NEW", { slot: 1 });
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
   });
 
   it("the revive path — SAME model+serial — keeps the pinned targets", async () => {
@@ -623,6 +645,53 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
     });
   });
 
+  it("a revive under a PLAYING pinned source re-arms the capture by itself (lot F3, validation round 3)", async () => {
+    const store = dormantWithIdentity();
+    store.update("test/play-pinned", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": { ...s.sources.byId["src-sine-1"], playing: true },
+        },
+      },
+    }));
+    const { ipc, calls } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/OLD", slot: 1 }) as AddedDevice,
+      get_device_info: () => oldUnit,
+    });
+    await addDevice(store, ipc, "usb/OLD", { slot: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    const starts = calls.filter(([m]) => m === "stream_start");
+    expect(starts).toHaveLength(1);
+    expect((starts[0][1] as { deviceId?: string }).deviceId).toBe("usb/OLD");
+    expect(store.get().devices.sessions["slot-1"].run.streaming).toBe(true);
+  });
+
+  it("…but an add whose D5 drop removed the targets arms nothing — no stimulus for an unproven unit", async () => {
+    const store = dormantWithIdentity();
+    store.update("test/play-pinned", (s) => ({
+      ...s,
+      sources: {
+        ...s.sources,
+        byId: {
+          ...s.sources.byId,
+          "src-sine-1": { ...s.sources.byId["src-sine-1"], playing: true },
+        },
+      },
+    }));
+    const { ipc, calls } = fakeIpc({
+      connect_additional_device: () =>
+        ({ device_id: "usb/NEW", slot: 1 }) as AddedDevice,
+      get_device_info: () => ({ ...oldUnit, serial: "NEW-0002" }),
+    });
+    await addDevice(store, ipc, "usb/NEW", { slot: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.filter(([m]) => m === "stream_start")).toEqual([]);
+  });
+
   it("get_device_info answering null (identity UNKNOWN, not merely different) also drops the slot's targets — fail CLOSED per review SHOULD-FIX #5: an unproven identity must never let a pinned stimulus re-bind onto whatever unit took the slot", async () => {
     const store = dormantWithIdentity();
     const { ipc } = fakeIpc({
@@ -631,9 +700,8 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
       get_device_info: () => null,
     });
     await addDevice(store, ipc, "usb/UNKNOWN", { slot: 1 });
-    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: null, route: "left" },
-    ]);
+    expect(store.get().sources.byId["src-sine-1"].targets).toEqual([]);
+    expect(store.get().sources.byId["src-sine-1"].route).toBe("left");
   });
 });
 
@@ -657,5 +725,81 @@ describe("slot-0 disconnect stays the wedged-sweep escape hatch (F2 review MUST-
     await disconnect(store, ipc, SLOT0);
     expect(calls.some(([m]) => m === "disconnect_device")).toBe(true);
     expect(store.get().devices.sessions[SLOT0].device.status).toBe("disconnected");
+  });
+});
+
+describe("setSampleRate — per-session generator retune (issue #25 lot F3)", () => {
+  /** Slot 0 connected with a playing focus-following sine. */
+  function generatorBench(run: Partial<AppState["devices"]["sessions"][string]["run"]>): Store<AppState> {
+    const s = initialState();
+    s.devices.sessions = {
+      [SLOT0]: {
+        ...s.devices.sessions[SLOT0],
+        device: {
+          ...s.devices.sessions[SLOT0].device,
+          status: "connected",
+          config: { input_gain: 0, output_gain: 18, sample_rate: 48000 },
+        },
+        run: { ...s.devices.sessions[SLOT0].run, ...run },
+      },
+    };
+    // The boot source ("Sine 1", route left) plays: the generator has a mix.
+    s.sources.byId["src-sine-1"] = { ...s.sources.byId["src-sine-1"], playing: true };
+    return new Store<AppState>(s, { freeze: true });
+  }
+
+  const flushChain = async (): Promise<void> => {
+    for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("a rate change on a GENERATING session rebuilds its loop on the NEW grid", async () => {
+    const store = generatorBench({ outputOnly: true, generatorRunning: true });
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 192000 }),
+      output_only_start: () => ({
+        sigma_peak_dbv: -12,
+        clipped: false,
+        fitted_output_range_dbv: 8,
+        errors: [],
+      }),
+    });
+    await setSampleRate(store, ipc, 192000);
+    await flushChain();
+    const starts = calls.filter(([m]) => m === "output_only_start");
+    expect(starts).toHaveLength(1);
+    const slots = (starts[0][1] as { slots: { source: { frequency_hz: number } }[] }).slots;
+    // 1 kHz snapped on the NEW 192 kHz grid (32768 bins), not the old 48 k one.
+    expect(slots[0].source.frequency_hz).toBeCloseTo(1001.953125, 9);
+  });
+
+  it("a rate change on a PROGRAM-LOCKED session never rebuilds the generator (the F2 gate)", async () => {
+    const store = generatorBench({
+      outputOnly: true,
+      generatorRunning: true,
+      programLock: "THD sweep running",
+    });
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 192000 }),
+    });
+    await setSampleRate(store, ipc, 192000);
+    await flushChain();
+    expect(calls.filter(([m]) => m === "output_only_start")).toEqual([]);
+    // The register write itself went through — only the DAC rebuild waits.
+    expect(calls.some(([m]) => m === "set_sample_rate")).toBe(true);
+  });
+
+  it("a rate change on an IDLE session touches no generator (no resume-to-capture surprise)", async () => {
+    const store = generatorBench({});
+    const { ipc, calls } = fakeIpc({
+      get_device_config: () => ({ input_gain: 0, output_gain: 18, sample_rate: 96000 }),
+    });
+    await setSampleRate(store, ipc, 96000);
+    await flushChain();
+    // Neither DAC-owner verb fires: no rebuild, and no resume-to-capture
+    // surprise (the tail of outputonly's sync belongs to explicit gestures).
+    expect(
+      calls.filter(([m]) => m === "output_only_start" || m === "stop_generator")
+    ).toEqual([]);
+    expect(calls.some(([m]) => m === "set_sample_rate")).toBe(true);
   });
 });

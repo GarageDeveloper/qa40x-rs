@@ -37,7 +37,7 @@ import {
   showDevicePicker,
 } from "../../store/selectors/devices";
 import { openAppDrawer } from "../appmenu/drawer";
-import { el, keyedList } from "../../ui/dom";
+import { el, keyedList, setText } from "../../ui/dom";
 
 function fmtRate(hz: number): string {
   return `${hz / 1000} kHz`;
@@ -266,8 +266,11 @@ export function mountDevicePanel(
             ? " led--busy"
             : ""
       }`;
-      connectBtn.textContent =
-        device.status === "connected" ? "Disconnect" : "Connect";
+      // This callback fires on every frame (the focused DeviceState's
+      // reference churns with each ingest) — idempotent write, or a click
+      // on Connect/Disconnect lands on a detached text node and is dropped
+      // (ui/dom.ts::setText, the two-clicks report).
+      setText(connectBtn, device.status === "connected" ? "Disconnect" : "Connect");
       // A DISCONNECTED slot ≥ 1 focus cannot be reopened by connect_device
       // (it owns slot 0 only): disabled with a pointer, not hidden.
       const slot1Reconnect = device.status === "disconnected" && !focusIsSlot0;

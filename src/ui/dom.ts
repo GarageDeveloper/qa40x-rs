@@ -32,6 +32,19 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * Idempotent text write: assign ONLY when the content actually changed.
+ * `textContent = x` replaces the text node even for an identical value, and
+ * a frame-rate rewrite detaches the node a click's mousedown landed on —
+ * mouseup then has no common target and the browser drops the click
+ * entirely (Raphaël, 2026-07-30: legend chips / Disconnect needing two
+ * clicks while streaming). Every update path that can run per frame must
+ * write through this (or its own equality guard).
+ */
+export function setText(node: Node, text: string): void {
+  if (node.textContent !== text) node.textContent = text;
+}
+
 export interface KeyedRenderer<T> {
   /** Build the DOM structure for a new item (called once per key). */
   create(item: T): HTMLElement;

@@ -76,3 +76,4 @@ CLAUDE.md
 # e2e harness output (tests/e2e): screenshots + Playwright artifacts
 /tests/e2e/screenshots/
 /tests/e2e/.results/
+/test-results/

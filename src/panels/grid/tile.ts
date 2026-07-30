@@ -32,7 +32,13 @@ import {
   setTriggerMode,
 } from "../../store/actions/trigger";
 import { autoChipSourceTraceId } from "../../store/selectors/layout";
-import { focusedDevice, focusedRun, runForTrace } from "../../store/selectors/session";
+import {
+  deviceForTrace,
+  focusedDevice,
+  focusedRun,
+  runForTrace,
+} from "../../store/selectors/session";
+import { hwSlotOfTraceId } from "../../store/hwtraces";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
 import { programProgressText } from "../../store/actions/programs";
@@ -61,7 +67,7 @@ import { measuresFor } from "../../data/measures";
 import { copyTilePng, exportTileCsv, exportTilePng, exportTileSvg } from "../../export/export";
 import { openTileGearDialog } from "./gear";
 import { addTraceCandidates } from "./addtrace";
-import { el, keyedList } from "../../ui/dom";
+import { el, keyedList, setText } from "../../ui/dom";
 
 const FD_UNITS: { value: FdUnit; label: string }[] = [
   { value: "dbfs", label: "dBFS" },
@@ -745,6 +751,11 @@ export function createTile(
          * excluded from the plot entirely (issue #27 review finding #3), not
          * just legend-hidden. A discreet chip marker, no layout shift. */
         axisMismatch: boolean;
+        /** A hw endpoint whose owning device is gone/disconnected (lot F3,
+         * Raphaël: the frozen curve read as live) — the curve is HELD at
+         * the last capture, dashed-outlined like axis-mismatch (the same
+         * constant-border trick, no layout shift). */
+        dormant: boolean;
       }
       // Sweep tiles only: traces sweepVM omitted for an axis clash (a
       // frequency sweep and a level sweep can't share one x-axis scale).
@@ -752,6 +763,13 @@ export function createTile(
         tile.kind === "sweep" ? new Set(sweepVM(s, tile).omitted) : new Set<TraceId>();
       const legendItems: LegendItem[] = [];
       for (const t of members) {
+        // Dormant = a device endpoint whose owning session is gone or
+        // disconnected: its data is real but FROZEN. Endpoints only —
+        // memory/transform/program traces are bench artifacts, deliberate
+        // snapshots, not a device that fell off the bus.
+        const dormant =
+          hwSlotOfTraceId(t.id) !== null &&
+          deviceForTrace(s, t.id)?.status !== "connected";
         const sweepFrames = tile.kind === "sweep" ? getFrames(t.id)?.sweep : undefined;
         if (sweepFrames && sweepFrames.curves.length > 1) {
           sweepFrames.curves.forEach((c, i) => {
@@ -765,6 +783,7 @@ export function createTile(
                 tile.hidden.includes(t.id) ||
                 (tile.hiddenCurves[t.id] ?? []).includes(c.label),
               axisMismatch: sweepOmitted.has(t.id),
+              dormant,
             });
           });
         } else {
@@ -776,6 +795,7 @@ export function createTile(
             color: t.color,
             off: tile.hidden.includes(t.id),
             axisMismatch: sweepOmitted.has(t.id),
+            dormant,
           });
         }
       }
@@ -814,12 +834,18 @@ export function createTile(
           ),
         update(node, it) {
           (node.children[0] as HTMLElement).style.backgroundColor = it.color;
-          node.children[1].textContent = it.label;
+          // setText, never a bare assign: this runs at frame rate, and an
+          // identical-value rewrite would detach the text node under an
+          // in-flight click (the two-clicks-to-toggle report).
+          setText(node.children[1], it.label);
           node.classList.toggle("tile__trace--off", it.off);
           node.classList.toggle("tile__trace--axis-mismatch", it.axisMismatch);
+          node.classList.toggle("tile__trace--dormant", it.dormant);
           const title = it.axisMismatch
             ? "Different sweep axis (Hz vs dBFS) on this tile — not drawn"
-            : "Click to show/hide this curve";
+            : it.dormant
+              ? "Device not connected — the curve is held at its last capture"
+              : "Click to show/hide this curve";
           if (node.title !== title) node.title = title;
         },
       });
@@ -935,7 +961,9 @@ export function createTile(
       // run that actually scans this endpoint, not the focused one.
       const trigRun = trigSourceId ? runForTrace(s, trigSourceId) : null;
       const trigState = trigRun && trigSourceId ? trigRun.triggers[trigSourceId]?.state : undefined;
-      trigChip.textContent = triggerChipText(trigSettings.mode, trigSettings.edge, trigState);
+      // Per-frame path: idempotent write, or clicks on the chip get eaten
+      // by the text-node swap (ui/dom.ts::setText).
+      setText(trigChip, triggerChipText(trigSettings.mode, trigSettings.edge, trigState));
       armBtn.toggleAttribute("disabled", trigSettings.mode !== "single");
       // Armed = SINGLE still waiting for its shot: state `waiting` (or none
       // latched yet), OR a re-arm still in flight (trigArmPending — the
@@ -977,7 +1005,7 @@ export function createTile(
         const key = (chip as HTMLElement).dataset.key;
         const def = key ? measureByKey(key) : undefined;
         const valueNode = chip.querySelector(".tile__chip-value");
-        if (def && valueNode) valueNode.textContent = def.format(ctx);
+        if (def && valueNode) setText(valueNode, def.format(ctx));
         // Sliding-window stats ride the tooltip (issue #26 lot B) — text
         // only, the chip itself never changes size (no-layout-shift rule).
         // Assigned only on change: rewriting `title` every frame could
