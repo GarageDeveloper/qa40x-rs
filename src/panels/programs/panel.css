@@ -19,6 +19,11 @@
   font-size: 10px;
   color: var(--ink-3);
   white-space: nowrap;
+  /* The multi-device wording is ~2× longer (issue #25 lot F4 review note
+     #5): in a narrow sidebar it must clip, never squeeze the title or push
+     the + menu onto a new line. The full text lives in the title attr. */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .programs__addwrap {
@@ -74,6 +79,10 @@
   padding: 5px 8px;
   border: 1px solid var(--line-1);
   border-radius: 6px;
+  /* Anchors the destination-picker menu (.programs__destmenu): the menu
+     cannot live inside .programs__type, whose overflow: hidden would clip
+     an absolutely-positioned child. */
+  position: relative;
 }
 
 .programs__rowline {
@@ -120,6 +129,47 @@
   padding-left: 16px;
   font-size: 10px;
   color: var(--ink-3);
+  /* Same clip rule as .programs__wow below (issue #28 finding #6, extended
+     by lot F4's "· on #2" suffix — review note #6): the card must not grow
+     a line the moment a second device is added. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The type line's "· on #N ▾" destination picker — a text-styled button
+   (inherits the line's 10px/ink-3 look) so the line reads exactly as the
+   F4 note did, plus the ▾ affordance. Hidden (and EMPTY — programTypeLine
+   reads textContent) on a single-device bench with no pin. */
+.programs__dest {
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.programs__dest:hover:not(:disabled) {
+  color: var(--ink-1);
+  text-decoration: underline;
+}
+
+.programs__dest:disabled {
+  cursor: default;
+}
+
+.programs__progress {
+  margin-left: 4px;
+}
+
+/* Spans the row instead of hugging its right edge (the base .programs__menu
+   rule) — the picker sits at the row's left, under the type line; `top` is
+   set inline on open from the button's position. */
+.programs__destmenu {
+  left: 16px;
+  right: 8px;
 }
 
 /* Every program card's scalar-readout line (issue #28 second pass) — "—"

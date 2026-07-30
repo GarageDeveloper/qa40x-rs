@@ -7,6 +7,8 @@ import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../store";
 import type { AppState, AveragingMode, WindowKind } from "../state";
 import { FFT_SIZES } from "../state";
+import type { SessionKey } from "../sessionkey";
+import { isRoutable, sessionArgs } from "../selectors/session";
 import { syncAllStreams } from "./stream";
 import { syncAllOutputOnly } from "./outputonly";
 import { toast } from "./ui";
@@ -74,13 +76,30 @@ export function setPeakHold(store: Store<AppState>, peakHold: boolean): void {
  * the stream task, the front never touches them), and bumping
  * `ui.peakHoldEpoch` makes every spectrum tile drop its peak-hold overlay.
  */
-export function resetAveraging(store: Store<AppState>, ipc: Ipc): void {
-  void ipc.call("stream_reset_averaging", {}).catch(() => {
+export function resetAveraging(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key?: SessionKey
+): void {
+  // KEYED since lot F4 (the F2 carried note): arg-less, this drove the
+  // DEFAULT runtime whatever the focus — a reset clicked under a slot-1
+  // focus emptied slot 0's accumulators and left the visible stream's
+  // untouched. Focused by default (the toolbar button's meaning). An
+  // unadopted slot ≥ 1 (the one-enumeration window) is a legible REFUSAL
+  // (review SHOULD-FIX #4 — never a silent default-runtime hit, never a
+  // half-true success toast), same wording as runProgram's.
+  const s = store.get();
+  const k = key ?? s.devices.focus;
+  if (!isRoutable(s, k)) {
+    toast(store, "error", "Device id not adopted yet — retry in a moment.");
+    return;
+  }
+  void ipc.call("stream_reset_averaging", sessionArgs(s, k)).catch(() => {
     // Idle stream (or none): nothing to reset backend-side — fine.
   });
-  store.update("acq/reset-avg-peak", (s) => ({
-    ...s,
-    ui: { ...s.ui, peakHoldEpoch: s.ui.peakHoldEpoch + 1 },
+  store.update("acq/reset-avg-peak", (st) => ({
+    ...st,
+    ui: { ...st.ui, peakHoldEpoch: st.ui.peakHoldEpoch + 1 },
   }));
   // The visible effect waits for the next analyzed frame (up to one frame
   // period) — acknowledge the click immediately, like the legacy button.
@@ -94,8 +113,19 @@ export function resetAveraging(store: Store<AppState>, ipc: Ipc): void {
  * full window length. The stats live in the stream task — the front never
  * touches them, same contract as `resetAveraging`.
  */
-export function resetMeasureStats(store: Store<AppState>, ipc: Ipc): void {
-  void ipc.call("stream_reset_measure_stats", {}).catch(() => {
+export function resetMeasureStats(
+  store: Store<AppState>,
+  ipc: Ipc,
+  key?: SessionKey
+): void {
+  // Keyed like resetAveraging above (lot F4) — same default, same refusal.
+  const s = store.get();
+  const k = key ?? s.devices.focus;
+  if (!isRoutable(s, k)) {
+    toast(store, "error", "Device id not adopted yet — retry in a moment.");
+    return;
+  }
+  void ipc.call("stream_reset_measure_stats", sessionArgs(s, k)).catch(() => {
     // Idle stream (or none): nothing to reset backend-side — fine.
   });
   toast(store, "info", "Measurement stats reset — takes effect on the next frame.");

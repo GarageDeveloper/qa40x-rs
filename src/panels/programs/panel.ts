@@ -12,17 +12,23 @@ import type { AppState, ProgramMeta } from "../../store/state";
 import type { Ipc } from "../../ipc/ipc";
 import {
   addProgram,
-  programLockReason,
   programProgressText,
   removeProgram,
   runProgram,
+  setProgramDeviceSlot,
   stopProgram,
 } from "../../store/actions/programs";
-import { focusedDevice, focusedRun } from "../../store/selectors/session";
+import {
+  programBlockReason,
+  programDeviceNote,
+  programSampleRateHz,
+} from "../../store/selectors/programs";
+import { liveSessionCount } from "../../store/selectors/devices";
 import { freezeTrace, setTraceColor } from "../../store/actions/traces";
 import { exportTraceCsv } from "../../export/export";
-import { el, keyedList } from "../../ui/dom";
+import { el, keyedList, setText } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
+import { programDeviceChoices } from "./deviceselect";
 import { openSweepDialog } from "./sweepdialog";
 import { openProgramScriptDialog } from "./scriptdialog";
 
@@ -31,8 +37,13 @@ interface RowVM {
   label: string;
   color: string;
   hasData: boolean;
-  /** Why this row's Play is locked (another program runs), or null. */
+  /** Why THIS program's ▶ is locked (its device runs another program, or
+   * the bench-global script gate), or null — per row since lot F4. */
   lock: string | null;
+  /** The device annotation of the type line (`#2` + full label for the
+   * tooltip), or null on a single-device bench with no pin — the type
+   * line is then byte-identical to the pre-F4 panel. */
+  device: { short: string; full: string } | null;
 }
 
 const ADD_PROGRAMS: { kind: "thd" | "fr" | "wowflutter" | "script"; label: string }[] = [
@@ -168,18 +179,19 @@ export function mountProgramsPanel(
     "+"
   );
 
+  const note = el(
+    "span.programs__note",
+    {
+      title:
+        "A program owns the device for its run; the stream pauses and auto-resumes after",
+    },
+    "exclusive · one at a time"
+  );
   const head = el(
     "div.programs__head",
     {},
     el("h2.sidebar__title", {}, "Programs"),
-    el(
-      "span.programs__note",
-      {
-        title:
-          "A program owns the device for its run; the stream pauses and auto-resumes after",
-      },
-      "exclusive · one at a time"
-    ),
+    note,
     el("div.programs__addwrap", {}, addBtn, menu)
   );
   const section = el(
@@ -257,6 +269,55 @@ export function mountProgramsPanel(
       title: "Trace color — click to change",
     }) as HTMLInputElement;
     dot.addEventListener("input", () => setTraceColor(store, id, dot.value));
+    // The type line's "· on #N" note is a PICKER (Raphaël's F4 validation:
+    // choosing the destination must not require the ⚙ dialog) — the same
+    // choices as the dialogs' Device row (`programDeviceChoices`), in the
+    // panel's existing lightweight-menu form. The menu hangs off the ROW
+    // (position: relative), never the type line: `.programs__type` clips
+    // its overflow, which would clip an absolutely-positioned menu too.
+    const destMenu = el("div.programs__menu.programs__destmenu", {
+      "data-testid": `prog-destmenu-${id}`,
+    });
+    destMenu.hidden = true;
+    const dest = el("button.programs__dest", {
+      type: "button",
+      "data-testid": `prog-dest-${id}`,
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        if (!destMenu.hidden) {
+          destMenu.hidden = true;
+          return;
+        }
+        // Choices are built ON OPEN from fresh state (never on the
+        // per-frame update path — a churning menu would swallow the very
+        // click it exists for, the issue #68 class).
+        const s = store.get();
+        const p = s.programs.byId[id];
+        if (!p || p.run === "running") return;
+        destMenu.replaceChildren(
+          ...programDeviceChoices(s, id).map((c) =>
+            el(
+              "button.programs__menu-item",
+              {
+                type: "button",
+                "data-testid": `prog-dest-${id}-${c.slot === null ? "focus" : c.slot}`,
+                onclick: () => {
+                  setProgramDeviceSlot(store, id, c.slot);
+                  destMenu.hidden = true;
+                },
+              },
+              `${c.slot === p.deviceSlot ? "✓ " : ""}${c.label}`
+            )
+          )
+        );
+        destMenu.style.top = `${dest.offsetTop + dest.offsetHeight + 2}px`;
+        destMenu.hidden = false;
+        document.addEventListener("click", () => (destMenu.hidden = true), {
+          once: true,
+          capture: true,
+        });
+      },
+    }) as HTMLButtonElement;
     // The scalar-readout line is UNCONDITIONAL — every program row gets one
     // (see `wowSummary`'s doc comment for why the old "only for a
     // wowflutter program" approach was a real bug, issue #28 second-pass
@@ -277,8 +338,15 @@ export function mountProgramsPanel(
         exportBtn,
         remove
       ),
-      el("div.programs__type", { "data-testid": `prog-type-${id}` }),
-      el("div.programs__wow", { "data-testid": `prog-wow-${id}` })
+      el(
+        "div.programs__type",
+        { "data-testid": `prog-type-${id}` },
+        el("span.programs__typetext"),
+        dest,
+        el("span.programs__progress")
+      ),
+      el("div.programs__wow", { "data-testid": `prog-wow-${id}` }),
+      destMenu
     );
   };
 
@@ -290,10 +358,34 @@ export function mountProgramsPanel(
     node.querySelector(".programs__name")!.textContent = vm.label;
 
     const type = node.querySelector<HTMLElement>(`[data-testid="prog-type-${id}"]`)!;
-    const sr = focusedDevice(store.get()).config?.sample_rate ?? 48000;
-    type.textContent = running
-      ? `${typeLabel(vm.prog)} · ${programProgressText(vm.prog, sr, performance.now())}`
-      : typeLabel(vm.prog);
+    // The PROGRAM session's rate (lot F4 item 5), never the focused one's;
+    // the device rides the existing type line — same slot as before, but as
+    // the destination PICKER, hidden (empty) on a single-device bench with
+    // no pin so the line reads byte-identically. `setText` everywhere: this
+    // line refreshes on the 500 ms progress tick, and a rewritten-identical
+    // node between mousedown and mouseup swallows the click (issue #68).
+    const sr = programSampleRateHz(store.get(), vm.prog);
+    setText(type.querySelector(".programs__typetext")!, typeLabel(vm.prog));
+    const dest = node.querySelector<HTMLButtonElement>(`[data-testid="prog-dest-${id}"]`)!;
+    dest.hidden = !vm.device;
+    // An anchorless menu must not float on (the note can vanish live — the
+    // second device unplugged mid-pick); harmless otherwise, since a menu
+    // can only be open while its button is visible.
+    if (!vm.device) {
+      node.querySelector<HTMLElement>(`[data-testid="prog-destmenu-${id}"]`)!.hidden = true;
+    }
+    setText(dest, vm.device ? `· on ${vm.device.short} ▾` : "");
+    dest.disabled = running;
+    dest.title = !vm.device
+      ? ""
+      : running
+        ? `runs on ${vm.device.full} — its device was bound at start; stop it to re-pin`
+        : `runs on ${vm.device.full} — pick the destination device`;
+    setText(
+      type.querySelector(".programs__progress")!,
+      running ? `· ${programProgressText(vm.prog, sr, performance.now())}` : ""
+    );
+    type.title = vm.device ? `runs on ${vm.device.full}` : "";
 
     // nowrap + ellipsis (.programs__wow, panel.css) clips the ~100-char
     // readout instead of wrapping the card to 3 lines and growing it on
@@ -337,9 +429,8 @@ export function mountProgramsPanel(
   };
 
   store.select(
-    (s) => {
-      const lock = programLockReason(s);
-      return s.programs.order
+    (s) =>
+      s.programs.order
         .map((pid) => s.programs.byId[pid])
         .filter((p): p is ProgramMeta => !!p)
         .map((prog): RowVM => {
@@ -349,15 +440,34 @@ export function mountProgramsPanel(
             label: t?.label ?? prog.id,
             color: t?.color ?? "#888888",
             hasData: (t?.domains.length ?? 0) > 0,
-            lock: focusedRun(s).programLock === prog.id ? null : lock,
+            // Per ROW since lot F4 (the F1 bookkeeping): a program on A
+            // must not grey a program pinned to B — only its own device's
+            // lock, or the bench-global script gate, disables ▶.
+            lock: programBlockReason(s, prog),
+            device: programDeviceNote(s, prog),
           };
-        });
-    },
+        }),
     (rows) => {
       lastRows = rows;
       render();
     },
     (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  );
+
+  // Header note: per-device exclusivity is only worth announcing on a
+  // multi-device bench — at one live session the historical wording stays
+  // byte-identical (text change on an always-present node, no layout
+  // shift).
+  store.select(
+    (s) => liveSessionCount(s) >= 2,
+    (multi) => {
+      note.textContent = multi
+        ? "exclusive per device · one script at a time"
+        : "exclusive · one at a time";
+      note.title = multi
+        ? "A program owns ITS device for its run (that session pauses and auto-resumes after); programs on different devices run concurrently. Scripts: one at a time bench-wide."
+        : "A program owns the device for its run; the stream pauses and auto-resumes after";
+    }
   );
 
   // Tick the acquisition estimate while a program runs (the backend is

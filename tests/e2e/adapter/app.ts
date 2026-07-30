@@ -1302,6 +1302,41 @@ export class AppV2 {
     }, undefined as void);
   }
 
+  /** Every measurement-program-family call with the deviceId it rode with
+   * (null = arg-less → slot 0), fake-side truth (issue #25 lot F4). */
+  async programCalls(): Promise<{ cmd: string; deviceId: string | null }[]> {
+    return this.drv.eval(
+      () => window.__qa40xE2E.device.programCalls,
+      undefined as void
+    );
+  }
+
+  /** Pin a SWEEP program to a device slot through its ⚙ dialog's Device
+   * row (null = follows the focus) — the F4 selection surface itself. */
+  async setProgramDevice(id: string, slot: number | null): Promise<void> {
+    await this.drv.click(`[data-testid="prog-gear-${id}"]`);
+    await this.setSelect(`prog-device-${id}`, slot === null ? "" : String(slot));
+    await this.drv.click(`[data-testid="sweep-apply-${id}"]`);
+  }
+
+  /** A program row's type line ("THD vs freq · on #2 · …"). */
+  async programTypeLine(id: string): Promise<string> {
+    return (await this.drv.text(`[data-testid="prog-type-${id}"]`)) ?? "";
+  }
+
+  /** A program row's ▶/⏹ state (disabled + title). */
+  async programPlayState(id: string): Promise<{ disabled: boolean; title: string }> {
+    return this.drv.eval(
+      (x: { id: string }) => {
+        const btn = document.querySelector<HTMLButtonElement>(
+          `[data-testid="prog-play-${x.id}"]`
+        );
+        return { disabled: btn?.disabled === true, title: btn?.title ?? "" };
+      },
+      { id }
+    );
+  }
+
   /** Whether the dialog row containing a field (by its data-testid) is
    * hidden — the sweep dialog toggles rows with `.u-hidden` depending on
    * measurement/axis (issue #27's frequency-axis vs level-axis fields). */

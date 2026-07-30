@@ -97,6 +97,11 @@ export class FakeDevice {
   /** Every `connect_device` deviceId argument, in call order (null = the
    * arg-less legacy call) — what the picker specs assert against. */
   connectDeviceIds: (string | null)[] = [];
+  /** Every measurement-program-family command with the deviceId it was
+   * routed by (null = arg-less → slot 0), in call order — what the
+   * per-device program specs assert against (issue #25 lot F4: a sweep
+   * pinned to B must invoke with B's id, its ⏹ must sweep_stop B only). */
+  programCalls: { cmd: string; deviceId: string | null }[] = [];
   /* REST server mirror — the fake never runs one, but the App drawer's
    * exposure/token state must round-trip like the real backend's. */
   private restExposed = false;
@@ -335,6 +340,18 @@ export class FakeDevice {
       cmd === "connect_device" || cmd === "connect_additional_device"
         ? this.unit
         : this.unitFor(a.deviceId as string | undefined);
+    if (
+      cmd === "sweep_stop" ||
+      cmd === "measure_thd_vs_frequency" ||
+      cmd === "measure_thd_vs_level" ||
+      cmd === "measure_wow_flutter" ||
+      cmd === "measure_frequency_response_multi"
+    ) {
+      this.programCalls.push({
+        cmd,
+        deviceId: (a.deviceId as string | undefined) ?? null,
+      });
+    }
     switch (cmd) {
       /* -- presence / connection -- */
       case "is_device_present":

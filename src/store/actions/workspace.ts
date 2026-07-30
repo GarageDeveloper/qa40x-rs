@@ -109,6 +109,17 @@ export function applyWorkspaceDoc(
               run: "idle" as const,
               progress: null,
               startedAtMs: null,
+              // A run binding is a live-session fact, never a loaded one
+              // (issue #25 lot F4); the pin is sanitized here too (not
+              // just trusting migrate() ran — same reason as the targets
+              // above): a non-migrated template/debug doc with a missing
+              // or garbage deviceSlot must degrade to focus-following,
+              // never mint a "slot-undefined" session key.
+              deviceSlot: ((v) =>
+                typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null)(
+                doc.programs.byId[id].deviceSlot
+              ),
+              runKey: null,
             },
           ])
       ),
