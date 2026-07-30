@@ -1169,3 +1169,283 @@ describe("actions/programs — session-keyed programs (issue #25 lot F)", () => 
     expect(calls.some((c) => c.cmd === "stream_start")).toBe(true);
   });
 });
+
+/**
+ * Tester gate follow-up for issue #25 lot F4 (concurrent programs): the
+ * `thd-sweep-progress` router's ambiguity rules with TWO running programs
+ * — an id present on neither program, or an event carrying no id at all,
+ * must drop rather than guess (a wrong-row write is worse than a missed
+ * tick, the same review-note-#8 rationale extended to N programs) — plus
+ * `setProgramDeviceSlot`'s running-refusal and concurrent wow-result
+ * landing, none of which the F4 author's own suite exercises with two
+ * programs in flight together.
+ */
+describe("actions/programs — lot F4 tester-gate coverage (two programs in flight)", () => {
+  beforeEach(() => clearAllFrames());
+
+  /** A CONNECTED, id-adopted second session at slot 1 ("usb/B") — same
+   * shape as the F-suite's own fixture above, duplicated here since it is
+   * scoped to that describe block. */
+  function withConnectedSlot1(s: AppState): AppState {
+    const sess: DeviceSession = {
+      ...initialSession(1),
+      deviceId: "usb/B",
+      device: {
+        ...initialSession(1).device,
+        status: "connected",
+        info: {
+          model: "QA402",
+          firmware_version: 55,
+          serial: "B-SERIAL",
+          product: "QA402 Audio Analyzer",
+          sample_rates: [48000],
+          supports_flash: false,
+          capabilities: {} as never,
+          is_virtual: false,
+        },
+      },
+    };
+    return {
+      ...s,
+      devices: { ...s.devices, sessions: { ...s.devices.sessions, "slot-1": sess } },
+    };
+  }
+
+  /** Recording ipc gated on BOTH measure verbs, so a THD sweep and a
+   * wow-flutter run can each be held in flight independently and released
+   * in either order. */
+  function recordingIpc(): {
+    ipc: Ipc;
+    calls: { cmd: string; args: unknown }[];
+    release: () => void;
+  } {
+    const calls: { cmd: string; args: unknown }[] = [];
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseGate = r));
+    const ipc: Ipc = {
+      async call<K extends keyof Commands>(
+        cmd: K,
+        args: Commands[K]["args"]
+      ): Promise<Commands[K]["result"]> {
+        calls.push({ cmd, args });
+        if (cmd === "measure_thd_vs_frequency") {
+          await gate;
+          return {
+            points: [
+              { frequency: 1000, level_dbfs: -6, thd_percent: 1e-4, thd_db: -120, thd_n_percent: 3e-4, thd_n_db: -110, fundamental_dbfs: -6 },
+            ],
+            swept: "frequency",
+          } as Commands[K]["result"];
+        }
+        if (cmd === "measure_wow_flutter") {
+          await gate;
+          return {
+            reference_freq: 3150,
+            weighted_rms_percent: 0.011,
+            unweighted_rms_percent: 0.013,
+            peak_weighted_percent: 0.02,
+            static_offset_hz: 0.05,
+            demod_rate: 1000,
+            deviation_series: [],
+            rate_hz: [0, 2, 4, 6, 200],
+            spectrum_percent: [0, 0.005, 0.013, 0.004, 0.0001],
+          } as Commands[K]["result"];
+        }
+        return null as Commands[K]["result"];
+      },
+    };
+    return { ipc, calls, release: () => releaseGate() };
+  }
+
+  /** Mounts `initProgramEvents` and returns the LAST-registered
+   * `thd-sweep-progress` handler — same lookup the F-suite's own
+   * "review note #8" test uses. */
+  async function progressHandlerOf(
+    store: Store<AppState>
+  ): Promise<(e: { payload: { done: number; total: number; device_id?: string | null } }) => void> {
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const regs = (listen as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => c[0] === "thd-sweep-progress"
+    );
+    const handler = regs[regs.length - 1]?.[1] as (e: {
+      payload: { done: number; total: number; device_id?: string | null };
+    }) => void;
+    expect(handler, "initProgramEvents must have mounted the listener").toBeDefined();
+    return handler;
+  }
+
+  it("two running programs + an event with NO device_id: dropped for both (nothing to discriminate by, and a guess risks the wrong row)", async () => {
+    const store = new Store(
+      withConnectedSlot1(withDevice(initialState(), { status: "connected" }))
+    );
+    const progressHandler = await progressHandlerOf(store);
+    const { ipc, release } = recordingIpc();
+    const a = addProgram(store, "thd");
+    const b = addProgram(store, "thd");
+    setProgramDeviceSlot(store, b, 1);
+
+    const runA = runProgram(store, ipc, a);
+    await flush();
+    const second = recordingIpc();
+    const runB = runProgram(store, second.ipc, b);
+    await flush();
+    expect(store.get().programs.byId[a].run).toBe("running");
+    expect(store.get().programs.byId[b].run).toBe("running");
+
+    progressHandler({ payload: { done: 1, total: 9 } }); // no device_id at all
+    expect(store.get().programs.byId[a].progress).toBeNull();
+    expect(store.get().programs.byId[b].progress).toBeNull();
+
+    release();
+    second.release();
+    await runA;
+    await runB;
+  });
+
+  it("two running programs + a device_id matching NEITHER: dropped for both", async () => {
+    const store = new Store(
+      withConnectedSlot1(withDevice(initialState(), { status: "connected" }))
+    );
+    const progressHandler = await progressHandlerOf(store);
+    const { ipc, release } = recordingIpc();
+    const a = addProgram(store, "thd");
+    const b = addProgram(store, "thd");
+    setProgramDeviceSlot(store, b, 1);
+
+    const runA = runProgram(store, ipc, a);
+    await flush();
+    const second = recordingIpc();
+    const runB = runProgram(store, second.ipc, b);
+    await flush();
+
+    progressHandler({ payload: { done: 1, total: 9, device_id: "usb/NEITHER-A-NOR-B" } });
+    expect(store.get().programs.byId[a].progress).toBeNull();
+    expect(store.get().programs.byId[b].progress).toBeNull();
+
+    release();
+    second.release();
+    await runA;
+    await runB;
+  });
+
+  it("two running programs + a device_id matching ONE: routes to that program's row only, the other stays untouched (provenance stays per-device under concurrency)", async () => {
+    const store = new Store(
+      withConnectedSlot1(withDevice(initialState(), { status: "connected" }))
+    );
+    const progressHandler = await progressHandlerOf(store);
+    const { ipc, release } = recordingIpc();
+    const a = addProgram(store, "thd"); // follows focus -> slot 0, no deviceId
+    const b = addProgram(store, "thd");
+    setProgramDeviceSlot(store, b, 1); // usb/B
+
+    const runA = runProgram(store, ipc, a);
+    await flush();
+    const second = recordingIpc();
+    const runB = runProgram(store, second.ipc, b);
+    await flush();
+
+    progressHandler({ payload: { done: 4, total: 9, device_id: "usb/B" } });
+    expect(store.get().programs.byId[b].progress).toBe("4/9");
+    expect(store.get().programs.byId[a].progress).toBeNull();
+
+    release();
+    second.release();
+    await runA;
+    await runB;
+  });
+
+  it("a single running program on an UNADOPTED session (slot 0, deviceId still null) accepts a progress event carrying SOME device_id — nothing to discriminate by (the F1 acceptance rule, narrowed but not lost)", async () => {
+    // Slot 0 connected but not yet id-adopted — the one-enumeration window
+    // acquisition.test.ts and the F-suite both document.
+    const store = new Store(withDevice(initialState(), { status: "connected" }));
+    const progressHandler = await progressHandlerOf(store);
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    expect(store.get().programs.byId[id].run).toBe("running");
+
+    progressHandler({ payload: { done: 2, total: 5, device_id: "usb/whatever-reported-it" } });
+    expect(store.get().programs.byId[id].progress).toBe("2/5");
+
+    release();
+    await run;
+  });
+
+  it("two wow-flutter programs on two devices land their DISTINCT results on their own trace only — no cross-program bleed under concurrency", async () => {
+    const store = new Store(
+      withConnectedSlot1(
+        withDevice(initialState(), {
+          status: "connected",
+          info: {
+            model: "QA402",
+            firmware_version: 55,
+            serial: "A-SERIAL",
+            product: "QA402 Audio Analyzer",
+            sample_rates: [48000],
+            supports_flash: false,
+            capabilities: {} as never,
+            is_virtual: false,
+          },
+        })
+      )
+    );
+    const { ipc, release } = recordingIpc();
+    const a = addProgram(store, "wowflutter");
+    const b = addProgram(store, "wowflutter");
+    setProgramDeviceSlot(store, b, 1);
+
+    const runA = runProgram(store, ipc, a);
+    await flush();
+    const second = recordingIpc();
+    const runB = runProgram(store, second.ipc, b);
+    await flush();
+    expect(store.get().programs.byId[a].run).toBe("running");
+    expect(store.get().programs.byId[b].run).toBe("running");
+
+    // B finishes first — out of start order, the concurrency case that
+    // would expose a shared/global-scoped landing bug.
+    second.release();
+    await runB;
+    expect(store.get().traces.byId[b].capture?.device?.serial).toBe("B-SERIAL");
+    const bProg = store.get().programs.byId[b];
+    expect(bProg.kind === "sweep" ? bProg.wowResult?.weightedPercent : null).toBeCloseTo(0.011);
+    // A is STILL running and has no result yet — B's landing must not have
+    // touched it.
+    expect(store.get().programs.byId[a].run).toBe("running");
+    const aProgMidway = store.get().programs.byId[a];
+    expect(aProgMidway.kind === "sweep" ? aProgMidway.wowResult : null).toBeNull();
+
+    release();
+    await runA;
+    const aProg = store.get().programs.byId[a];
+    expect(aProg.kind === "sweep" ? aProg.wowResult?.weightedPercent : null).toBeCloseTo(0.011);
+    // A's capture carries slot 0's OWN identity — proving each program
+    // landed with its OWN session's provenance, not a shared/last-write-
+    // wins value clobbered by B finishing first.
+    expect(store.get().traces.byId[a].capture?.device?.serial).toBe("A-SERIAL");
+  });
+
+  it("setProgramDeviceSlot is refused while the program is RUNNING — the live run's binding is runKey, captured at entry, and must not be re-aimed under it", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    const { ipc, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    setProgramDeviceSlot(store, id, 1);
+    expect(store.get().programs.byId[id].deviceSlot).toBe(1);
+
+    const run = runProgram(store, ipc, id); // pinned to slot 1, no focus gesture needed
+    await flush();
+    expect(store.get().programs.byId[id].run).toBe("running");
+
+    setProgramDeviceSlot(store, id, 0); // must be a no-op while running
+    expect(store.get().programs.byId[id].deviceSlot).toBe(1);
+
+    release();
+    await run;
+    // Idle again — NOW the pin can move.
+    setProgramDeviceSlot(store, id, 0);
+    expect(store.get().programs.byId[id].deviceSlot).toBe(0);
+  });
+});

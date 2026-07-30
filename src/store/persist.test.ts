@@ -197,6 +197,34 @@ describe("v5 document", () => {
       expect(applyWorkspaceDoc(freshStore(), stubIpc, doc!)).toBe(true);
     }
   });
+
+  /** Tester gate follow-up for issue #25 lot F4: every template's programs
+   * predate `deviceSlot`/`runKey` (seeded via `templates.ts`'s own `sweep()`
+   * helper, which the F4 diff touched to add both fields explicitly) — a
+   * template-seeded doc must round-trip through load → snapshot with an
+   * IDENTICAL digest, the same rule every other in-version hook is held to
+   * (persist.test.ts's `capture provenance` describe above), and the two
+   * new fields must land at their documented defaults: `deviceSlot: null`
+   * (follows the focus — a template has no bench-specific pin to seed) and
+   * `runKey: null` (never persisted, even from a hand-built doc). */
+  it("every template's programs round-trip load → snapshot with an IDENTICAL digest; deviceSlot/runKey land at their defaults", () => {
+    let sawAProgram = false;
+    for (const t of templates()) {
+      const doc = migrate(JSON.parse(JSON.stringify(t.make())))!;
+      const progIds = Object.keys(doc.programs.byId);
+      if (progIds.length === 0) continue;
+      sawAProgram = true;
+      for (const id of progIds) {
+        expect(doc.programs.byId[id].deviceSlot, `${t.name}/${id}`).toBeNull();
+        expect(doc.programs.byId[id].runKey, `${t.name}/${id}`).toBeNull();
+      }
+      const dest = freshStore();
+      expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+      expect(snapshotWorkspace(dest.get()), t.name).toEqual(doc);
+    }
+    // A vacuous pass (every template programless) would prove nothing.
+    expect(sawAProgram).toBe(true);
+  });
 });
 
 describe("F6: reconcileHwTraces wired into applyWorkspaceDoc (issue #25 lot E3)", () => {

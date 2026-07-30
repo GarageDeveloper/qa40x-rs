@@ -10,7 +10,10 @@ import { Store } from "../store";
 import { initialState } from "../state";
 import type { Ipc } from "../../ipc/ipc";
 import { createMemoryWorkspaceStore, type WorkspaceStore } from "../wsstore";
+import { migrate, snapshotWorkspace } from "../persist";
+import { withDevice, withRun } from "./sessions.fixtures";
 import {
+  applyWorkspaceDoc,
   initAutoSave,
   loadWorkspaceNamed,
   restoreWorkspaceAtBoot,
@@ -280,5 +283,71 @@ describe("initAutoSave — writes are chained: overlapping debounce ticks never 
 
     await vi.advanceTimersByTimeAsync(3000); // drain the chain completely
     expect((await backing.loadCurrent())?.name).toBe("A");
+  });
+});
+
+/**
+ * Tester gate follow-up for issue #25 lot F4: `applyWorkspaceDoc`'s
+ * program-lock gate (`anyProgramLock`, `../selectors/session`) is BENCH-
+ * GLOBAL by intent, unlike `runProgram`'s own lock which flipped per-
+ * device this lot — a load replaces every program's result trace,
+ * whichever device is running it, so a lock on a NON-focused session (slot
+ * 1, say) must still refuse exactly like the pre-F4 single-device case.
+ * This consumer of `anyProgramLock` was not touched by the F4 diff, and
+ * had no direct test before it either — pinning it now closes both gaps.
+ */
+describe("applyWorkspaceDoc — the program-lock gate stays bench-global (anyProgramLock, unchanged by lot F4)", () => {
+  function docFor(s: ReturnType<typeof initialState>) {
+    return migrate(JSON.parse(JSON.stringify(snapshotWorkspace(s))))!;
+  }
+
+  it("a program lock on slot 1 refuses a load even though slot 1 is NOT focused — the toast names it a running measurement, and the bench is left untouched", () => {
+    let s = withDevice(initialState(), { status: "connected" });
+    // Splice in a second, connected session and lock IT — focus stays on
+    // slot 0 the whole time.
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...s.devices.sessions["slot-0"], slot: 1 },
+        },
+      },
+    };
+    s = withRun(s, { programLock: "some-program-id" }, "slot-1");
+    const store = new Store(s);
+    const before = store.get().workspace.name;
+
+    const doc = docFor(initialState());
+    const ok = applyWorkspaceDoc(store, stubIpc, { ...doc, name: "A different bench" });
+
+    expect(ok).toBe(false);
+    expect(
+      store
+        .get()
+        .ui.toasts.some((t) => t.message.includes("A measurement is running") && t.message.includes("stop it"))
+    ).toBe(true);
+    // The refusal is a true no-op — the bench name never moved.
+    expect(store.get().workspace.name).toBe(before);
+  });
+
+  it("no lock anywhere: the same doc loads cleanly (sanity sibling — the gate refuses on the lock, not on having two sessions)", () => {
+    let s = withDevice(initialState(), { status: "connected" });
+    s = {
+      ...s,
+      devices: {
+        ...s.devices,
+        sessions: {
+          ...s.devices.sessions,
+          "slot-1": { ...s.devices.sessions["slot-0"], slot: 1 },
+        },
+      },
+    };
+    const store = new Store(s);
+    const doc = docFor(initialState());
+    const ok = applyWorkspaceDoc(store, stubIpc, { ...doc, name: "A different bench" });
+    expect(ok).toBe(true);
+    expect(store.get().workspace.name).toBe("A different bench");
   });
 });
