@@ -263,15 +263,17 @@ impl DeviceRuntime {
     /// consume a stale Stop, never another program's pending one. Lock
     /// order: program gate → device mutex.
     ///
-    /// Honest scope (recorded lot-F limits): the gate covers the five
-    /// `measure_*` commands only — REST acquisitions and Rhai measurement
-    /// scripts drive the device through their own `Session`s WITHOUT it, so
-    /// they can still interleave with a gated program between its device
-    /// locks (pre-existing; `sweep_cancel` itself stays sound — no exempt
-    /// path writes it). And it is per-INVOKE: a frontend program made of
-    /// several invokes (a "both channels" THD sweep is two) releases and
-    /// re-claims between them — cross-invoke exclusivity stays the
-    /// frontend's program-lock job (lot F4).
+    /// Honest scope (recorded lot-F limits, narrowed by lot F4): the gate
+    /// covers the five `measure_*` commands AND a `script_run` with the
+    /// Measurement role (the guard travels into the spawned run and drops
+    /// with it — `ScriptControl::start`). Still exempt: REST acquisitions,
+    /// which drive the device through their own `Session`s and can
+    /// interleave with a gated program between its device locks
+    /// (pre-existing; `sweep_cancel` itself stays sound — no exempt path
+    /// writes it). And it is per-INVOKE for the measure commands: a
+    /// frontend program made of several invokes (a "both channels" THD
+    /// sweep is two) releases and re-claims between them — cross-invoke
+    /// exclusivity is the frontend's per-session program lock (lot F4).
     pub fn try_program_lock(&self) -> Result<ProgramGuard, DeviceError> {
         self.inner
             .program_gate

@@ -455,13 +455,37 @@ async fn script_run(
     device_id: Option<String>,
 ) -> Result<(), String> {
     let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    let role = role.unwrap_or_default();
+    let guard = claim_script_gate(&rt, role)?;
     let session = measurement::Session::new(
         rt.handle(),
         rt.generator().running_flag().clone(),
         rt.generator().stop_flag().clone(),
     );
     let ctl = { state.lock().await.script.clone() };
-    ctl.start(app, session, source, role.unwrap_or_default())
+    ctl.start(app, session, source, role, guard)
+}
+
+/// The lot-F4 role→gate mapping of `script_run`, extracted so the tests can
+/// pin it (the command itself takes a concrete `tauri::AppHandle`, out of
+/// MockRuntime's reach — the E1 bookkeeping note): a MEASUREMENT script
+/// drives the device exactly like the five `measure_*` commands and claims
+/// the same per-device gate, closing the recorded lot-F exemption — a
+/// Rhai-launched script can no longer interleave register I/O with a UI
+/// sweep on the SAME unit. The guard then travels into the spawned run and
+/// drops when it finishes (`ScriptControl::start` — unlike the per-invoke
+/// measure commands, a script run outlives its invoke). A SOURCE script
+/// never touches the device and stays exempt.
+fn claim_script_gate(
+    rt: &device::DeviceRuntime,
+    role: dashboard::ScriptRole,
+) -> Result<Option<device::ProgramGuard>, String> {
+    match role {
+        dashboard::ScriptRole::Measurement => {
+            Ok(Some(rt.try_program_lock().map_err(|e| e.to_string())?))
+        }
+        dashboard::ScriptRole::Source => Ok(None),
+    }
 }
 
 /// Request the running script to stop (takes effect at its next operation).
@@ -1619,6 +1643,44 @@ mod command_arg_tests {
         assert!(
             rt.sweep_cancel().load(Ordering::SeqCst),
             "the refused invoke must not have consumed the batch's pending Stop"
+        );
+    }
+
+    /// Lot F4: `script_run`'s role→gate mapping (`claim_script_gate` — the
+    /// command body itself takes a concrete `tauri::AppHandle`, out of
+    /// MockRuntime's reach): a MEASUREMENT script claims the device's
+    /// program gate — so it refuses while a sweep holds the unit, and a
+    /// sweep refuses while the script's guard lives — while a SOURCE
+    /// script (device-free by construction) claims nothing, even on a busy
+    /// device.
+    #[test]
+    fn a_measurement_script_claims_the_device_program_gate_a_source_script_never_does() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let rt = state.blocking_lock().devices.default_runtime();
+
+        let guard = claim_script_gate(&rt, dashboard::ScriptRole::Measurement)
+            .expect("a free gate must be claimable");
+        assert!(guard.is_some(), "a measurement script must hold the gate");
+        let err = claim_script_gate(&rt, dashboard::ScriptRole::Measurement)
+            .expect_err("a second measurement script on the same device must refuse");
+        assert!(
+            err.contains("A measurement program is already running on this device"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            claim_script_gate(&rt, dashboard::ScriptRole::Source)
+                .expect("a source script must not be refused by a busy gate")
+                .is_none(),
+            "a source script must never claim the gate"
+        );
+        // Dropping the guard is the spawned run finishing
+        // (`ScriptControl::start` moves it into the task) — the device
+        // frees for the next program.
+        drop(guard);
+        assert!(
+            claim_script_gate(&rt, dashboard::ScriptRole::Measurement)
+                .expect("the gate must be free again after the run")
+                .is_some()
         );
     }
 

@@ -1060,12 +1060,20 @@ impl ScriptControl {
     /// frames, and completion stream to the frontend as `script-log` /
     /// `script-frame` / `script-state` events. One script at a time,
     /// bench-wide.
+    ///
+    /// `guard` is the device's claimed program gate (issue #25 lot F4) —
+    /// the caller claims it for a measurement run (`None` for a device-free
+    /// source run). It is MOVED into the spawned task so it releases when
+    /// the run actually finishes, not when this call returns; a refused
+    /// start (size, already-running) drops it immediately on the error
+    /// path, holding nothing.
     pub fn start(
         &self,
         app: tauri::AppHandle,
         session: Session,
         source: String,
         role: ScriptRole,
+        guard: Option<crate::device::runtime::ProgramGuard>,
     ) -> Result<(), String> {
         if source.len() > MAX_SOURCE_BYTES {
             return Err(format!("script too large (>{MAX_SOURCE_BYTES} bytes)"));
@@ -1100,6 +1108,9 @@ impl ScriptControl {
                     capture_sink,
                 ));
                 tokio::task::spawn_blocking(move || {
+                    // Moved in even for a source run (always None today):
+                    // a guard must never outlive-or-underlive its run.
+                    let _guard = guard;
                     let res = run_source_script(env, &source);
                     finish_run(&app, &running, res);
                 });
@@ -1114,6 +1125,9 @@ impl ScriptControl {
                 let cancel = CancelToken::from_flag(self.cancel.clone());
                 let mut session = session;
                 tokio::spawn(async move {
+                    // The device's program gate (lot F4) releases HERE —
+                    // when the run finishes, not when `start` returned.
+                    let _guard = guard;
                     let res = program.run(&mut session, &cancel).await;
                     finish_run(&app, &running, res);
                 });
