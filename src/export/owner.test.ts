@@ -8,6 +8,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DeviceMeta } from "../gen";
 import {
+  DEFAULT_SWEEP_PARAMS,
   defaultTile,
   HW_TRACE_IDS,
   hwTraceIds,
@@ -386,5 +387,136 @@ describe("tile owner wiring (lot F5 review round)", () => {
     s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-1": slot1Tile() } } };
     const { footer } = tileImageText(s, "tile-1");
     expect(footer[0]).toContain("no device");
+  });
+});
+
+/**
+ * A program bound to a device by `runKey` (mid-run — F4) or `deviceSlot`
+ * (idle pin), drawn in a tile while the FOCUS sits elsewhere: the tile-level
+ * wiring (tileProvenanceContext / tileImageText) must follow the same
+ * structural binding traceExportOwner already proves at the selector level
+ * — nothing in the tile-anchor/roll-call layer re-derives ownership from
+ * the focus instead.
+ */
+describe("tile export: a program bound to a non-focused device (lot F5)", () => {
+  beforeEach(() => clearAllFrames());
+
+  /** Program `p1`'s result trace carries fd data; `binding` is either a
+   * live runKey (mid-run, no landing-stamp capture yet) or an idle
+   * deviceSlot pin — both structural, neither reads the focus. */
+  function stateWithProgram(binding: { runKey?: string; deviceSlot?: number }): AppState {
+    let s = twoDeviceState(); // focus stays slot 0 (the default)
+    putFrames("p1", 1, {
+      fd: { freqs: Float64Array.from([100]), magDb: Float64Array.from([-6]) },
+    });
+    s = {
+      ...s,
+      traces: {
+        order: [...s.traces.order, "p1"],
+        byId: {
+          ...s.traces.byId,
+          p1: {
+            id: "p1",
+            label: "Sweep 1",
+            color: "#fff",
+            source: { kind: "program" },
+            domains: ["fd"],
+            seq: 1,
+            offsetDb: null,
+            capture: null,
+          },
+        },
+      },
+      programs: {
+        order: ["p1"],
+        byId: {
+          p1: {
+            id: "p1",
+            kind: "sweep",
+            run: binding.runKey ? "running" : "idle",
+            progress: binding.runKey ? "1/2" : null,
+            startedAtMs: binding.runKey ? 1000 : null,
+            deviceSlot: binding.deviceSlot ?? null,
+            runKey: binding.runKey ?? null,
+            params: DEFAULT_SWEEP_PARAMS,
+          },
+        },
+      },
+    };
+    return s;
+  }
+
+  function programTile(): TileConfig {
+    return defaultTile("tile-p", "sweep", ["p1"]);
+  }
+
+  it("tileProvenanceContext: a RUNNING program (runKey) anchors on its bound device, not the focus", () => {
+    const s = stateWithProgram({ runKey: SLOT1 });
+    const ctx = tileProvenanceContext(s, programTile());
+    expect(ctx.owner?.info?.serial).toBe("B_SER");
+  });
+
+  it("tileProvenanceContext: an IDLE pinned program (deviceSlot) anchors on its pin, not the focus", () => {
+    const s = stateWithProgram({ deviceSlot: 1 });
+    const ctx = tileProvenanceContext(s, programTile());
+    expect(ctx.owner?.info?.serial).toBe("B_SER");
+  });
+
+  it("tileImageText: a running program's footer names its bound device while the focus sits on slot 0", () => {
+    let s = stateWithProgram({ runKey: SLOT1 });
+    s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-p": programTile() } } };
+    const { footer } = tileImageText(s, "tile-p");
+    expect(footer[0]).toContain("B_SER");
+    expect(footer[0]).toContain("192000 Hz");
+    expect(footer[0].includes("A_SER")).toBe(false);
+  });
+});
+
+/**
+ * The single-device bench is the common case F5 must leave untouched: no
+ * slot-1 session exists at all, so every trace's owner resolves to
+ * "unknown" and falls back to the focused device — exactly the pre-F5
+ * shape. Pinned here at the export.ts wiring level (ownerDeviceFor via
+ * tileProvenanceContext/tileImageText), not just the selector
+ * (traceExportOwner's own "unknown -> focused" pin already lives in
+ * provenance.test.ts).
+ */
+describe("single-device bench: byte-identical to the pre-F5 focused path (lot F5)", () => {
+  beforeEach(() => clearAllFrames());
+
+  function oneDeviceState(): AppState {
+    let s = initialState();
+    s = withDevice(s, {
+      status: "connected",
+      info: info("QA403", "SOLO_SER"),
+      config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+      offsets: { input_l: 1, input_r: 2, output_l: 3, output_r: 4, calibrated: true },
+    });
+    putFrames(HW_TRACE_IDS.inputL, 1, {
+      fd: { freqs: Float64Array.from([100]), magDb: Float64Array.from([-6]) },
+    });
+    s.traces.byId[HW_TRACE_IDS.inputL] = {
+      ...s.traces.byId[HW_TRACE_IDS.inputL],
+      seq: 1,
+      domains: ["fd"],
+      capture: null, // no capture yet — the "unknown owner" path
+    };
+    return s;
+  }
+
+  it("tileProvenanceContext's owner is exactly the focused device (no slot-1 to disagree with it)", () => {
+    const s = oneDeviceState();
+    const tile = defaultTile("tile-solo", "spectrum", [HW_TRACE_IDS.inputL]);
+    const ctx = tileProvenanceContext(s, tile);
+    expect(ctx.owner?.info?.serial).toBe("SOLO_SER");
+  });
+
+  it("tileImageText's footer is unchanged from the focused-device wording", () => {
+    let s = oneDeviceState();
+    const tile = defaultTile("tile-solo", "spectrum", [HW_TRACE_IDS.inputL]);
+    s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-solo": tile } } };
+    const { footer } = tileImageText(s, "tile-solo");
+    expect(footer[0]).toContain("SOLO_SER");
+    expect(footer[0]).toContain("48000 Hz");
   });
 });

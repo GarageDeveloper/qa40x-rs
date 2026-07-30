@@ -17,8 +17,14 @@ import {
 import { mintSession } from "../actions/devices";
 import { reconcileHwTraces } from "../actions/traces";
 import { withDevice } from "../actions/sessions.fixtures";
+import { applyWorkspaceDoc } from "../actions/workspace";
+import { migrate, snapshotWorkspace } from "../persist";
+import { Store } from "../store";
+import type { Ipc } from "../../ipc/ipc";
 import { focusedDevice } from "./session";
 import { exportDeviceRollCall, exportOwnerDevice, traceExportOwner } from "./provenance";
+
+const stubIpc: Ipc = { call: () => Promise.resolve(null as never) };
 
 const SLOT1 = sessionKeyForSlot(1);
 
@@ -192,6 +198,17 @@ describe("traceExportOwner — origin walk & identity revival", () => {
     expect(traceExportOwner(s, "tr1")).toMatchObject({ kind: "session", key: SLOT1 });
   });
 
+  it("a transform of a FROZEN COPY of a slot-1 endpoint resolves through TWO hops", () => {
+    // transform -> input -> memory -> frozenFrom -> the slot-1 endpoint: the
+    // walk must not stop after the first hop (a user routinely freezes a
+    // curve, then applies a weighting/derivative transform on top of the
+    // freeze — both hops have to survive to name the right device).
+    let s = twoDeviceState();
+    s = addTrace(s, trace("mem1", { kind: "memory", frozenFrom: hwTraceIds(1).inputL }));
+    s = addTrace(s, trace("tr1", { kind: "transform", input: "mem1", steps: [] }));
+    expect(traceExportOwner(s, "tr1")).toMatchObject({ kind: "session", key: SLOT1 });
+  });
+
   it("a copy whose origin was deleted revives by IDENTITY (capture rides the copy)", () => {
     const s = addTrace(
       twoDeviceState(),
@@ -294,5 +311,79 @@ describe("exportOwnerDevice / exportDeviceRollCall", () => {
       "QA403 A_SER",
       "QA402 B_SER",
     ]);
+  });
+});
+
+/**
+ * A saved-then-reloaded doc is the one path none of the above exercises:
+ * `snapshotWorkspace` zeroes most captures with their data (persist.ts) and
+ * `applyWorkspaceDoc` never touches `devices.sessions` (a load replaces the
+ * BENCH, not the session) — so these confirm the SURVIVING identity still
+ * resolves correctly against the (unchanged) live sessions after a reload,
+ * not just before one.
+ */
+describe("traceExportOwner — after a save/reload round trip (persist.ts)", () => {
+  it("a slot-1 endpoint's capture survives snapshot -> JSON -> migrate -> applyWorkspaceDoc and still resolves its LIVE session", () => {
+    const s = withCapture(twoDeviceState(), hwTraceIds(1).inputL, capture("QA402", "B_SER"));
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(s))))!;
+    // Reload onto the SAME two live sessions (a load replaces the bench,
+    // never device state) — a fresh Store, not the one that was saved.
+    const dest = new Store(twoDeviceState(), { freeze: true });
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    const reloaded = dest.get();
+    expect(reloaded.traces.byId[hwTraceIds(1).inputL].capture).toEqual(capture("QA402", "B_SER"));
+    expect(traceExportOwner(reloaded, hwTraceIds(1).inputL)).toMatchObject({
+      kind: "session",
+      key: SLOT1,
+    });
+  });
+
+  it("a frozen copy's identity survives reload and still revives by IDENTITY once its origin is gone", () => {
+    let s = twoDeviceState();
+    s = addTrace(
+      s,
+      trace("mem1", { kind: "memory", frozenFrom: "gone" }, { capture: capture("QA402", "B_SER") })
+    );
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(s))))!;
+    const dest = new Store(twoDeviceState(), { freeze: true });
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    const reloaded = dest.get();
+    expect(reloaded.traces.byId["mem1"].capture).toEqual(capture("QA402", "B_SER"));
+    expect(traceExportOwner(reloaded, "mem1")).toMatchObject({ kind: "session", key: SLOT1 });
+  });
+
+  it("a program pinned to deviceSlot survives reload (runKey and its trace's capture both zeroed) and still resolves to that slot", () => {
+    let s = twoDeviceState();
+    s = addTrace(s, trace("p1", { kind: "program" }, { capture: capture("QA402", "B_SER") }));
+    s = {
+      ...s,
+      programs: {
+        order: ["p1"],
+        byId: {
+          p1: {
+            id: "p1",
+            kind: "sweep",
+            run: "running",
+            progress: "1/2",
+            startedAtMs: 1000,
+            deviceSlot: 1,
+            runKey: SLOT1,
+            params: DEFAULT_SWEEP_PARAMS,
+          },
+        },
+      },
+    };
+    const doc = migrate(JSON.parse(JSON.stringify(snapshotWorkspace(s))))!;
+    // The doc sheds every live-run fact...
+    expect(doc.programs.byId["p1"].runKey).toBeNull();
+    expect(doc.programs.byId["p1"].run).toBe("idle");
+    expect(doc.traces.byId["p1"].capture).toBeNull();
+    // ...but the user's PIN is not a live-run fact — it persists, and is
+    // exactly what traceExportOwner needs once runKey/capture are gone.
+    expect(doc.programs.byId["p1"].deviceSlot).toBe(1);
+
+    const dest = new Store(twoDeviceState(), { freeze: true }); // focus stays slot 0
+    expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
+    expect(traceExportOwner(dest.get(), "p1")).toMatchObject({ kind: "session", key: SLOT1 });
   });
 });
