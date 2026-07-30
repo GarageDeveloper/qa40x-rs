@@ -92,6 +92,9 @@ describe("sourceTargetVMs — row list and per-target state", () => {
   it("the implicit focus-following matrix checks the focus row with the legacy route", () => {
     const s = bench([sine("a", { route: "both" })]);
     const [focus, slot0] = sourceTargetVMs(s, "a");
+    // Self-explanatory label (Raphaël round 2 — "Focused device (#1)" said
+    // nothing about what the row WAS).
+    expect(focus.label).toBe("Follows focus — #1 now");
     expect(focus.present).toBe(true);
     expect(focus.left).toBe(true);
     expect(focus.right).toBe(true);
@@ -288,6 +291,21 @@ describe("snappedReadout", () => {
     const r = snappedReadout(sourceTargetVMs(s, "a"), 1000);
     expect(r.text).toBe("→ —");
     expect(r.title).toBe("Not routed to any connected device");
+  });
+
+  it("a fully-OFF matrix reads — too: a silent source must not print a confident grid value (Raphaël round 2)", () => {
+    const s = bench(
+      [
+        sine("a", {
+          targets: [
+            { slot: null, route: "off" },
+            { slot: 1, route: "off" },
+          ],
+        }),
+      ],
+      [{ slot: 1, rate: 192000 }]
+    );
+    expect(snappedReadout(sourceTargetVMs(s, "a"), 1000).text).toBe("→ —");
   });
 
   it("coherent-gen OFF: two rates below both Nyquists play the SAME unsnapped ask — the single-value form, not '2 values'", () => {

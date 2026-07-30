@@ -31,7 +31,7 @@ export interface SourceTargetVM {
   tag: TargetTag;
   slot: number | null;
   key: SessionKey;
-  /** Row label: `Focused device (#1)` / `#2 QA402 · 0DE0` / `#3 — not connected`. */
+  /** Row label: `Follows focus — #1 now` / `#2 QA402 · 0DE0` / `#3 — not connected`. */
   label: string;
   /** The unit's display name (alias-aware), "" for an absent slot. */
   deviceName: string;
@@ -116,7 +116,7 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
     const deviceName = sess ? sessionLabel(s, key) : "";
     const label =
       slot === null
-        ? `Focused device (#${n})`
+        ? `Follows focus — #${n} now`
         : sess
           ? `#${n} ${deviceName}`
           : `#${n} — not connected`;
@@ -199,7 +199,7 @@ export function routingSummary(vms: SourceTargetVM[]): { text: string; title: st
   });
   const lines = present.map((v) => {
     if (!v.live) return `#${v.n}: not connected — nothing plays there`;
-    const name = v.slot === null ? `Focused device (${v.deviceName})` : `#${v.n} ${v.deviceName}`;
+    const name = v.slot === null ? `Follows focus (${v.deviceName})` : `#${v.n} ${v.deviceName}`;
     return `${name}: ${routeLong(v.route)}${v.routable ? "" : " (device id not adopted yet)"}`;
   });
   return {
@@ -221,7 +221,12 @@ export function snappedReadout(
   vms: SourceTargetVM[],
   askedHz: number
 ): { text: string; title: string } {
-  const live = vms.filter((v) => v.present && v.live && v.playedHz !== null);
+  // Cells routed OFF don't count: a fully-silent matrix must read `→ —`,
+  // not print a confident grid value next to a source that drives nothing
+  // (Raphaël validation round 2 — it read as "the sine still plays").
+  const live = vms.filter(
+    (v) => v.present && v.live && v.route !== "off" && v.playedHz !== null
+  );
   const values = [...new Set(live.map((v) => v.playedHz as number))];
   if (values.length === 0) {
     return { text: "→ —", title: "Not routed to any connected device" };

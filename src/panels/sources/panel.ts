@@ -514,7 +514,16 @@ export function mountSourcesPanel(
     update: (node: HTMLElement, t: SourceTargetVM): void => {
       const name = node.querySelector<HTMLElement>(".sources__tgt-name")!;
       name.textContent = t.label;
-      name.title = t.label; // the full identity survives the ellipsis
+      // The full identity survives the ellipsis; the focus pseudo-row gets
+      // its explanation (Raphaël validation round 2: "Focused device (#1)"
+      // said nothing about WHAT it was).
+      name.title =
+        t.slot === null
+          ? "The default target: the source plays on whichever device is " +
+            `focused — right now ${t.deviceName || `#${t.n}`}. Check a device ` +
+            "row below instead to pin the source to that device, wherever " +
+            "the focus goes."
+          : t.label;
       const tgtL = node.querySelector<HTMLInputElement>(
         `[data-testid="src-tgt-l-${srcId}-${t.tag}"]`
       )!;
