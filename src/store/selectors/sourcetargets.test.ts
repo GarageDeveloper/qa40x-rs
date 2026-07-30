@@ -189,8 +189,13 @@ describe("sourceTargetVMs — row list and per-target state", () => {
     );
     s = withRun(s, { programLock: "prog-trace" }, "slot-1");
     const slot1 = sourceTargetVMs(s, "a").find((v) => v.tag === "1")!;
+    // Wording updated WITH the behavior (issue #25 lot F4): the F3 pin
+    // said "busy until it finishes" because the resume path never armed a
+    // session that was idle at program start — F4's release fan-out
+    // (runProgram → armSessionForSources) makes the deferred edit land, so
+    // the note may promise it.
     expect(slot1.note).toBe(
-      'measurement "program" is running — the device is busy until it finishes'
+      'measurement "program" is running — applies when it finishes'
     );
     expect(slot1.noteErr).toBe(false);
     // A row with NO cell on the locked session carries no note — nothing

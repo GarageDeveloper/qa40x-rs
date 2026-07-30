@@ -91,6 +91,8 @@ function sweep(
       run: "idle",
       progress: null,
       startedAtMs: null,
+      deviceSlot: null,
+      runKey: null,
       params: { ...DEFAULT_SWEEP_PARAMS, measurement, channel, ...over },
       // Always present (never `undefined`) — a template-seeded workspace
       // that gets saved and reloaded must digest identically; persist.ts's

@@ -420,9 +420,12 @@ select.field--small {
   margin: 0;
 }
 
-/* Progress pill of the running measurement program, floating over the
-   chart of any tile that draws its result trace. */
+/* Progress pill of the running measurement program(s), floating over the
+   chart of any tile that draws their result traces — one line per running
+   member program (issue #25 lot F4: programs run per device). */
 .tile__progress {
+  white-space: pre-line;
+  text-align: center;
   position: absolute;
   top: 8px;
   left: 50%;

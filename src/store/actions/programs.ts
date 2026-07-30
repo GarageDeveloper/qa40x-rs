@@ -2,16 +2,27 @@
  * Measurement-program actions (M4) — THE program lock, taken symmetrically
  * (the v1 suspendMixerForProgram policy, restated for the backend loop):
  *
- * A measurement program (sweep / measurement script) owns the device
- * exclusively — the one REAL hardware constraint (a single USB stream).
- * POLICY, deliberate: starting a program STOPS whichever loop owns the DAC
- * (the capture stream, or the gap-free output-only generator) and waits for
- * the backend to acknowledge (`stream_stop` returns only once the loop has
- * fully exited — never splice register I/O into a capture). The sources'
- * `playing` flags are USER INTENT and stay untouched: while the lock is
- * held every transport is disabled WITH THE PROGRAM'S NAME (legible, never
- * silently inert), and completion resumes exactly the session that ran
- * before — a one-shot measurement never costs the user their mix.
+ * A measurement program (sweep / measurement script) owns ITS DEVICE
+ * exclusively — the one REAL hardware constraint (a single USB stream per
+ * unit). Since lot F4 (issue #25) the lock is PER DEVICE: a program binds
+ * to one session at entry (`programSessionKey` — its `deviceSlot` pin, or
+ * the focus), and programs on different devices run concurrently, each
+ * with its own progress row. Two deliberate limits remain bench-global:
+ * SCRIPT programs (the backend `ScriptControl` is a single engine — one
+ * `running` flag, an arg-less `script_stop`, un-keyed `script-*` events;
+ * per-device scripts arrive with the Rhai device work, F5/F6) and the
+ * workspace-load / idle-enumeration gates (`anyProgramLock` — a load
+ * replaces every program's result trace, whichever device runs it).
+ *
+ * POLICY, deliberate: starting a program STOPS whichever loop owns that
+ * device's DAC (the capture stream, or the gap-free output-only generator)
+ * and waits for the backend to acknowledge (`stream_stop` returns only
+ * once the loop has fully exited — never splice register I/O into a
+ * capture). The sources' `playing` flags are USER INTENT and stay
+ * untouched: while the lock is held that session's transports are disabled
+ * WITH THE PROGRAM'S NAME (legible, never silently inert), and completion
+ * resumes exactly the session that ran before — a one-shot measurement
+ * never costs the user their mix.
  */
 import { listen } from "@tauri-apps/api/event";
 import type { Frame, SweepCurve } from "../../gen";
@@ -40,16 +51,21 @@ import type {
 import { DEFAULT_SWEEP_PARAMS, nextTraceColor } from "../state";
 import type { SessionKey } from "../sessionkey";
 import {
-  anyProgramLock,
   isRoutable,
   session,
   sessionArgs,
-  sessionKeys,
   updateRun,
 } from "../selectors/session";
+import {
+  programBlockReason,
+  programForDeviceId,
+  programSessionKey,
+  runningPrograms,
+} from "../selectors/programs";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncAllStreams } from "./stream";
 import { syncOutputOnly } from "./outputonly";
+import { armSessionForSources } from "./sources";
 import { toast } from "./ui";
 
 /* ------------------------------------------------------------------ */
@@ -94,6 +110,8 @@ export function addProgram(
           run: "idle",
           progress: null,
           startedAtMs: null,
+          deviceSlot: null,
+          runKey: null,
           source: DEFAULT_MEASURE_SCRIPT,
           role: "source",
         }
@@ -103,6 +121,8 @@ export function addProgram(
           run: "idle",
           progress: null,
           startedAtMs: null,
+          deviceSlot: null,
+          runKey: null,
           params: {
             ...DEFAULT_SWEEP_PARAMS,
             measurement: kind,
@@ -217,6 +237,20 @@ export function configureSweepProgram(
   );
 }
 
+/** Pin a program to a device SLOT — null follows the focus (the ⚙ dialogs'
+ * Device row, issue #25 lot F4). Refused while running: the live run's
+ * binding is `runKey`, captured at entry, and must not be re-aimed under
+ * it. */
+export function setProgramDeviceSlot(
+  store: Store<AppState>,
+  id: string,
+  slot: number | null
+): void {
+  const prog = store.get().programs.byId[id];
+  if (!prog || prog.run === "running") return;
+  patchProgram(store, "programs/device-slot", id, (p) => ({ ...p, deviceSlot: slot }));
+}
+
 /** Reconfigure a script program (source + name); the role tracks the text. */
 export function configureScriptProgram(
   store: Store<AppState>,
@@ -272,12 +306,20 @@ function routedArgs(store: Store<AppState>, key: SessionKey): { deviceId?: strin
   return sessionArgs(s, key);
 }
 
-/** The in-flight script run's resolver (`script-state` event) + trace id
- * + the session it runs against (progressively landed frames must stamp
- * THAT session's identity, wherever the focus has moved meanwhile). */
-let scriptDone: ((error: string | null) => void) | null = null;
-let activeScriptId: string | null = null;
-let activeScriptKey: SessionKey | null = null;
+/** The in-flight script run: trace id, the session it runs against
+ * (progressively landed frames must stamp THAT session's identity, wherever
+ * the focus has moved meanwhile), and the `script-state` resolver. ONE
+ * record per run, never three parallel globals (issue #25 lot F4, the F1
+ * review's eviction-window finding: a second script started while the first
+ * run's session was evicted overwrote the globals piecemeal and script #1's
+ * runProgram never resolved — now a second start refuses, and the `finally`
+ * only clears its OWN record). */
+interface ActiveScript {
+  id: string;
+  key: SessionKey;
+  done: ((error: string | null) => void) | null;
+}
+let activeScript: ActiveScript | null = null;
 
 /** The capture snapshot a program result lands with (issue #40): device
  * identity, the instant, and — for a sweep — the params that produced the
@@ -329,8 +371,8 @@ function landProgramFrames(
     fd?: ReturnType<typeof wireToFd>;
     sweep?: DecodedSweep;
   },
-  params?: SweepProgramParams,
-  key?: SessionKey
+  key: SessionKey,
+  params?: SweepProgramParams
 ): void {
   const seq = ++progSeq;
   if (!putFrames(id, seq, frames)) return;
@@ -340,12 +382,10 @@ function landProgramFrames(
   if (frames.fd) domains.push("fd");
   if (frames.sweep) domains.push("sweep");
   // Built OUTSIDE the reducer (clock impurity stays out of store.update).
-  const capture = programCapture(
-    store.get(),
-    key ?? store.get().devices.focus,
-    new Date().toISOString(),
-    params
-  );
+  // `key` is REQUIRED — the old focus fallback let a late script frame
+  // stamp the focused device's identity onto another device's curve (lot
+  // F4, closing the F1 residual).
+  const capture = programCapture(store.get(), key, new Date().toISOString(), params);
   store.update("programs/land", (s) => {
     const t = s.traces.byId[id];
     if (!t) return s;
@@ -496,7 +536,7 @@ async function runSweep(
     return;
   }
   const sweep = wireToSweep({ domain: "sweep", freqs, curves } as Frame, xUnit, yUnit);
-  if (sweep) landProgramFrames(store, id, { sweep }, p, key);
+  if (sweep) landProgramFrames(store, id, { sweep }, key, p);
   if (wowResult) {
     const result = wowResult;
     patchProgram(store, "programs/wow-result", id, (prog2) =>
@@ -523,8 +563,15 @@ async function runScript(
   const prog = store.get().programs.byId[id];
   if (prog?.kind !== "script") return;
   const label = store.get().traces.byId[id]?.label ?? id;
-  activeScriptId = id;
-  activeScriptKey = key;
+  if (activeScript !== null) {
+    // Defensive backstop only — runProgram's script gate refuses first
+    // (programBlockReason). A second start must NEVER clobber the in-flight
+    // run's record: the throw lands in runProgram's catch as a legible
+    // failure while script #1 keeps its resolver.
+    throw new Error("a script is already running — one script at a time");
+  }
+  const run: ActiveScript = { id, key, done: null };
+  activeScript = run;
   scriptRunLog.append(
     `— "${label}" started ${new Date().toLocaleTimeString()} —`,
     false,
@@ -532,7 +579,7 @@ async function runScript(
   );
   try {
     const done = new Promise<string | null>((resolve) => {
-      scriptDone = resolve;
+      run.done = resolve;
     });
     await ipc.call("script_run", {
       source: prog.source,
@@ -548,15 +595,15 @@ async function runScript(
       toast(store, "success", `Script "${label}" done.`);
     }
   } finally {
-    scriptDone = null;
-    activeScriptId = null;
-    activeScriptKey = null;
+    // Only OUR record — a concurrent start refused above, so this can only
+    // be `run` or null, but the guard keeps the invariant explicit.
+    if (activeScript === run) activeScript = null;
   }
 }
 
 /**
- * Start a program under the exclusive lock: stop the DAC's current owner,
- * run, then bring the session back exactly as it was.
+ * Start a program under its device's exclusive lock: stop that DAC's
+ * current owner, run, then bring the session back exactly as it was.
  */
 export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): Promise<void> {
   const s = store.get();
@@ -566,13 +613,22 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
   // validation: launching under one focus and finishing under another
   // stranded the lock on the wrong session forever — every keyed read,
   // update and wire call below uses THIS key, wherever the focus moves).
-  // The refusal itself stays BENCH-global (anyProgramLock, not this
-  // session's lock): concurrent programs on different devices need the
-  // per-device surfaces (progress routing, tile overlays) of lot F4 —
-  // until then one program at a time keeps every panel honest.
-  const key = s.devices.focus;
-  if (anyProgramLock(s) !== null) {
-    toast(store, "info", "Another measurement is running — try again once it finishes.");
+  // Lot F4: the key is the program's OWN resolution — its `deviceSlot` pin,
+  // or the focus (`programSessionKey`; `runKey` is null here, the program
+  // isn't running) — and the refusal is PER DEVICE (plus the bench-global
+  // script gate), so programs on different devices run concurrently.
+  const key = programSessionKey(s, prog);
+  if (programBlockReason(s, prog) !== null) {
+    const deviceBusy = (session(s, key)?.run.programLock ?? null) !== null;
+    // The device-busy wording is pinned (programs.test.ts, device-lock.pw.ts)
+    // — the historical single-device toast, byte-identical.
+    toast(
+      store,
+      "info",
+      deviceBusy
+        ? "Another measurement is running — try again once it finishes."
+        : "A script is already running — one script at a time."
+    );
     return;
   }
   const sess = session(s, key);
@@ -608,6 +664,10 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
               run: "running",
               progress: null,
               startedAtMs: performance.now(),
+              // The run's binding, readable from STATE (tile overlay,
+              // progress router, stopProgram) — a follows-focus program
+              // keeps it wherever the focus moves (lot F4).
+              runKey: key,
             },
           },
         },
@@ -675,6 +735,7 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
                       run: "idle" as const,
                       progress: null,
                       startedAtMs: null,
+                      runKey: null,
                     },
                   }
                 : {}),
@@ -693,6 +754,13 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     // silent"); `sync`'s own gates handle an evicted session.
     if (wasOutputOnly) syncOutputOnly(store, ipc, key);
     else if (wasStreaming) void startRun(store, ipc, { sessionKey: key });
+    // A session IDLE at program start used to STAY idle whatever happened
+    // during the run (the F3 lock-note residual: a routing edit noted
+    // "the device is busy until it finishes" was never auto-applied). The
+    // arm re-checks every gate itself — connected, no lock, not already
+    // streaming/output-only, an AUDIBLY-routed playing source — so a
+    // genuinely idle session stays idle (lot F4 item 8).
+    else armSessionForSources(store, ipc, key);
   }
 }
 
@@ -752,15 +820,17 @@ export function stopProgram(store: Store<AppState>, ipc: Ipc, id: string): void 
     // Both halves of the stop: the flag the front checks between passes AND
     // the backend cancel that aborts the in-flight batched capture between
     // USB blocks (maintainer report: ⏹ used to let the whole batch finish).
-    // Routed to the SESSION holding this program's lock (the sweep drives
-    // that device, wherever the focus is now). NO arg-less fallback
-    // (adversarial review MUST-FIX #2): a missing lock-holder means the
-    // program's session was evicted mid-run — an arg-less sweep_stop would
-    // trip the DEFAULT runtime's cancel and abort whatever unrelated sweep
-    // runs there; the frontend `sweepCancel` flag alone already ends this
-    // program's pass loop, and the orphaned invoke dies with its device.
+    // Routed by the program's OWN run binding (`runKey`, lot F4 — with N
+    // concurrent programs a lock-holder scan could land on the wrong
+    // session; the binding names this run's device, wherever the focus is
+    // now). NO arg-less fallback (adversarial review MUST-FIX #2): a
+    // binding whose session was evicted mid-run resolves to no live session
+    // — an arg-less sweep_stop would trip the DEFAULT runtime's cancel and
+    // abort whatever unrelated sweep runs there; the frontend `sweepCancel`
+    // flag alone already ends this program's pass loop, and the orphaned
+    // invoke dies with its device.
     const s = store.get();
-    const key = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
+    const key = prog.runKey !== null && session(s, prog.runKey) ? prog.runKey : undefined;
     sweepCancel.add(id);
     // isRoutable guards the sessionArgs THROW (lot F2): stopProgram runs
     // synchronously in a click handler, and a lock-holding session whose
@@ -782,10 +852,14 @@ export function stopProgram(store: Store<AppState>, ipc: Ipc, id: string): void 
 
 /** Merge one emitted script frame into the active program trace: the frame
  * lands in its domain slot; other domains are untouched, so progressive
- * multi-domain runs accumulate (v1 applyScriptFrame). */
+ * multi-domain runs accumulate (v1 applyScriptFrame). A frame with NO
+ * active run is DROPPED (lot F4, closing the F1 residual): a late
+ * `script-frame` arriving after the run's `finally` used to stamp the
+ * FOCUSED session's identity onto the curve — the four-offsets bug class,
+ * in provenance form. */
 function landScriptFrame(store: Store<AppState>, frame: Frame): void {
-  const id = activeScriptId;
-  if (!id) return;
+  if (!activeScript) return;
+  const { id, key } = activeScript;
   const existing = getFrames(id);
   landProgramFrames(
     store,
@@ -795,8 +869,7 @@ function landScriptFrame(store: Store<AppState>, frame: Frame): void {
       fd: frame.domain === "fd" ? wireToFd(frame) : existing?.fd,
       sweep: frame.domain === "sweep" ? wireToSweep(frame) : existing?.sweep,
     },
-    undefined,
-    activeScriptKey ?? undefined
+    key
   );
 }
 
@@ -806,7 +879,7 @@ export function initProgramEvents(store: Store<AppState>): void {
     scriptRunLog.append(e.payload.line, e.payload.error);
   });
   void listen<{ running: boolean; error: string | null }>("script-state", (e) => {
-    if (!e.payload.running) scriptDone?.(e.payload.error ?? null);
+    if (!e.payload.running) activeScript?.done?.(e.payload.error ?? null);
   });
   void listen<Frame>("script-frame", (e) => {
     landScriptFrame(store, e.payload);
@@ -821,24 +894,26 @@ export function initProgramEvents(store: Store<AppState>): void {
     // estimate until real per-point counts arrive.
     if (e.payload.done === 0) return;
     const s = store.get();
-    // The one running program, whichever session holds its lock — resolving
-    // through the FOCUSED session lost the progress the moment the user
-    // switched focus mid-sweep. (One UI program at a time bench-wide is
-    // runProgram's own refusal.)
-    const id = anyProgramLock(s);
-    if (!id || s.programs.byId[id]?.run !== "running") return;
-    // The payload names the swept unit (lot F1, additive field): a sweep
-    // driven OUTSIDE the UI (REST/Rhai) on another device must not write
-    // its counts into this program's row (review note #8). No payload id
-    // (old backend / e2e fake) or no adopted id on the holder ⇒ accept,
-    // as before — nothing to discriminate by.
+    // Routed by the payload's device id onto the running program BOUND to
+    // that unit (lot F4 — with N concurrent programs, "the one lock" no
+    // longer exists; lot F1 landed the `device_id` field as forward wiring
+    // for exactly this). A sweep driven OUTSIDE the UI (REST/Rhai) on a
+    // device the UI isn't sweeping matches no program and is dropped
+    // (review note #8). The F1 acceptance rule carries over narrowed to
+    // the unambiguous case: no payload id (old backend / e2e fake), or an
+    // id matching no binding while the LONE running program's session has
+    // no adopted id (nothing to discriminate by) ⇒ that one program;
+    // ambiguity drops the event rather than risk the wrong row.
     const evId = e.payload.device_id;
-    if (typeof evId === "string") {
-      const holder = sessionKeys(s).find((k) => session(s, k)?.run.programLock === id);
-      const holderId = holder ? (session(s, holder)?.deviceId ?? null) : null;
-      if (holderId !== null && holderId !== evId) return;
+    const running = runningPrograms(s);
+    let target = typeof evId === "string" ? programForDeviceId(s, evId) : null;
+    if (!target && running.length === 1) {
+      const holderId =
+        session(s, programSessionKey(s, running[0]))?.deviceId ?? null;
+      if (typeof evId !== "string" || holderId === null) target = running[0];
     }
-    patchProgram(store, "programs/progress", id, (p) => ({
+    if (!target) return;
+    patchProgram(store, "programs/progress", target.id, (p) => ({
       ...p,
       progress: `${e.payload.done}/${e.payload.total}`,
     }));

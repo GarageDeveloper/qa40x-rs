@@ -15,10 +15,10 @@
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import type { AppState, SweepProgramParams } from "../../store/state";
-import { configureSweepProgram } from "../../store/actions/programs";
-import { focusedDevice } from "../../store/selectors/session";
+import { configureSweepProgram, setProgramDeviceSlot } from "../../store/actions/programs";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
+import { programDeviceRow } from "./deviceselect";
 
 function row(label: string, field: HTMLElement, help?: string): HTMLElement {
   return el("label.dialog__row", { title: help ?? "" }, el("span.dialog__label", {}, label), field);
@@ -33,6 +33,10 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
 
   const name = el("input.field", { type: "text", "data-testid": `sweep-name-${id}` });
   name.value = s.traces.byId[id]?.label ?? "";
+
+  // Which device the sweep drives (issue #25 lot F4) — hidden on a
+  // single-device bench with no pin, so the dialog stays byte-identical.
+  const dev = programDeviceRow(store, id);
 
   const measurement = el("select.field", { "data-testid": `sweep-measurement-${id}` });
   measurement.append(
@@ -67,11 +71,18 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
   // [20, 0.9·Nyquist] and duration_secs to [1, 15] regardless of what's
   // asked — an unbounded input invites a silent surprise. `duration`'s own
   // max/min are further adjusted per-measurement in `syncVisibility()`
-  // since FR's chirp length has no such ceiling.
-  const nyquist = (focusedDevice(s).config?.sample_rate ?? 48000) / 2;
+  // since FR's chirp length has no such ceiling. Nyquist is the TARGET
+  // session's (lot F4): a program pinned to a 48 k device under a 384 kHz
+  // focus must clamp against ITS converter, not the focused one's — it
+  // follows the Device row's selection live.
+  let nyquist = dev.sampleRateHz() / 2;
   const wowReference = num(`sweep-wowref-${id}`, p.wowReferenceHz, {
     min: "20",
     max: String(Math.floor(nyquist * 0.9)),
+  });
+  dev.select.addEventListener("change", () => {
+    nyquist = dev.sampleRateHz() / 2;
+    wowReference.max = String(Math.floor(nyquist * 0.9));
   });
 
   // Level-axis-only note (issue #27 review finding #5): the batched capture
@@ -224,6 +235,7 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
           wowInputChannel: wowInputChannel.value as "left" | "right",
           wowGenerate: wowGenerate.checked,
         };
+        setProgramDeviceSlot(store, id, dev.value());
         configureSweepProgram(store, id, { label: name.value, params });
         dialog.close();
       },
@@ -239,6 +251,7 @@ export function openSweepDialog(store: Store<AppState>, ipc: Ipc, id: string): v
       "div.dialog__form",
       {},
       row("Name", name),
+      dev.row,
       row("Measurement", measurement),
       axisRow,
       startRow,

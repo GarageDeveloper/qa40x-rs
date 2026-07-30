@@ -9,9 +9,10 @@ import { SCRIPT_EXAMPLES } from "../../core/script-examples";
 import type { Ipc } from "../../ipc/ipc";
 import type { Store } from "../../store/store";
 import type { AppState } from "../../store/state";
-import { configureScriptProgram } from "../../store/actions/programs";
+import { configureScriptProgram, setProgramDeviceSlot } from "../../store/actions/programs";
 import { openDialog } from "../../ui/dialog";
 import { el } from "../../ui/dom";
+import { programDeviceRow } from "./deviceselect";
 import { MAX_LOG_LINES, scriptRunLog, type ScriptLogLine } from "./runlog";
 
 /* ------------------------------------------------------------------ */
@@ -66,6 +67,10 @@ export function openProgramScriptDialog(
 
   const name = el("input.field", { type: "text", "data-testid": `prog-script-name-${id}` });
   name.value = s.traces.byId[id]?.label ?? "";
+
+  // Which device the script's measure verbs drive (issue #25 lot F4) —
+  // hidden on a single-device bench with no pin (byte-identical dialog).
+  const dev = programDeviceRow(store, id);
 
   const editor = el("textarea.field.dialog__code.scriptdialog__text", {
     "data-testid": `prog-script-src-${id}`,
@@ -183,6 +188,7 @@ export function openProgramScriptDialog(
     {
       "data-testid": `prog-script-apply-${id}`,
       onclick: () => {
+        setProgramDeviceSlot(store, id, dev.value());
         configureScriptProgram(store, id, { label: name.value, source: editor.value });
         dialog.close();
       },
@@ -198,6 +204,7 @@ export function openProgramScriptDialog(
       "div.dialog__form.scriptdialog",
       {},
       el("label.dialog__row", {}, el("span.dialog__label", {}, "Name"), name),
+      dev.row,
       editor,
       el("div.scriptdialog__bar", {}, exampleSel, loadExample),
       el(

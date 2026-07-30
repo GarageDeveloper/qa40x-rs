@@ -32,12 +32,11 @@ import {
   setTriggerMode,
 } from "../../store/actions/trigger";
 import { autoChipSourceTraceId } from "../../store/selectors/layout";
+import { deviceForTrace, runForTrace } from "../../store/selectors/session";
 import {
-  deviceForTrace,
-  focusedDevice,
-  focusedRun,
-  runForTrace,
-} from "../../store/selectors/session";
+  programSampleRateHz,
+  runningPrograms,
+} from "../../store/selectors/programs";
 import { hwSlotOfTraceId } from "../../store/hwtraces";
 import { tileTriggerSourceId } from "../../store/selectors/trigger";
 import { freezeTile } from "../../store/actions/traces";
@@ -393,11 +392,13 @@ export function createTile(
   const chartHost = el("div.tile__chart", { "data-testid": `tile-chart-${tileId}` });
   const legend = el("div.tile__legend", { "data-testid": `tile-legend-${tileId}` });
 
-  // Progress overlay: while the EXCLUSIVE measurement program runs and its
-  // result trace is drawn on this tile, its progress floats over the chart
-  // (a transient DOM pill — the renderer stays blind to it). Exclusivity
-  // means at most one program runs, so a multi-sweep tile shows at most one
-  // overlay, labeled with the running program's name.
+  // Progress overlay: while a measurement program runs and its result
+  // trace is drawn on this tile, its progress floats over the chart (a
+  // transient DOM pill — the renderer stays blind to it). Since lot F4
+  // programs run per device: ONE pill, one line PER running member program
+  // (white-space: pre-line), each estimated on its OWN session's sample
+  // rate — the focused device's rate ran a slot-1 program's percentage 8×
+  // off under a 384 kHz focus (F1 bookkeeping).
   const progressEl = el("div.tile__progress", {
     "data-testid": `tile-progress-${tileId}`,
   });
@@ -405,19 +406,23 @@ export function createTile(
   const updateProgress = (): void => {
     const s = store.get();
     const tile = s.layout.tiles[tileId];
-    const lockId = focusedRun(s).programLock;
-    const prog = lockId ? s.programs.byId[lockId] : undefined;
-    const show =
-      !!tile &&
-      !!prog &&
-      prog.run === "running" &&
-      tile.traces.includes(prog.id) &&
-      !tile.hidden.includes(prog.id);
-    progressEl.hidden = !show;
-    if (show && prog) {
-      const label = s.traces.byId[prog.id]?.label ?? "measurement";
-      const sr = focusedDevice(s).config?.sample_rate ?? 48000;
-      progressEl.textContent = `▶ ${label} · ${programProgressText(prog, sr, performance.now())}`;
+    const progs = !tile
+      ? []
+      : runningPrograms(s).filter(
+          (p) => tile.traces.includes(p.id) && !tile.hidden.includes(p.id)
+        );
+    progressEl.hidden = progs.length === 0;
+    if (progs.length > 0) {
+      const now = performance.now();
+      setText(
+        progressEl,
+        progs
+          .map((p) => {
+            const label = s.traces.byId[p.id]?.label ?? "measurement";
+            return `▶ ${label} · ${programProgressText(p, programSampleRateHz(s, p), now)}`;
+          })
+          .join("\n")
+      );
     }
   };
   const progressTimer = setInterval(updateProgress, 300);

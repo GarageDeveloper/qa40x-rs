@@ -109,6 +109,10 @@ export function applyWorkspaceDoc(
               run: "idle" as const,
               progress: null,
               startedAtMs: null,
+              // A run binding is a live-session fact, never a loaded one
+              // (issue #25 lot F4) — `deviceSlot` (the user's pin) rides
+              // the meta spread above.
+              runKey: null,
             },
           ])
       ),

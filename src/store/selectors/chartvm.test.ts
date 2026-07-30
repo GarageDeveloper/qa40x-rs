@@ -744,6 +744,8 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       run: "idle",
       progress: null,
       startedAtMs: null,
+      deviceSlot: null,
+      runKey: null,
       params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
     };
     const t = s.layout.tiles["tile-1"];
@@ -814,6 +816,8 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       run: "idle",
       progress: null,
       startedAtMs: null,
+      deviceSlot: null,
+      runKey: null,
       params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
     };
     const t = s.layout.tiles["tile-1"];
@@ -858,6 +862,8 @@ describe("sweepVM per-curve legend hiding (v1 parity, M4)", () => {
       run: "idle",
       progress: null,
       startedAtMs: null,
+      deviceSlot: null,
+      runKey: null,
       params: { ...DEFAULT_SWEEP_PARAMS, measurement: "thd", axis: "level" },
     };
     const t = s.layout.tiles["tile-1"];

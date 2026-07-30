@@ -23,9 +23,18 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import type { Commands, Ipc } from "../../ipc/ipc";
 import { Store } from "../../store/store";
-import { initialState, type AppState } from "../../store/state";
-import { addProgram, configureSweepProgram } from "../../store/actions/programs";
-import { withDevice } from "../../store/actions/sessions.fixtures";
+import {
+  initialSession,
+  initialState,
+  type AppState,
+  type DeviceSession,
+} from "../../store/state";
+import {
+  addProgram,
+  configureSweepProgram,
+  setProgramDeviceSlot,
+} from "../../store/actions/programs";
+import { withDevice, withRun } from "../../store/actions/sessions.fixtures";
 import { mountProgramsPanel } from "./panel";
 
 function connectedState(): AppState {
@@ -101,6 +110,73 @@ describe("Programs panel (DOM) — the scalar-readout row survives a measurement
     expect(finalNode).toBe(wowNode);
     expect(finalNode!.textContent).toContain("weighted 0.098%");
     expect(finalNode!.textContent).not.toBe("not run yet");
+  });
+});
+
+describe("Programs panel (DOM) — per-device rows (issue #25 lot F4)", () => {
+  /** Two live sessions: slot 0 (focused) + an adopted slot 1. */
+  function twoDeviceState(): AppState {
+    let s = withDevice(initialState(), { status: "connected" });
+    const sess: DeviceSession = {
+      ...initialSession(1),
+      deviceId: "usb/B",
+      device: { ...initialSession(1).device, status: "connected" },
+    };
+    s = {
+      ...s,
+      devices: { ...s.devices, sessions: { ...s.devices.sessions, "slot-1": sess } },
+    };
+    return s;
+  }
+
+  it("two RUNNING programs on two devices render independent type lines and neither greys the other; a third on a busy device carries ITS runner's name", async () => {
+    const store = new Store(twoDeviceState());
+    const a = addProgram(store, "thd");
+    const b = addProgram(store, "thd");
+    const c = addProgram(store, "thd");
+    setProgramDeviceSlot(store, b, 1);
+
+    const host = document.createElement("div");
+    mountProgramsPanel(host, store, noopIpc);
+    await flush();
+
+    // The multi-device header note (the single-device wording is the
+    // historical string, asserted by its absence of "per device").
+    const note = host.querySelector(".programs__note")!;
+    expect(note.textContent).toBe("exclusive per device · one script at a time");
+
+    // a runs on slot 0, b runs on slot 1 — locks written the way
+    // runProgram's start update does.
+    store.update("test/two-running", (s) => {
+      const byId = { ...s.programs.byId };
+      byId[a] = { ...byId[a], run: "running" as const, runKey: "slot-0" };
+      byId[b] = { ...byId[b], run: "running" as const, runKey: "slot-1" };
+      return { ...s, programs: { ...s.programs, byId } };
+    });
+    store.update("test/locks", (s) =>
+      withRun(withRun(s, { programLock: a }), { programLock: b }, "slot-1")
+    );
+    await flush();
+
+    const typeA = host.querySelector(`[data-testid="prog-type-${a}"]`)!;
+    const typeB = host.querySelector(`[data-testid="prog-type-${b}"]`)!;
+    expect(typeA.textContent).toContain("on #1");
+    expect(typeB.textContent).toContain("on #2");
+    expect(typeA.textContent).toContain("running");
+    expect(typeB.textContent).toContain("running");
+
+    // Neither running row is disabled by the other.
+    const playA = host.querySelector<HTMLButtonElement>(`[data-testid="prog-play-${a}"]`)!;
+    const playB = host.querySelector<HTMLButtonElement>(`[data-testid="prog-play-${b}"]`)!;
+    expect(playA.disabled).toBe(false); // it's a ⏹ now
+    expect(playB.disabled).toBe(false);
+    expect(playA.textContent).toBe("⏹");
+    expect(playB.textContent).toBe("⏹");
+
+    // The third (follows-focus → slot 0) greys with slot 0's runner.
+    const playC = host.querySelector<HTMLButtonElement>(`[data-testid="prog-play-${c}"]`)!;
+    expect(playC.disabled).toBe(true);
+    expect(playC.title).toContain("is running on this device");
   });
 });
 

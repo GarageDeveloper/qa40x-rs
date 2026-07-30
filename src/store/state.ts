@@ -488,6 +488,21 @@ interface ProgramBase {
   /** performance.now() when the run started (null when idle) — drives the
    * time-based estimate while the batched capture gives no counts. */
   startedAtMs: number | null;
+  /** Which device this program targets (issue #25 lot F4): the backend
+   * runtime SLOT, never a device id — the same bench-portability rule as
+   * `SourceTarget.slot` (a doc carried to another bench must not be
+   * bench-bound). `null` = "follows the focus", the default and the
+   * single-device shape. Persisted with the program. */
+  deviceSlot: number | null;
+  /** The session the CURRENT run bound to, captured once at entry and
+   * cleared at completion (`runProgram`). Transient like `run`/`progress`/
+   * `startedAtMs` (reset on save/load, never trusted from a doc) — it is
+   * what the tile overlay, the progress router and `stopProgram` read,
+   * purely from state, after the focus (or the session itself) has moved:
+   * a follows-focus program keeps the binding it started with, and an
+   * evicted session's program still names its (now absent) slot rather
+   * than falling back to another device. */
+  runKey: SessionKey | null;
 }
 
 export interface SweepProgram extends ProgramBase {

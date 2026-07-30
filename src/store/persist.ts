@@ -211,7 +211,9 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
 
   const programsById: Record<string, ProgramMeta> = {};
   for (const [id, p] of Object.entries(s.programs.byId)) {
-    programsById[id] = { ...p, run: "idle", progress: null, startedAtMs: null };
+    // `deviceSlot` persists (the user's pin, slot-keyed like SourceTarget);
+    // `runKey` is a live-run binding, zeroed with the other transients.
+    programsById[id] = { ...p, run: "idle", progress: null, startedAtMs: null, runKey: null };
   }
 
   const triggers: Record<TraceId, TriggerSettings> = {};
@@ -481,6 +483,8 @@ export function importV4(ws: RawV4): WorkspaceDoc {
             run: "idle",
             progress: null,
             startedAtMs: null,
+            deviceSlot: null,
+            runKey: null,
             source: text,
             role: "measurement",
           };
@@ -519,6 +523,8 @@ export function importV4(ws: RawV4): WorkspaceDoc {
           run: "idle",
           progress: null,
           startedAtMs: null,
+          deviceSlot: null,
+          runKey: null,
           params: importSweepParams(source.params ?? {}),
           // Always present, never left `undefined` — see `addProgram`'s
           // same comment (a re-saved-then-reloaded import must digest
@@ -844,6 +850,15 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   }
   for (const prog of Object.values(doc.programs.byId)) {
     if (prog.startedAtMs === undefined) prog.startedAtMs = null;
+    // Issue #25 lot F4: a doc predating the program device pin follows the
+    // focus (the pre-F4 behavior); a slot pin survives the round trip, the
+    // run binding never does (same sanitization as `run`/`progress` above —
+    // integer slots only, anything else degrades to focus-following).
+    prog.deviceSlot =
+      typeof prog.deviceSlot === "number" && Number.isInteger(prog.deviceSlot) && prog.deviceSlot >= 0
+        ? prog.deviceSlot
+        : null;
+    prog.runKey = null;
     // Issue #27: a v5 doc saved before the level axis existed picks up the
     // frequency-axis defaults (every sweep it could have saved WAS one).
     if (prog.kind === "sweep") {

@@ -29,6 +29,7 @@ import {
   initProgramEvents,
   programLockReason,
   runProgram,
+  setProgramDeviceSlot,
   stopProgram,
   sweepEstimateSeconds,
   sweepLabel,
@@ -999,25 +1000,172 @@ describe("actions/programs — session-keyed programs (issue #25 lot F)", () => 
     await run;
   });
 
-  it("the refusal stays BENCH-global until F4's per-device surfaces: a program on slot 0 refuses one on slot 1", async () => {
+  it("the refusal is PER DEVICE (lot F4): a program on slot 0 runs concurrently with one on slot 1; a third on the busy device still refuses", async () => {
+    // Successor of the F1-era placeholder that pinned the bench-global
+    // refusal and named F4 as its removal point (replaced in place,
+    // deliberately — it asserted the very behavior this lot removes).
     const store = new Store(
       withConnectedSlot1(withDevice(initialState(), { status: "connected" }))
     );
     const { ipc, release } = recordingIpc();
     const a = addProgram(store, "thd");
     const b = addProgram(store, "thd");
+    const extra = addProgram(store, "thd");
 
-    const run = runProgram(store, ipc, a); // focus = slot-0
+    const runA = runProgram(store, ipc, a); // focus = slot-0 → binds slot 0
     await flush();
     focusOn(store, "slot-1");
     const second = recordingIpc();
-    await runProgram(store, second.ipc, b);
-    expect(store.get().programs.byId[b].run).toBe("idle");
-    expect(second.calls).toHaveLength(0);
+    const runB = runProgram(store, second.ipc, b); // binds slot 1 — concurrent
+    await flush();
+
+    // Both run, each under its OWN session's lock, each routed to its unit.
+    expect(store.get().programs.byId[a].run).toBe("running");
+    expect(store.get().programs.byId[b].run).toBe("running");
+    expect(session(store.get(), "slot-0")?.run.programLock).toBe(a);
+    expect(session(store.get(), "slot-1")?.run.programLock).toBe(b);
+    const sweepB = second.calls.find((c) => c.cmd === "measure_thd_vs_frequency");
+    expect(sweepB, "slot-1's sweep must have been invoked").toBeDefined();
+    expect((sweepB!.args as { deviceId?: string }).deviceId).toBe("usb/B");
+
+    // A third program resolving onto a BUSY device refuses — the
+    // historical toast, byte-identical.
+    focusOn(store, "slot-0");
+    const third = recordingIpc();
+    await runProgram(store, third.ipc, extra);
+    expect(store.get().programs.byId[extra].run).toBe("idle");
+    expect(third.calls).toHaveLength(0);
     expect(
       store.get().ui.toasts.some((t) => t.message.includes("Another measurement"))
     ).toBe(true);
+
+    release();
+    second.release();
+    await runA;
+    await runB;
+    expect(session(store.get(), "slot-0")?.run.programLock).toBeNull();
+    expect(session(store.get(), "slot-1")?.run.programLock).toBeNull();
+  });
+
+  it("a program PINNED to slot 1 runs there with no focus gesture (deviceSlot, lot F4)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    // Focus stays on slot 0 the whole time.
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    setProgramDeviceSlot(store, id, 1);
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    expect(session(store.get(), "slot-1")?.run.programLock ?? null).toBe(id);
+    expect(session(store.get(), "slot-0")?.run.programLock ?? null).toBeNull();
     release();
     await run;
+
+    const sweep = calls.find((c) => c.cmd === "measure_thd_vs_frequency");
+    expect(sweep, "the sweep must have been invoked").toBeDefined();
+    expect((sweep!.args as { deviceId?: string }).deviceId).toBe("usb/B");
+    // The landed provenance names the PINNED unit.
+    expect(store.get().traces.byId[id].capture?.device?.serial).toBe("B-SERIAL");
+  });
+
+  it("a second SCRIPT is refused bench-wide while one runs — and never clobbers the first run's record (globals-per-run, lot F4)", async () => {
+    const store = new Store(withConnectedSlot1(withDevice(initialState(), { status: "connected" })));
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const regs = (listen as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => c[0] === "script-state"
+    );
+    const stateHandler = regs[regs.length - 1]?.[1] as (e: {
+      payload: { running: boolean; error: string | null };
+    }) => void;
+    expect(stateHandler).toBeDefined();
+
+    const { ipc, calls } = recordingIpc();
+    const s1 = addProgram(store, "script");
+    const s2 = addProgram(store, "script");
+    setProgramDeviceSlot(store, s2, 1); // ANOTHER device — still refused
+
+    const run1 = runProgram(store, ipc, s1);
+    await flush();
+    expect(store.get().programs.byId[s1].run).toBe("running");
+
+    const second = recordingIpc();
+    await runProgram(store, second.ipc, s2);
+    expect(store.get().programs.byId[s2].run).toBe("idle");
+    expect(second.calls).toHaveLength(0);
+    expect(
+      store.get().ui.toasts.some((t) => t.message.includes("A script is already running"))
+    ).toBe(true);
+
+    // The first run's resolver survived: completing the script resolves IT.
+    stateHandler({ payload: { running: false, error: null } });
+    await run1;
+    expect(store.get().programs.byId[s1].run).toBe("idle");
+    expect(calls.some((c) => c.cmd === "script_run")).toBe(true);
+  });
+
+  it("an eviction mid-script releases the lock early, yet a second script is STILL refused until the first resolves (the F1 review's overwrite window)", async () => {
+    const store = new Store(withConnectedSlot1(initialState()));
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const regs = (listen as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => c[0] === "script-state"
+    );
+    const stateHandler = regs[regs.length - 1]?.[1] as (e: {
+      payload: { running: boolean; error: string | null };
+    }) => void;
+
+    focusOn(store, "slot-1");
+    const { ipc } = recordingIpc();
+    const s1 = addProgram(store, "script");
+    const run1 = runProgram(store, ipc, s1);
+    await flush();
+    expect(session(store.get(), "slot-1")?.run.programLock).toBe(s1);
+
+    // Device B vanishes — the lock evaporates with its session, opening
+    // the window the F1 review flagged.
+    evictSlot1(store);
+    focusOn(store, "slot-0");
+
+    const s2 = addProgram(store, "script");
+    const second = recordingIpc();
+    await runProgram(store, second.ipc, s2);
+    // Refused by the SCRIPT gate (program s1 is still `running`), not by
+    // any lock — and s1's resolver is intact.
+    expect(second.calls).toHaveLength(0);
+    expect(store.get().programs.byId[s2].run).toBe("idle");
+
+    stateHandler({ payload: { running: false, error: null } });
+    await run1; // resolves — the old globals-clobber left this hanging
+    expect(store.get().programs.byId[s1].run).toBe("idle");
+  });
+
+  it("completion re-arms an idle session whose PLAYING routed source appeared during the run (the F3 lock-note residual)", async () => {
+    // Idle at program start (not streaming, not output-only); the bench's
+    // source is set playing during the run — pre-F4 the release path left
+    // the session silent until the next source gesture.
+    const store = new Store(withDevice(initialState(), { status: "connected" }));
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+
+    const run = runProgram(store, ipc, id);
+    await flush();
+    store.update("test/play-during-run", (s) => {
+      const srcId = s.sources.order[0];
+      return {
+        ...s,
+        sources: {
+          ...s.sources,
+          byId: { ...s.sources.byId, [srcId]: { ...s.sources.byId[srcId], playing: true } },
+        },
+      };
+    });
+    expect(calls.some((c) => c.cmd === "stream_start")).toBe(false);
+    release();
+    await run;
+    await flush();
+
+    // The release fan-out started the capture for the now-audible source.
+    expect(calls.some((c) => c.cmd === "stream_start")).toBe(true);
   });
 });

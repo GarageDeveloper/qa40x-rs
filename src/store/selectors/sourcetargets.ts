@@ -151,12 +151,12 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
       // A routing edit on a program-locked session is ACCEPTED but deferred
       // (outputonly's gate refuses the DAC touch mid-sweep) — say so
       // instead of letting the summary claim a mix the device is not
-      // playing yet (F3 review #4). No delivery promise: a session that
-      // was IDLE at program start stays idle after it (the resume path
-      // only re-arms what the program stopped), so the honest statement
-      // is "busy", not "applies later" (re-review residual).
+      // playing yet (F3 review #4). Since lot F4 the promise is real:
+      // runProgram's release path re-arms the session for its routed
+      // sources (armSessionForSources), so an edit noted here lands when
+      // the program finishes.
       const label = s.traces.byId[lockId]?.label ?? "program";
-      note = `measurement "${label}" is running — the device is busy until it finishes`;
+      note = `measurement "${label}" is running — applies when it finishes`;
     } else if (sameAsFocus) note = COMBINED_NOTE;
     else if (present && route === "off") note = "off (no channel)";
     return {
