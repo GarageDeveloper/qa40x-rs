@@ -120,4 +120,25 @@ describe("panels/programs/deviceselect — programDeviceRow", () => {
     expect(dev.value()).toBe(3);
     expect(dev.sampleRateHz()).toBe(48000);
   });
+
+  it("the select is DISABLED with the reason while the program runs — a mid-run re-pin is refused, never silently dropped (review SHOULD-FIX #3)", () => {
+    const store = new Store(withDevice(initialState(), { status: "connected" }));
+    const id = addProgram(store, "thd");
+    store.update("test/running", (s) => ({
+      ...s,
+      programs: {
+        ...s.programs,
+        byId: {
+          ...s.programs.byId,
+          [id]: { ...s.programs.byId[id], run: "running" as const, runKey: "slot-0" },
+        },
+      },
+    }));
+    const dev = programDeviceRow(store, id);
+    expect(dev.select.disabled).toBe(true);
+    expect(dev.select.title).toContain("running");
+    // And the action itself refuses too (belt and braces).
+    setProgramDeviceSlot(store, id, 2);
+    expect(store.get().programs.byId[id].deviceSlot).toBeNull();
+  });
 });

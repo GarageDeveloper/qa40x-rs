@@ -84,18 +84,19 @@ export function resetAveraging(
   // KEYED since lot F4 (the F2 carried note): arg-less, this drove the
   // DEFAULT runtime whatever the focus — a reset clicked under a slot-1
   // focus emptied slot 0's accumulators and left the visible stream's
-  // untouched. Focused by default (the toolbar button's meaning); the
-  // isRoutable gate skips the wire for an unadopted slot ≥ 1 (the
-  // one-enumeration window) rather than silently hitting another device —
-  // the display-side peak-hold reset still applies (it is bench-visual,
-  // not device state).
+  // untouched. Focused by default (the toolbar button's meaning). An
+  // unadopted slot ≥ 1 (the one-enumeration window) is a legible REFUSAL
+  // (review SHOULD-FIX #4 — never a silent default-runtime hit, never a
+  // half-true success toast), same wording as runProgram's.
   const s = store.get();
   const k = key ?? s.devices.focus;
-  if (isRoutable(s, k)) {
-    void ipc.call("stream_reset_averaging", sessionArgs(s, k)).catch(() => {
-      // Idle stream (or none): nothing to reset backend-side — fine.
-    });
+  if (!isRoutable(s, k)) {
+    toast(store, "error", "Device id not adopted yet — retry in a moment.");
+    return;
   }
+  void ipc.call("stream_reset_averaging", sessionArgs(s, k)).catch(() => {
+    // Idle stream (or none): nothing to reset backend-side — fine.
+  });
   store.update("acq/reset-avg-peak", (st) => ({
     ...st,
     ui: { ...st.ui, peakHoldEpoch: st.ui.peakHoldEpoch + 1 },
@@ -117,10 +118,13 @@ export function resetMeasureStats(
   ipc: Ipc,
   key?: SessionKey
 ): void {
-  // Keyed like resetAveraging above (lot F4) — same default, same gate.
+  // Keyed like resetAveraging above (lot F4) — same default, same refusal.
   const s = store.get();
   const k = key ?? s.devices.focus;
-  if (!isRoutable(s, k)) return;
+  if (!isRoutable(s, k)) {
+    toast(store, "error", "Device id not adopted yet — retry in a moment.");
+    return;
+  }
   void ipc.call("stream_reset_measure_stats", sessionArgs(s, k)).catch(() => {
     // Idle stream (or none): nothing to reset backend-side — fine.
   });

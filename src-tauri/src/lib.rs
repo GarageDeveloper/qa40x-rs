@@ -476,6 +476,12 @@ async fn script_run(
 /// drops when it finishes (`ScriptControl::start` — unlike the per-invoke
 /// measure commands, a script run outlives its invoke). A SOURCE script
 /// never touches the device and stays exempt.
+///
+/// Blast radius, recorded (review note #9): `role` defaults to Measurement
+/// for old callers, so an arg-less `script_run` claims the gate for its
+/// whole run — a runaway measurement script (a loop that never reaches a
+/// cancellable operation) holds every `measure_*` on that device off until
+/// it ends; `script_stop`'s cooperative cancel remains the escape hatch.
 fn claim_script_gate(
     rt: &device::DeviceRuntime,
     role: dashboard::ScriptRole,

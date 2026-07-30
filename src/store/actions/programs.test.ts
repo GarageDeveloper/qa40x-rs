@@ -1168,6 +1168,31 @@ describe("actions/programs — session-keyed programs (issue #25 lot F)", () => 
     // The release fan-out started the capture for the now-audible source.
     expect(calls.some((c) => c.cmd === "stream_start")).toBe(true);
   });
+
+  it("completion does NOT restart a session the user deliberately stopped under an already-playing routed source (review MUST-FIX)", () => {
+    // Source playing + audibly routed, session IDLE at entry — the user
+    // pressed Stop (which never touches playing flags). Completion must
+    // honor that Stop: the release fan-out only delivers routings that
+    // APPEARED during the run.
+    const store = new Store(withDevice(initialState(), { status: "connected" }));
+    store.update("test/playing-before-stop", (s) => {
+      const srcId = s.sources.order[0];
+      return {
+        ...s,
+        sources: {
+          ...s.sources,
+          byId: { ...s.sources.byId, [srcId]: { ...s.sources.byId[srcId], playing: true } },
+        },
+      };
+    });
+    const { ipc, calls, release } = recordingIpc();
+    const id = addProgram(store, "thd");
+    release();
+    return runProgram(store, ipc, id).then(async () => {
+      await flush();
+      expect(calls.some((c) => c.cmd === "stream_start")).toBe(false);
+    });
+  });
 });
 
 /**

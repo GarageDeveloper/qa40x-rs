@@ -19,6 +19,11 @@
   font-size: 10px;
   color: var(--ink-3);
   white-space: nowrap;
+  /* The multi-device wording is ~2× longer (issue #25 lot F4 review note
+     #5): in a narrow sidebar it must clip, never squeeze the title or push
+     the + menu onto a new line. The full text lives in the title attr. */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .programs__addwrap {
@@ -120,6 +125,12 @@
   padding-left: 16px;
   font-size: 10px;
   color: var(--ink-3);
+  /* Same clip rule as .programs__wow below (issue #28 finding #6, extended
+     by lot F4's "· on #2" suffix — review note #6): the card must not grow
+     a line the moment a second device is added. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Every program card's scalar-readout line (issue #28 second pass) — "—"

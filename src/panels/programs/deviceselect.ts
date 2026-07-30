@@ -29,7 +29,8 @@ export function programDeviceRow(
   id: string
 ): ProgramDeviceRow {
   const s = store.get();
-  const pinned = s.programs.byId[id]?.deviceSlot ?? null;
+  const prog = s.programs.byId[id];
+  const pinned = prog?.deviceSlot ?? null;
   const keys = sessionKeys(s);
 
   const select = el("select.field", {
@@ -49,6 +50,14 @@ export function programDeviceRow(
     );
   }
   select.value = pinned === null ? "" : String(pinned);
+  if (prog?.run === "running") {
+    // A running program keeps the binding it started with
+    // (`setProgramDeviceSlot` refuses a re-pin mid-run) — disabling the
+    // select with the reason beats an Apply that silently drops the pick
+    // ("never silently inert", review SHOULD-FIX #3).
+    select.disabled = true;
+    select.title = "The program is running — its device was bound at start. Stop it to re-pin.";
+  }
 
   const row = el(
     "label.dialog__row",

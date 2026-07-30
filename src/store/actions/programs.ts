@@ -62,6 +62,7 @@ import {
   programSessionKey,
   runningPrograms,
 } from "../selectors/programs";
+import { sourcesForSession } from "../selectors/sources";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncAllStreams } from "./stream";
 import { syncOutputOnly } from "./outputonly";
@@ -650,6 +651,12 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
 
   const wasStreaming = sess.run.streaming;
   const wasOutputOnly = sess.run.outputOnly && sess.run.generatorRunning;
+  // Whether a PLAYING source already resolved audibly onto this session at
+  // entry (review MUST-FIX, this lot): the release fan-out below must only
+  // deliver routings that APPEARED during the run — an idle session under
+  // an already-playing routed source is the user's deliberate Stop, and
+  // completion must not undo it (the "resumes exactly what ran" policy).
+  const hadAudibleSources = sourcesForSession(s, key).some((r) => r.route !== "off");
   sweepCancel.delete(id);
   store.update("programs/start", (st) =>
     updateRun(
@@ -756,11 +763,16 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     else if (wasStreaming) void startRun(store, ipc, { sessionKey: key });
     // A session IDLE at program start used to STAY idle whatever happened
     // during the run (the F3 lock-note residual: a routing edit noted
-    // "the device is busy until it finishes" was never auto-applied). The
-    // arm re-checks every gate itself — connected, no lock, not already
-    // streaming/output-only, an AUDIBLY-routed playing source — so a
-    // genuinely idle session stays idle (lot F4 item 8).
-    else armSessionForSources(store, ipc, key);
+    // "applies when it finishes" was never auto-applied). Gated on the
+    // entry snapshot (review MUST-FIX): only a routing that APPEARED
+    // during the run arms — an idle session that already had a playing
+    // source routed is the user's deliberate Stop, and restarting the DAC
+    // into the DUT on program completion would undo it. The arm re-checks
+    // every gate itself (connected, no lock, not streaming/output-only).
+    // Recorded limit (review note #8): a session in output-only MODE with
+    // its generator idle at entry is not armed either way — the arm
+    // deliberately never touches output-only sessions.
+    else if (!hadAudibleSources) armSessionForSources(store, ipc, key);
   }
 }
 

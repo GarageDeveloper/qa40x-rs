@@ -152,9 +152,12 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
       // (outputonly's gate refuses the DAC touch mid-sweep) — say so
       // instead of letting the summary claim a mix the device is not
       // playing yet (F3 review #4). Since lot F4 the promise is real:
-      // runProgram's release path re-arms the session for its routed
-      // sources (armSessionForSources), so an edit noted here lands when
-      // the program finishes.
+      // runProgram's release path re-arms the session for routings that
+      // APPEARED during the run (armSessionForSources), and a session
+      // that ran resumes with its rebuilt mix. Recorded limit (F4 review
+      // note #8): a session sitting in output-only MODE with its
+      // generator idle at program start is not re-armed — the edit lands
+      // on the next source gesture there.
       const label = s.traces.byId[lockId]?.label ?? "program";
       note = `measurement "${label}" is running — applies when it finishes`;
     } else if (sameAsFocus) note = COMBINED_NOTE;

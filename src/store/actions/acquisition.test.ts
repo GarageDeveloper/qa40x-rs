@@ -61,13 +61,20 @@ describe("actions/acquisition — keyed resets (lot F4)", () => {
     for (const c of calls) expect(c.args).toEqual({ deviceId: "usb/B" });
   });
 
-  it("an UNADOPTED slot-1 focus skips the wire (no silent default-runtime hit); the display-side peak-hold reset still applies", () => {
+  it("an UNADOPTED slot-1 focus REFUSES legibly (review SHOULD-FIX #4): no wire, no half-true success, the not-adopted toast instead", () => {
     const store = new Store(withSlot1(initialState(), null));
     const { ipc, calls } = recordingIpc();
     const epoch = store.get().ui.peakHoldEpoch;
     resetAveraging(store, ipc);
     resetMeasureStats(store, ipc);
     expect(calls).toHaveLength(0);
-    expect(store.get().ui.peakHoldEpoch).toBe(epoch + 1);
+    // Nothing pretends to have happened — the epoch stays, and the user is
+    // told why (the runProgram wording, one refusal voice bench-wide).
+    expect(store.get().ui.peakHoldEpoch).toBe(epoch);
+    expect(
+      store
+        .get()
+        .ui.toasts.filter((t) => t.message.includes("Device id not adopted yet"))
+    ).toHaveLength(2);
   });
 });

@@ -1110,8 +1110,8 @@ impl ScriptControl {
                 tokio::task::spawn_blocking(move || {
                     // Moved in even for a source run (always None today):
                     // a guard must never outlive-or-underlive its run.
-                    let _guard = guard;
                     let res = run_source_script(env, &source);
+                    drop(guard);
                     finish_run(&app, &running, res);
                 });
             }
@@ -1125,10 +1125,15 @@ impl ScriptControl {
                 let cancel = CancelToken::from_flag(self.cancel.clone());
                 let mut session = session;
                 tokio::spawn(async move {
-                    // The device's program gate (lot F4) releases HERE —
-                    // when the run finishes, not when `start` returned.
-                    let _guard = guard;
+                    // The device's program gate (lot F4) releases when the
+                    // run finishes — and BEFORE the completion event goes
+                    // out (review SHOULD-FIX #2, the F2 release-before-
+                    // resume rule): a client reacting to
+                    // `script-state{running:false}` with an immediate
+                    // `measure_*` on this device must find the gate free,
+                    // never a spurious ProgramBusy.
                     let res = program.run(&mut session, &cancel).await;
+                    drop(guard);
                     finish_run(&app, &running, res);
                 });
             }
