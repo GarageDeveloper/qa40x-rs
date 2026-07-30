@@ -13,6 +13,37 @@ import { liveSessionCount, sessionLabel } from "../../store/selectors/devices";
 import { sessionKeyForSlot, slotOfSessionKey } from "../../store/sessionkey";
 import { el } from "../../ui/dom";
 
+export interface ProgramDeviceChoice {
+  /** The `deviceSlot` value this choice writes (null = follows the focus). */
+  slot: number | null;
+  label: string;
+}
+
+/** The device choices a program offers — the ⚙ dialogs' Device row and the
+ * row's inline "· on #N" picker (panel.ts) share this list, so the two
+ * surfaces can never drift: "Follows focus" first, then every live
+ * session, then (when the pin names a slot with no live session) the
+ * honest "not connected" entry. */
+export function programDeviceChoices(
+  s: AppState,
+  id: string
+): ProgramDeviceChoice[] {
+  const pinned = s.programs.byId[id]?.deviceSlot ?? null;
+  const keys = sessionKeys(s);
+  const focusSlot = slotOfSessionKey(s.devices.focus);
+  const choices: ProgramDeviceChoice[] = [
+    { slot: null, label: `Follows focus — #${focusSlot + 1} now` },
+    ...keys.map((key) => {
+      const slot = slotOfSessionKey(key);
+      return { slot, label: `#${slot + 1} — ${sessionLabel(s, key)}` };
+    }),
+  ];
+  if (pinned !== null && !keys.includes(sessionKeyForSlot(pinned))) {
+    choices.push({ slot: pinned, label: `#${pinned + 1} — not connected` });
+  }
+  return choices;
+}
+
 export interface ProgramDeviceRow {
   row: HTMLElement;
   select: HTMLSelectElement;
@@ -31,24 +62,15 @@ export function programDeviceRow(
   const s = store.get();
   const prog = s.programs.byId[id];
   const pinned = prog?.deviceSlot ?? null;
-  const keys = sessionKeys(s);
 
   const select = el("select.field", {
     "data-testid": `prog-device-${id}`,
   }) as HTMLSelectElement;
-  const focusSlot = slotOfSessionKey(s.devices.focus);
   select.append(
-    el("option", { value: "" }, `Follows focus — #${focusSlot + 1} now`),
-    ...keys.map((key) => {
-      const slot = slotOfSessionKey(key);
-      return el("option", { value: String(slot) }, `#${slot + 1} — ${sessionLabel(s, key)}`);
-    })
+    ...programDeviceChoices(s, id).map((c) =>
+      el("option", { value: c.slot === null ? "" : String(c.slot) }, c.label)
+    )
   );
-  if (pinned !== null && !keys.includes(sessionKeyForSlot(pinned))) {
-    select.append(
-      el("option", { value: String(pinned) }, `#${pinned + 1} — not connected`)
-    );
-  }
   select.value = pinned === null ? "" : String(pinned);
   if (prog?.run === "running") {
     // A running program keeps the binding it started with

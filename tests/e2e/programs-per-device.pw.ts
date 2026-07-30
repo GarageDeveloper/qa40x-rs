@@ -169,3 +169,29 @@ test("the ⚙ Device row hides on a single-device bench and appears with the sec
   await app.setProgramDevice(prog, 1);
   await expect.poll(() => app.programTypeLine(prog)).toContain("on #2");
 });
+
+test("the type line's device note is itself a picker — re-pin a sweep to B from the row, no ⚙ dialog, and the run rides B's wire", async ({
+  app,
+}) => {
+  await addUnitB(app);
+  const prog = await app.addProgram("thd");
+
+  // Follows the focus (#1) until picked otherwise; the note is a button.
+  await expect.poll(() => app.programTypeLine(prog)).toContain("on #1");
+  await app.drv.click(`[data-testid="prog-dest-${prog}"]`);
+  await app.drv.click(`[data-testid="prog-dest-${prog}-1"]`);
+  await expect.poll(() => app.programTypeLine(prog)).toContain("on #2");
+  await app.screenshot("programs-row-device-picker");
+
+  // The row pick routed the run exactly like the ⚙ path — fake-side truth.
+  await app.holdPrograms();
+  await app.playProgram(prog);
+  await expect.poll(() => app.programRun(prog)).toBe("running");
+  const sweeps = (await app.programCalls()).filter(
+    (x) => x.cmd === "measure_thd_vs_frequency"
+  );
+  expect(sweeps.map((x) => x.deviceId)).toEqual([UNIT_B]);
+
+  await app.releasePrograms();
+  await expect.poll(() => app.programRun(prog), { timeout: 10_000 }).toBe("idle");
+});

@@ -15,6 +15,7 @@ import {
   programProgressText,
   removeProgram,
   runProgram,
+  setProgramDeviceSlot,
   stopProgram,
 } from "../../store/actions/programs";
 import {
@@ -25,8 +26,9 @@ import {
 import { liveSessionCount } from "../../store/selectors/devices";
 import { freezeTrace, setTraceColor } from "../../store/actions/traces";
 import { exportTraceCsv } from "../../export/export";
-import { el, keyedList } from "../../ui/dom";
+import { el, keyedList, setText } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
+import { programDeviceChoices } from "./deviceselect";
 import { openSweepDialog } from "./sweepdialog";
 import { openProgramScriptDialog } from "./scriptdialog";
 
@@ -267,6 +269,55 @@ export function mountProgramsPanel(
       title: "Trace color — click to change",
     }) as HTMLInputElement;
     dot.addEventListener("input", () => setTraceColor(store, id, dot.value));
+    // The type line's "· on #N" note is a PICKER (Raphaël's F4 validation:
+    // choosing the destination must not require the ⚙ dialog) — the same
+    // choices as the dialogs' Device row (`programDeviceChoices`), in the
+    // panel's existing lightweight-menu form. The menu hangs off the ROW
+    // (position: relative), never the type line: `.programs__type` clips
+    // its overflow, which would clip an absolutely-positioned menu too.
+    const destMenu = el("div.programs__menu.programs__destmenu", {
+      "data-testid": `prog-destmenu-${id}`,
+    });
+    destMenu.hidden = true;
+    const dest = el("button.programs__dest", {
+      type: "button",
+      "data-testid": `prog-dest-${id}`,
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        if (!destMenu.hidden) {
+          destMenu.hidden = true;
+          return;
+        }
+        // Choices are built ON OPEN from fresh state (never on the
+        // per-frame update path — a churning menu would swallow the very
+        // click it exists for, the issue #68 class).
+        const s = store.get();
+        const p = s.programs.byId[id];
+        if (!p || p.run === "running") return;
+        destMenu.replaceChildren(
+          ...programDeviceChoices(s, id).map((c) =>
+            el(
+              "button.programs__menu-item",
+              {
+                type: "button",
+                "data-testid": `prog-dest-${id}-${c.slot === null ? "focus" : c.slot}`,
+                onclick: () => {
+                  setProgramDeviceSlot(store, id, c.slot);
+                  destMenu.hidden = true;
+                },
+              },
+              `${c.slot === p.deviceSlot ? "✓ " : ""}${c.label}`
+            )
+          )
+        );
+        destMenu.style.top = `${dest.offsetTop + dest.offsetHeight + 2}px`;
+        destMenu.hidden = false;
+        document.addEventListener("click", () => (destMenu.hidden = true), {
+          once: true,
+          capture: true,
+        });
+      },
+    }) as HTMLButtonElement;
     // The scalar-readout line is UNCONDITIONAL — every program row gets one
     // (see `wowSummary`'s doc comment for why the old "only for a
     // wowflutter program" approach was a real bug, issue #28 second-pass
@@ -287,8 +338,15 @@ export function mountProgramsPanel(
         exportBtn,
         remove
       ),
-      el("div.programs__type", { "data-testid": `prog-type-${id}` }),
-      el("div.programs__wow", { "data-testid": `prog-wow-${id}` })
+      el(
+        "div.programs__type",
+        { "data-testid": `prog-type-${id}` },
+        el("span.programs__typetext"),
+        dest,
+        el("span.programs__progress")
+      ),
+      el("div.programs__wow", { "data-testid": `prog-wow-${id}` }),
+      destMenu
     );
   };
 
@@ -301,13 +359,32 @@ export function mountProgramsPanel(
 
     const type = node.querySelector<HTMLElement>(`[data-testid="prog-type-${id}"]`)!;
     // The PROGRAM session's rate (lot F4 item 5), never the focused one's;
-    // the device rides the existing type line — no new node, no layout
-    // shift, and a single-device bench with no pin reads byte-identically.
+    // the device rides the existing type line — same slot as before, but as
+    // the destination PICKER, hidden (empty) on a single-device bench with
+    // no pin so the line reads byte-identically. `setText` everywhere: this
+    // line refreshes on the 500 ms progress tick, and a rewritten-identical
+    // node between mousedown and mouseup swallows the click (issue #68).
     const sr = programSampleRateHz(store.get(), vm.prog);
-    const onDevice = vm.device ? ` · on ${vm.device.short}` : "";
-    type.textContent = running
-      ? `${typeLabel(vm.prog)}${onDevice} · ${programProgressText(vm.prog, sr, performance.now())}`
-      : `${typeLabel(vm.prog)}${onDevice}`;
+    setText(type.querySelector(".programs__typetext")!, typeLabel(vm.prog));
+    const dest = node.querySelector<HTMLButtonElement>(`[data-testid="prog-dest-${id}"]`)!;
+    dest.hidden = !vm.device;
+    // An anchorless menu must not float on (the note can vanish live — the
+    // second device unplugged mid-pick); harmless otherwise, since a menu
+    // can only be open while its button is visible.
+    if (!vm.device) {
+      node.querySelector<HTMLElement>(`[data-testid="prog-destmenu-${id}"]`)!.hidden = true;
+    }
+    setText(dest, vm.device ? `· on ${vm.device.short} ▾` : "");
+    dest.disabled = running;
+    dest.title = !vm.device
+      ? ""
+      : running
+        ? `runs on ${vm.device.full} — its device was bound at start; stop it to re-pin`
+        : `runs on ${vm.device.full} — pick the destination device`;
+    setText(
+      type.querySelector(".programs__progress")!,
+      running ? `· ${programProgressText(vm.prog, sr, performance.now())}` : ""
+    );
     type.title = vm.device ? `runs on ${vm.device.full}` : "";
 
     // nowrap + ellipsis (.programs__wow, panel.css) clips the ~100-char
