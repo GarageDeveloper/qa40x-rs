@@ -172,6 +172,24 @@ describe("traceExportOwner — structural resolution", () => {
     expect(o).toMatchObject({ kind: "session", key: SLOT0 });
   });
 
+  it("a recycled slot whose identity matches TWO live twins stays dormant (ambiguity guard, structural branch)", () => {
+    // hw-in-left@1 captured on QA403 A_SER; slot 1 now holds B_SER (declines
+    // structurally), and A_SER is live on slots 0 AND 2 — ambiguous, so no
+    // twin's converter may sign the header (re-review N2: this pins the
+    // guard's structural-key branch, the frozen-copy test pins the other).
+    let s = withCapture(twoDeviceState(), hwTraceIds(1).inputL, capture("QA403", "A_SER"));
+    s = mintSession(s, 2, "usb/A_TWIN");
+    s = reconcileHwTraces(s);
+    s = withDevice(
+      s,
+      { status: "connected", info: info("QA403", "A_SER") },
+      sessionKeyForSlot(2)
+    );
+    const o = traceExportOwner(s, hwTraceIds(1).inputL);
+    expect(o).toMatchObject({ kind: "dormant", key: SLOT1 });
+    expect(exportOwnerDevice(s, o)).toBeNull();
+  });
+
   it("a disconnected slot-0 session (info nulled) goes dormant, not model=none-with-stale-config", () => {
     let s = twoDeviceState();
     s = withDevice(s, { status: "disconnected", info: null, config: null, offsets: null });

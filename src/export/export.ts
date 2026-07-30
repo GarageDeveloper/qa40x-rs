@@ -116,6 +116,8 @@ function ownerDeviceFor(s: AppState, id: TraceId | null): DeviceState | null {
  * data contribute no columns and are ignored.
  */
 export function tileCapture(s: AppState, tile: TileConfig): CaptureProvenance | null {
+  // Kept as the historical capture-only view over tileAnchor: production
+  // goes through tileProvenanceContext; export.test.ts pins this shape.
   const a = tileAnchor(s, tile);
   return a.capture && a.mixed ? { ...a.capture, mixed: true } : a.capture;
 }

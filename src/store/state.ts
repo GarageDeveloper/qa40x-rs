@@ -267,7 +267,6 @@ export function deviceCaptureProvenance(
   };
 }
 
-
 /**
  * Metadata ONLY — never frame data (that lives in `data/frames.ts`, keyed
  * by id; `seq` is the store-side freshness stamp the ingest bumps after

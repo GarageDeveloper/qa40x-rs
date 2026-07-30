@@ -182,6 +182,28 @@ describe("per-device bench header (lot F5)", () => {
     expect(lines.some((l) => l.includes("no longer on the bench"))).toBe(false);
   });
 
+  it("unplug-then-export on a single-device bench: dormant header, no calibration claim (deliberate post-F5 change)", () => {
+    // The common flow: measure, unplug the only device, export what is
+    // still on screen. Slot 0's disconnect nulls info/config/offsets but
+    // keeps the session — the owner resolves DORMANT, and the header drops
+    // the pre-F5 `calibrated=false` line along with the identity: no claim
+    // about a converter nobody can see (re-review N1).
+    let s = initialState();
+    s = withDevice(s, {
+      status: "connected",
+      info: info("QA403", "A_SER"),
+      config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+      offsets: { input_l: 10, input_r: 11, output_l: 12, output_r: 13, calibrated: true },
+    });
+    s = withCapture(s, "hw-in-left", captureFor("A"));
+    s = withDevice(s, { status: "disconnected", info: null, config: null, offsets: null });
+    const lines = headerFor(s, "hw-in-left");
+    expect(lines).toContain("# device_model=none");
+    expect(lines.some((l) => l.startsWith("# calibrated"))).toBe(false);
+    expect(lines).toContain("# capture_device_serial=A_SER");
+    expect(lines).toContain("# capture_offset_input_l_db=10");
+  });
+
   it("a foreign-stamped trace on a SINGLE-device bench: the local converter is never substituted (deliberate post-F5 change)", () => {
     // A colleague's workspace: hw-in-left captured on a bench this one has
     // never seen. Pre-F5 the header stamped the LOCAL device's serial and

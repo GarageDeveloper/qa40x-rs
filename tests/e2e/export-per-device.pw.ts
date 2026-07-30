@@ -115,14 +115,21 @@ test("a tile drawing BOTH devices names them all in export_devices (additive lin
 }) => {
   await twoUnitsWithFrames(app);
 
+  // Single-identity tile first: no roll-call line at all (re-review N5 — a
+  // spurious export_devices would pass every toContain-style assertion).
+  await app.setSelect("tile-export-tile-1", "csv");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [single] = await app.exportedFiles();
+  expect(single.text.includes("# export_devices=")).toBe(false);
+
   // A spectrum tile can't draw slot 1's td-only endpoint — switch tile-1 to
   // scope and add unit B's Input L next to unit A's.
   await app.setTileKind("scope");
   await app.setSelect("tile-add-trace-tile-1", "hw-in-left@1");
 
   await app.setSelect("tile-export-tile-1", "csv");
-  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
-  const [f] = await app.exportedFiles();
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(2);
+  const f = (await app.exportedFiles())[1];
   const lines = f.text.split("\n");
 
   expect(lines).toContain("# format_version=1");
