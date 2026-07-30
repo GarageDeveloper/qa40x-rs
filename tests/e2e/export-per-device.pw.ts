@@ -89,18 +89,47 @@ test("a DORMANT owner exports device_model=none — the capture_* block carries 
   const [f] = await app.exportedFiles();
   const lines = f.text.split("\n");
 
-  // No live owner ⇒ an honest none — NOT the focused unit A's converter.
+  // No live owner ⇒ an honest none — NOT the focused unit A's converter,
+  // and no calibration claim about a converter nobody can see.
   expect(lines).toContain("# device_model=none");
   for (const gone of [
     "# device_serial=",
     "# sample_rate_hz=",
     "# input_range_dbv=",
     "# offset_input_l_db=",
+    "# calibrated=",
   ]) {
     expect(lines.some((l) => l.startsWith(gone))).toBe(false);
   }
-  expect(lines).toContain("# calibrated=false");
-  // The identity of the unit that produced the data rides the capture block.
+  // The identity of the unit that produced the data rides the capture
+  // block, and the note explains the none.
   expect(lines).toContain("# capture_device_serial=E2E-FAKE-0002");
   expect(lines.some((l) => l.startsWith("# capture_sample_rate_hz="))).toBe(true);
+  expect(
+    lines.some((l) => l.startsWith("# note=") && l.includes("no longer on the bench"))
+  ).toBe(true);
+});
+
+test("a tile drawing BOTH devices names them all in export_devices (additive line, format_version stays 1)", async ({
+  app,
+}) => {
+  await twoUnitsWithFrames(app);
+
+  // A spectrum tile can't draw slot 1's td-only endpoint — switch tile-1 to
+  // scope and add unit B's Input L next to unit A's.
+  await app.setTileKind("scope");
+  await app.setSelect("tile-add-trace-tile-1", "hw-in-left@1");
+
+  await app.setSelect("tile-export-tile-1", "csv");
+  await expect.poll(async () => (await app.exportedFiles()).length).toBe(1);
+  const [f] = await app.exportedFiles();
+  const lines = f.text.split("\n");
+
+  expect(lines).toContain("# format_version=1");
+  expect(lines).toContain(
+    "# export_devices=QA402 E2E-FAKE-0001, QA402 E2E-FAKE-0002"
+  );
+  // Different benches on one tile flag the capture block as mixed, as
+  // before — export_devices is the additive roll call on top.
+  expect(lines).toContain("# capture_mixed=true");
 });

@@ -23,7 +23,7 @@ import { withDevice } from "../store/actions/sessions.fixtures";
 import { exportOwnerDevice, traceExportOwner } from "../store/selectors/provenance";
 import { clearAllFrames, putFrames } from "../data/frames";
 import { provenanceComments, traceProvenance } from "./csv";
-import { tileAnchor } from "./export";
+import { tileAnchor, tileImageText, tileProvenanceContext } from "./export";
 
 const SLOT1 = sessionKeyForSlot(1);
 
@@ -149,13 +149,86 @@ describe("per-device bench header (lot F5)", () => {
     s = { ...s, devices: { ...s.devices, sessions } };
     const lines = headerFor(s, hwTraceIds(1).inputL);
     expect(lines).toContain("# device_model=none");
-    for (const gone of ["# device_serial", "# sample_rate_hz", "# input_range_dbv", "# offset_input_l_db"]) {
+    // No claims at all about a converter nobody can see — including the
+    // calibration line ("false" would assert an uncalibrated device that
+    // does not exist; the capture_calibrated rule).
+    for (const gone of [
+      "# device_serial",
+      "# sample_rate_hz",
+      "# input_range_dbv",
+      "# offset_input_l_db",
+      "# calibrated",
+    ]) {
       expect(lines.some((l) => l.startsWith(gone))).toBe(false);
     }
-    expect(lines).toContain("# calibrated=false");
     expect(lines).toContain("# capture_device_serial=B_SER");
     expect(lines).toContain("# capture_sample_rate_hz=192000");
     expect(lines).toContain("# capture_offset_input_l_db=20");
+    // The note explains device_model=none exactly when it appears…
+    expect(
+      lines.some((l) => l.startsWith("# note=") && l.includes("no longer on the bench"))
+    ).toBe(true);
+  });
+
+  it("a live owner's capture_* note does NOT carry the device_model=none clause", () => {
+    let s = twoDeviceState();
+    s = withCapture(s, hwTraceIds(1).inputL, {
+      ...captureFor("B"),
+      capturedAt: "2026-07-30T00:00:00.000Z", // pinned instant → block emits
+    });
+    const lines = headerFor(s, hwTraceIds(1).inputL);
+    expect(lines.some((l) => l.startsWith("# capture_"))).toBe(true);
+    expect(lines.some((l) => l.includes("no longer on the bench"))).toBe(false);
+  });
+
+  it("a foreign-stamped trace on a SINGLE-device bench: the local converter is never substituted (deliberate post-F5 change)", () => {
+    // A colleague's workspace: hw-in-left captured on a bench this one has
+    // never seen. Pre-F5 the header stamped the LOCAL device's serial and
+    // offsets above that data; the slot is treated as recycled now.
+    let s = initialState();
+    s = withDevice(s, {
+      status: "connected",
+      info: info("QA403", "LOCAL"),
+      config: { input_gain: 42, output_gain: 18, sample_rate: 48000 },
+      offsets: { input_l: 1, input_r: 2, output_l: 3, output_r: 4, calibrated: true },
+    });
+    const t = s.traces.byId["hw-in-left"];
+    s = {
+      ...s,
+      traces: {
+        ...s.traces,
+        byId: { ...s.traces.byId, "hw-in-left": { ...t, capture: captureFor("B") } },
+      },
+    };
+    const lines = headerFor(s, "hw-in-left");
+    expect(lines).toContain("# device_model=none");
+    expect(lines.some((l) => l.includes("LOCAL"))).toBe(false);
+    expect(lines).toContain("# capture_device_serial=B_SER");
+  });
+
+  it("two live TWINS (same model+serial) make identity revival ambiguous — dormant, never lowest-slot-wins", () => {
+    // Two virtual units launched independently can both present the same
+    // pinned serial; a frozen copy whose origin is gone must not borrow
+    // twin #1's converter for twin #2's data.
+    let s = twoDeviceState();
+    s = withDevice(s, { info: info("QA403", "A_SER") }, SLOT1); // twin of slot 0
+    const mem: (typeof s.traces.byId)[string] = {
+      id: "mem-1",
+      label: "mem-1",
+      color: "#fff",
+      source: { kind: "memory", frozenFrom: "gone" },
+      domains: ["fd"],
+      seq: 1,
+      offsetDb: null,
+      capture: captureFor("A"),
+    };
+    s = {
+      ...s,
+      traces: { order: [...s.traces.order, "mem-1"], byId: { ...s.traces.byId, "mem-1": mem } },
+    };
+    const lines = headerFor(s, "mem-1");
+    expect(lines).toContain("# device_model=none");
+    expect(lines.some((l) => l.startsWith("# offset_input_l_db"))).toBe(false);
   });
 
   it("the emit gate keys on the OWNER's bench: a slot-1 trace matching ITS bench adds no capture_* under a differing slot-0 focus", () => {
@@ -211,14 +284,27 @@ describe("tileAnchor (lot F5)", () => {
   });
 
   it("a hidden chip source anchors on the first drawn member WITH a capture", () => {
+    // chipSource = inputR (hidden, stamped B): its bench must not sign the
+    // file (the #40 review-finding-#2 rule) — the drawn, stamped inputL
+    // names BOTH blocks.
+    const s = stateWithData({
+      [HW_TRACE_IDS.inputL]: captureFor("A"),
+      [HW_TRACE_IDS.inputR]: captureFor("B"),
+    });
+    const a = tileAnchor(
+      s,
+      tile({ chipSource: HW_TRACE_IDS.inputR, hidden: [HW_TRACE_IDS.inputR] })
+    );
+    expect(a.id).toBe(HW_TRACE_IDS.inputL);
+    expect(a.capture?.device?.serial).toBe("A_SER");
+  });
+
+  it("a hidden chip source with NOTHING drawn stamped: capture null, owner still the first drawn member", () => {
     const s = stateWithData({ [HW_TRACE_IDS.inputR]: captureFor("A") });
     const a = tileAnchor(
       s,
       tile({ chipSource: HW_TRACE_IDS.inputR, hidden: [HW_TRACE_IDS.inputR] })
     );
-    // inputL is drawn but unstamped; the capture pick (pre-F5 rule) skips
-    // to... nothing drawn has one, so capture is null and the anchor falls
-    // back to the first drawn member for the OWNER.
     expect(a.capture).toBeNull();
     expect(a.id).toBe(HW_TRACE_IDS.inputL);
   });
@@ -229,5 +315,76 @@ describe("tileAnchor (lot F5)", () => {
     expect(a.capture).toBeNull();
     expect(a.id).toBe(HW_TRACE_IDS.inputL);
     expect(a.mixed).toBe(false);
+  });
+});
+
+describe("tile owner wiring (lot F5 review round)", () => {
+  beforeEach(() => clearAllFrames());
+
+  /** Two-device state with slot-1's Input L carrying fd data. */
+  function slot1DataState(cap: CaptureProvenance | null): AppState {
+    let s = twoDeviceState();
+    const id = hwTraceIds(1).inputL;
+    putFrames(id, 1, {
+      fd: { freqs: Float64Array.from([100]), magDb: Float64Array.from([-6]) },
+    });
+    const t = s.traces.byId[id];
+    s = {
+      ...s,
+      traces: {
+        ...s.traces,
+        byId: { ...s.traces.byId, [id]: { ...t, seq: 1, domains: ["fd"], capture: cap } },
+      },
+    };
+    return s;
+  }
+
+  function slot1Tile(over: Partial<TileConfig> = {}): TileConfig {
+    return { ...defaultTile("tile-1", "spectrum", [hwTraceIds(1).inputL]), ...over };
+  }
+
+  it("tileProvenanceContext: the anchor's OWNER is the non-focused device, not the focus", () => {
+    const s = slot1DataState(captureFor("B")); // focus = slot 0
+    const ctx = tileProvenanceContext(s, slot1Tile());
+    expect(ctx.owner?.info?.serial).toBe("B_SER");
+    expect(ctx.capture?.device?.serial).toBe("B_SER");
+  });
+
+  it("tileProvenanceContext: a held trigger snapshot's owner is the TRIGGER SOURCE's device", () => {
+    const s = slot1DataState(null);
+    const held = { ...captureFor("B"), capturedAt: "2026-07-30T00:00:00.000Z" };
+    const ctx = tileProvenanceContext(
+      s,
+      slot1Tile({ kind: "scope", triggerSource: hwTraceIds(1).inputL }),
+      held
+    );
+    expect(ctx.capture).toBe(held);
+    expect(ctx.owner?.info?.serial).toBe("B_SER");
+  });
+
+  it("tileImageText: the footer's no-capture device and rate are the OWNER's, not the focused session's", () => {
+    let s = slot1DataState(null);
+    s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-1": slot1Tile() } } };
+    const { footer } = tileImageText(s, "tile-1");
+    expect(footer[0]).toContain("B_SER");
+    expect(footer[0]).toContain("192000 Hz");
+    expect(footer[0].includes("A_SER")).toBe(false);
+  });
+
+  it("tileImageText: a capture WITHOUT a rate (sweep results) falls back to the OWNER's rate — the pre-F5 focused-rate lie", () => {
+    let s = slot1DataState({ ...captureFor("B"), sampleRateHz: null });
+    s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-1": slot1Tile() } } };
+    const { footer } = tileImageText(s, "tile-1");
+    expect(footer[0]).toContain("192000 Hz"); // slot 1's rate, focus is slot 0 at 48k
+  });
+
+  it("tileImageText: a dormant owner with no capture reads 'no device'", () => {
+    let s = slot1DataState(null);
+    const sessions = { ...s.devices.sessions };
+    delete sessions[SLOT1];
+    s = { ...s, devices: { ...s.devices, sessions } };
+    s = { ...s, layout: { ...s.layout, tiles: { ...s.layout.tiles, "tile-1": slot1Tile() } } };
+    const { footer } = tileImageText(s, "tile-1");
+    expect(footer[0]).toContain("no device");
   });
 });

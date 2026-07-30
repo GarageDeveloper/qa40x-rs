@@ -181,7 +181,7 @@ export function tileAnchor(
  * source endpoint that latched it (always an endpoint id, so it resolves
  * structurally). Otherwise both come from the tile anchor.
  */
-function tileProvenanceContext(
+export function tileProvenanceContext(
   s: AppState,
   tile: TileConfig,
   heldCapture?: CaptureProvenance | null
@@ -481,7 +481,7 @@ export async function exportTraceCsv(
  * The no-capture fallback and the rate are the OWNER's (lot F5), never the
  * focused session's — a sweep result stamps no `sampleRateHz`, so pre-F5
  * a slot-1 sweep printed the focused slot-0 rate here. */
-function tileImageText(s: AppState, tileId: string): { title: string; footer: string[] } {
+export function tileImageText(s: AppState, tileId: string): { title: string; footer: string[] } {
   const tile = s.layout.tiles[tileId];
   const kind = tile ? KIND_LABELS[tile.kind] : "Graph";
   const labels = (tile?.traces ?? [])

@@ -22,10 +22,6 @@ import type {
   UserWeightingCurve,
 } from "../gen";
 import type { Chan, Domain, FdUnit, TdUnit, TraceId } from "../core/model";
-// One-way runtime edge only: selectors/session.ts imports its VALUES from
-// the leaf store/sessionkey.ts and only TYPES from this module (erased at
-// compile time), so this import creates no cycle.
-import { focusedDevice } from "./selectors/session";
 import { EXTRA_TRACE_COLORS, hwTraceIds, hwTraceMetas } from "./hwtraces";
 import { SLOT0, sessionKeyForSlot } from "./sessionkey";
 import type { SessionKey } from "./sessionkey";
@@ -271,11 +267,6 @@ export function deviceCaptureProvenance(
   };
 }
 
-/** The FOCUSED session's bench as a capture snapshot — the ingest
- * memoization's comparison key and the export gate's pre-F5 shape. */
-export function liveCaptureProvenance(s: AppState): CaptureProvenance {
-  return deviceCaptureProvenance(s, focusedDevice(s));
-}
 
 /**
  * Metadata ONLY — never frame data (that lives in `data/frames.ts`, keyed

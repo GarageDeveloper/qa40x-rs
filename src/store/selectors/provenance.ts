@@ -26,7 +26,7 @@
  * generalisation over program bindings, origin chains and identity revival.
  */
 import type { TraceId } from "../../core/model";
-import type { AppState, DeviceState, TraceMeta, TraceSource } from "../state";
+import type { AppState, DeviceSession, DeviceState, TraceMeta, TraceSource } from "../state";
 import { hwSlotOfTraceId } from "../hwtraces";
 import { sessionKeyForSlot } from "../sessionkey";
 import type { SessionKey } from "../sessionkey";
@@ -84,19 +84,20 @@ function structuralKey(s: AppState, meta: TraceMeta): SessionKey | null {
   return null;
 }
 
-/** The live session whose open unit IS the trace's captured device
- * (model+serial — the `reviveCandidateId` matching rule). Rescues a frozen
- * copy whose origin trace was deleted, and a completed follows-focus
- * program after the focus moved. Slot order for determinism. */
-function identityOwner(s: AppState, identity: Identity): ExportOwner | null {
-  const sessions = Object.values(s.devices.sessions).sort((a, b) => a.slot - b.slot);
-  for (const sess of sessions) {
-    const info = sess.device.info;
-    if (info && info.model === identity.model && info.serial === identity.serial) {
-      return { kind: "session", key: sess.key, device: sess.device };
-    }
-  }
-  return null;
+/** The live sessions whose open unit IS the trace's captured device
+ * (model+serial — the `reviveCandidateId` matching rule), slot order.
+ * Callers revive ONLY on a UNIQUE match: two live twins (virtual units pin
+ * their serials per process index, so two independently launched benches
+ * both present `0DE0_0001`) make the identity ambiguous, and picking the
+ * lowest slot would hand one twin's converter to the other's data — the
+ * four-offsets class through the revival door (F5 review finding #1). */
+function identitySessions(s: AppState, identity: Identity): DeviceSession[] {
+  return Object.values(s.devices.sessions)
+    .filter((sess) => {
+      const info = sess.device.info;
+      return !!info && info.model === identity.model && info.serial === identity.serial;
+    })
+    .sort((a, b) => a.slot - b.slot);
 }
 
 /** Resolve the device that owns `id`'s data — see the module doc for the
@@ -123,14 +124,20 @@ export function traceExportOwner(s: AppState, id: TraceId | null): ExportOwner {
       return { kind: "dormant", key };
     }
     if (identity) {
-      const revived = identityOwner(s, identity);
-      if (revived) return revived;
+      const matches = identitySessions(s, identity);
+      if (matches.length === 1) {
+        return { kind: "session", key: matches[0].key, device: matches[0].device };
+      }
+      // 0 = the unit left the bench, ≥ 2 = ambiguous twins — either way,
+      // never a substituted converter.
     }
     return { kind: "dormant", key };
   }
   if (identity) {
-    const revived = identityOwner(s, identity);
-    if (revived) return revived;
+    const matches = identitySessions(s, identity);
+    if (matches.length === 1) {
+      return { kind: "session", key: matches[0].key, device: matches[0].device };
+    }
     return { kind: "dormant", key: null };
   }
   return { kind: "unknown" };
