@@ -9,6 +9,8 @@ const API_FUNCTIONS = [
   "connected",
   "firmware_version",
   "model",
+  // The bound-device map (issue #25 lot F6, read-only — decision R4).
+  "device",
   "default_settings",
   "set_sample_rate",
   "set_input_range",

@@ -29,9 +29,39 @@
 //! | `sleep_ms(n)`                          | cancellation-aware, capped       |
 //! | `connected()` / `model()` / `firmware_version()` | cached status (no I/O) |
 //! | `sample_rate()` / `input_range()` / `output_range()` | cached config readback |
+//! | `device()`                             | identity + config of the device this run is bound to |
 //! | `plot_sweep([label,] freqs, values)`   | emits a sweep frame              |
 //! | `plot_spectrum(freqs, mag_db)`         | emits a spectrum (fd) frame      |
 //! | `plot_scope(samples [, sample_rate])`  | emits a scope (td) frame         |
+//!
+//! ## `device()` (issue #25 lot F6, read-only — decision R4)
+//!
+//! One map describing the device the run is BOUND to (the session built from
+//! the runtime `script_run`'s `device_id` resolved to — the same unit whose
+//! program gate a measurement run holds), read LIVE at each call:
+//!
+//! ```text
+//! #{
+//!   // identity — registry bookkeeping, no device lock ("" when nothing open)
+//!   id: "usb/AB12_CD34", source: "usb", serial: "AB12_CD34",
+//!   serial_synthetic: false, is_virtual: false,
+//!   // live status/config — ONE lock acquisition, same values as the single verbs
+//!   connected: true, model: "QA403", firmware: "19",
+//!   sample_rate: 48000, input_range: 6, output_range: 8, buffer_size: 32768,
+//!   // the open unit's capability record — an EMPTY map when nothing is open
+//!   caps: #{ input_channels, output_channels, sample_rates, input_ranges,
+//!            output_ranges, min_output_vrms, max_output_vrms, max_input_vrms,
+//!            min_hz, max_hz, calibration },  // "unknown"|"factory"|"nominal"|"user"
+//! }
+//! ```
+//!
+//! A unit lost mid-run reads `connected: false` with an empty identity —
+//! live like `connected()`, never a stale snapshot. NOT available inside a
+//! *played* source's `render(ctx)` (the mixer compiles its own engine with
+//! no common API — use `ctx` there); a one-shot source run does see it.
+//! `use_device(id)` deliberately does not exist (R4: a script driving two
+//! units = two script programs pinned to two devices) — calling it names
+//! that rule instead of "function not found".
 //!
 //! **Measurement scripts only** (they mirror the REST endpoints and drive the
 //! device through the session verbs):
@@ -217,6 +247,20 @@ type CaptureSink = Arc<dyn Fn(&ScriptCapture) + Send + Sync>;
 /// Where the end-of-run analysis goes (`script-metrics` event in the app).
 type MetricsSink = Arc<dyn Fn(&crate::audio::AnalysisResult) + Send + Sync>;
 
+/// The device a script run is bound to (issue #25 lot F6, the `device()`
+/// verb): a per-run provider over the RESOLVED runtime's open-unit
+/// bookkeeping — read LIVE at every call (a unit lost mid-run reads
+/// disconnected, consistent with `connected()`), and never a global (the
+/// #25 no-new-device-globals rule). The identity half costs one cheap
+/// std-lock read (`DeviceRuntime::current`), no device mutex.
+pub type DeviceInfoFn = Arc<dyn Fn() -> Option<crate::device::OpenDevice> + Send + Sync>;
+
+/// The default provider: no registry bookkeeping (bare `Session`s in tests
+/// and examples) — `device()` then reports an empty identity + empty caps.
+pub fn no_device_info() -> DeviceInfoFn {
+    Arc::new(|| None)
+}
+
 /* -------------------------------------------------------------------------- */
 /* Script environment                                                          */
 /* -------------------------------------------------------------------------- */
@@ -242,6 +286,12 @@ pub struct ScriptEnv {
     sink: Sink,
     frame_sink: FrameSink,
     capture_sink: CaptureSink,
+    /// Registry-side identity/capabilities of the bound device (lot F6) —
+    /// defaulted to [`no_device_info`] by `new` and installed with
+    /// [`Self::with_device_info`]: the constructor is FROZEN like
+    /// `Session::new` (`examples/hw_script.rs` builds it, and `cargo test`
+    /// compiles examples — the `GeneratorFlags::from_parts` precedent).
+    device_info: DeviceInfoFn,
     emitted: StdMutex<Emitted>,
 }
 
@@ -261,8 +311,16 @@ impl ScriptEnv {
             sink,
             frame_sink,
             capture_sink,
+            device_info: no_device_info(),
             emitted: StdMutex::new(Emitted::default()),
         }
+    }
+
+    /// Install the bound-device provider (lot F6) — builder, not a `new`
+    /// param, to keep the frozen constructor compiling in the examples.
+    pub fn with_device_info(mut self, f: DeviceInfoFn) -> Self {
+        self.device_info = f;
+        self
     }
 
     /// Drive an async device operation to completion from the script's
@@ -306,6 +364,84 @@ fn left_right_map(v: LeftRight) -> Map {
     let mut m = Map::new();
     m.insert("left".into(), Dynamic::from_float(v.left));
     m.insert("right".into(), Dynamic::from_float(v.right));
+    m
+}
+
+/// The `caps.calibration` tag of `device()` — a plain string, never the
+/// variant payload (page sizes / user labels are diagnostics, not script
+/// API).
+fn calibration_tag(c: &crate::device::CalibrationSource) -> &'static str {
+    use crate::device::CalibrationSource as C;
+    match c {
+        C::Unknown => "unknown",
+        C::FactoryEeprom { .. } => "factory",
+        C::NominalFallback => "nominal",
+        C::User { .. } => "user",
+    }
+}
+
+/// The `caps` sub-map of `device()`: the open unit's capability record
+/// (channels, rate/range tables, level/band limits, calibration source).
+fn caps_map(caps: &crate::device::DeviceCapabilities) -> Map {
+    let ints = |v: &[i32]| -> Dynamic {
+        v.iter().map(|&x| Dynamic::from_int(x as i64)).collect::<Array>().into()
+    };
+    let mut m = Map::new();
+    m.insert("input_channels".into(), Dynamic::from_int(caps.input_channels as i64));
+    m.insert("output_channels".into(), Dynamic::from_int(caps.output_channels as i64));
+    m.insert(
+        "sample_rates".into(),
+        caps.sample_rates_hz.iter().map(|&r| Dynamic::from_int(r as i64)).collect::<Array>().into(),
+    );
+    m.insert("input_ranges".into(), ints(&caps.input_ranges_dbv));
+    m.insert("output_ranges".into(), ints(&caps.output_ranges_dbv));
+    m.insert("min_output_vrms".into(), Dynamic::from_float(caps.min_output_vrms));
+    m.insert("max_output_vrms".into(), Dynamic::from_float(caps.max_output_vrms));
+    m.insert("max_input_vrms".into(), Dynamic::from_float(caps.max_input_vrms));
+    m.insert("min_hz".into(), Dynamic::from_float(caps.min_measurement_hz));
+    m.insert("max_hz".into(), Dynamic::from_float(caps.max_measurement_hz));
+    m.insert("calibration".into(), calibration_tag(&caps.calibration).into());
+    m
+}
+
+/// The `device()` map (issue #25 lot F6): identity + live status + caps of
+/// the device THIS run is bound to — the session the run was built on, never
+/// "the default device" and never the focused one. One fixed key set (no
+/// shape branching): registry-less runs (bare sessions in tests/examples,
+/// or nothing open) read empty identity strings and an empty `caps` map.
+/// Key is `is_virtual`, not `virtual` — `virtual` is Rhai-reserved in
+/// property position. Status is one device-lock acquisition
+/// (`Session::status`); identity is a lock-free bookkeeping read.
+fn device_map(env: &ScriptEnv) -> Map {
+    let open = (env.device_info)();
+    let st = env.block(env.session.status());
+    let mut m = Map::new();
+    match &open {
+        Some(o) => {
+            let ident = &o.descriptor.identity;
+            m.insert("id".into(), o.id.as_str().to_string().into());
+            m.insert("source".into(), o.id.source().to_string().into());
+            m.insert("serial".into(), ident.serial.clone().into());
+            m.insert("serial_synthetic".into(), Dynamic::from_bool(ident.serial_synthetic));
+            m.insert("is_virtual".into(), Dynamic::from_bool(ident.is_virtual));
+            m.insert("caps".into(), Dynamic::from_map(caps_map(&o.descriptor.capabilities)));
+        }
+        None => {
+            m.insert("id".into(), "".into());
+            m.insert("source".into(), "".into());
+            m.insert("serial".into(), "".into());
+            m.insert("serial_synthetic".into(), Dynamic::from_bool(false));
+            m.insert("is_virtual".into(), Dynamic::from_bool(false));
+            m.insert("caps".into(), Dynamic::from_map(Map::new()));
+        }
+    }
+    m.insert("connected".into(), Dynamic::from_bool(st.connected));
+    m.insert("model".into(), st.model.into());
+    m.insert("firmware".into(), st.firmware.into());
+    m.insert("sample_rate".into(), Dynamic::from_int(st.sample_rate_hz as i64));
+    m.insert("input_range".into(), Dynamic::from_int(st.input_range_dbv as i64));
+    m.insert("output_range".into(), Dynamic::from_int(st.output_range_dbv as i64));
+    m.insert("buffer_size".into(), Dynamic::from_int(st.buffer_size as i64));
     m
 }
 
@@ -494,6 +630,22 @@ fn register_common(engine: &mut Engine, env: &Arc<ScriptEnv>) {
     let e = env.clone();
     engine.register_fn("output_range", move || -> i64 {
         e.block(e.session.output_range_dbv()) as i64
+    });
+
+    // ---- the bound device, one map (issue #25 lot F6) ------------------------
+    let e = env.clone();
+    engine.register_fn("device", move || -> Map { device_map(&e) });
+    // R4 (2026-07-30) settled read-only: mid-script device switching is an
+    // improvement lead, not scheduled. The stub records the decision in the
+    // product — a legible refusal instead of "function not found".
+    const USE_DEVICE_MSG: &str = "use_device() does not exist: a script runs on the device its \
+         program is pinned to. Pin it via the program's Device selector (or run the script from \
+         the device's session) — a script never switches device mid-run.";
+    engine.register_fn("use_device", move || -> Result<(), Box<EvalAltResult>> {
+        Err(rt_err(USE_DEVICE_MSG))
+    });
+    engine.register_fn("use_device", move |_id: &str| -> Result<(), Box<EvalAltResult>> {
+        Err(rt_err(USE_DEVICE_MSG))
     });
 
     // ---- emission (script traces draw into the dashboard, task #39) ----------
@@ -881,6 +1033,11 @@ pub struct MeasurementScript {
     frame_sink: FrameSink,
     capture_sink: CaptureSink,
     metrics_sink: MetricsSink,
+    /// The bound-device provider `device()` reads (lot F6). An EXPLICIT
+    /// param, not a builder: this type has one production caller
+    /// (`ScriptControl::start`) and a forgotten setter would silently
+    /// blind `device()` on every script.
+    device_info: DeviceInfoFn,
 }
 
 impl MeasurementScript {
@@ -890,22 +1047,26 @@ impl MeasurementScript {
         frame_sink: FrameSink,
         capture_sink: CaptureSink,
         metrics_sink: MetricsSink,
+        device_info: DeviceInfoFn,
     ) -> Self {
-        Self { source, sink, frame_sink, capture_sink, metrics_sink }
+        Self { source, sink, frame_sink, capture_sink, metrics_sink, device_info }
     }
 }
 
 #[async_trait]
 impl MeasurementProgram for MeasurementScript {
     async fn run(&mut self, session: &mut Session, cancel: &CancelToken) -> Result<(), String> {
-        let env = Arc::new(ScriptEnv::new(
-            session.clone(),
-            tokio::runtime::Handle::current(),
-            cancel.flag().clone(),
-            self.sink.clone(),
-            self.frame_sink.clone(),
-            self.capture_sink.clone(),
-        ));
+        let env = Arc::new(
+            ScriptEnv::new(
+                session.clone(),
+                tokio::runtime::Handle::current(),
+                cancel.flag().clone(),
+                self.sink.clone(),
+                self.frame_sink.clone(),
+                self.capture_sink.clone(),
+            )
+            .with_device_info(self.device_info.clone()),
+        );
         let source = self.source.clone();
         let metrics_sink = self.metrics_sink.clone();
         let res = tokio::task::spawn_blocking(move || {
@@ -1067,6 +1228,10 @@ impl ScriptControl {
     /// the run actually finishes, not when this call returns; a refused
     /// start (size, already-running) drops it immediately on the error
     /// path, holding nothing.
+    /// `device_info` is the bound-device provider `device()` reads (lot F6),
+    /// built by the caller from the SAME resolved runtime the session and
+    /// the gate came from — an explicit param so a new call site can't
+    /// silently blind the verb.
     pub fn start(
         &self,
         app: tauri::AppHandle,
@@ -1074,6 +1239,7 @@ impl ScriptControl {
         source: String,
         role: ScriptRole,
         guard: Option<crate::device::runtime::ProgramGuard>,
+        device_info: DeviceInfoFn,
     ) -> Result<(), String> {
         if source.len() > MAX_SOURCE_BYTES {
             return Err(format!("script too large (>{MAX_SOURCE_BYTES} bytes)"));
@@ -1099,14 +1265,17 @@ impl ScriptControl {
         let running = self.running.clone();
         match role {
             ScriptRole::Source => {
-                let env = Arc::new(ScriptEnv::new(
-                    session,
-                    tokio::runtime::Handle::current(),
-                    self.cancel.clone(),
-                    sink,
-                    frame_sink,
-                    capture_sink,
-                ));
+                let env = Arc::new(
+                    ScriptEnv::new(
+                        session,
+                        tokio::runtime::Handle::current(),
+                        self.cancel.clone(),
+                        sink,
+                        frame_sink,
+                        capture_sink,
+                    )
+                    .with_device_info(device_info),
+                );
                 tokio::task::spawn_blocking(move || {
                     // Moved in even for a source run (always None today):
                     // a guard must never outlive-or-underlive its run.
@@ -1120,8 +1289,14 @@ impl ScriptControl {
                 let metrics_sink: MetricsSink = Arc::new(move |m| {
                     let _ = metrics_app.emit("script-metrics", m);
                 });
-                let mut program =
-                    MeasurementScript::new(source, sink, frame_sink, capture_sink, metrics_sink);
+                let mut program = MeasurementScript::new(
+                    source,
+                    sink,
+                    frame_sink,
+                    capture_sink,
+                    metrics_sink,
+                    device_info,
+                );
                 let cancel = CancelToken::from_flag(self.cancel.clone());
                 let mut session = session;
                 tokio::spawn(async move {
@@ -1209,6 +1384,28 @@ mod tests {
         lines.lock().unwrap().iter().map(|(s, _)| s.clone()).collect()
     }
 
+    /// `test_env` with a bound-device provider (lot F6): what a real
+    /// `script_run` installs from its resolved runtime, here backed by a
+    /// fake registry descriptor.
+    fn test_env_with_device(
+        open: crate::device::OpenDevice,
+    ) -> (
+        Arc<ScriptEnv>,
+        Arc<StdMutex<Vec<(String, bool)>>>,
+        tokio::runtime::Runtime,
+    ) {
+        let (env, lines, _frames, rt) = test_env();
+        let env = Arc::try_unwrap(env).ok().expect("fresh env has one ref");
+        let env = Arc::new(env.with_device_info(Arc::new(move || Some(open.clone()))));
+        (env, lines, rt)
+    }
+
+    fn fake_open(unit_key: &str) -> crate::device::OpenDevice {
+        let src = crate::device::SourceId::new("usb");
+        let desc = crate::device::testing::fake_descriptor(&src, unit_key, true);
+        crate::device::OpenDevice { id: desc.id.clone(), descriptor: desc }
+    }
+
     #[test]
     fn print_reaches_the_sink() {
         let (env, lines, _frames, _rt) = test_env();
@@ -1244,6 +1441,87 @@ mod tests {
         killer.join().unwrap();
         assert!(err.contains("stopped by user"), "got: {err}");
         assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn device_reports_the_same_values_as_the_single_verbs() {
+        // One map instead of six calls — same values (the SessionStatus
+        // anti-drift test pins the Rust side; this pins the Rhai side).
+        let (env, lines, _frames, _rt) = test_env();
+        run_measurement_script(
+            env,
+            r#"let d = device();
+               print(d.connected == connected());
+               print(d.model == model());
+               print(d.firmware == firmware_version());
+               print(d.sample_rate == sample_rate());
+               print(d.input_range == input_range());
+               print(d.output_range == output_range());"#,
+        )
+        .unwrap();
+        assert_eq!(outputs(&lines), vec!["true"; 6]);
+    }
+
+    #[test]
+    fn device_without_an_open_unit_has_empty_identity_and_empty_caps() {
+        // A bare Session (tests, examples, nothing open through the
+        // registry): fixed key set, empty values — never a shape branch.
+        let (env, lines, _frames, _rt) = test_env();
+        run_measurement_script(
+            env,
+            r#"let d = device();
+               print(d.id); print(d.serial); print(d.source);
+               print(d.caps.len()); print(d.is_virtual); print(d.serial_synthetic);"#,
+        )
+        .unwrap();
+        assert_eq!(outputs(&lines), vec!["", "", "", "0", "false", "false"]);
+    }
+
+    #[test]
+    fn device_reports_the_bound_units_identity_and_capabilities() {
+        let (env, lines, _rt) = test_env_with_device(fake_open("AB12"));
+        run_measurement_script(
+            env,
+            r#"let d = device();
+               print(d.id); print(d.source); print(d.serial);
+               print(d.serial_synthetic); print(d.is_virtual);
+               print(d.caps.sample_rates.len()); print(d.caps.input_ranges[7]);
+               print(d.caps.output_ranges[3]); print(d.caps.calibration);
+               print(d.caps.input_channels);"#,
+        )
+        .unwrap();
+        assert_eq!(
+            outputs(&lines),
+            // The fake descriptor is a physical QA403: 4 rates (incl. 384k),
+            // the full range tables, calibration not read (no real open).
+            vec!["usb/AB12", "usb", "AB12", "false", "false", "4", "42", "18", "unknown", "2"]
+        );
+    }
+
+    #[test]
+    fn device_is_available_to_source_scripts_too() {
+        // Cached-status family ⇒ registered in register_common: reading
+        // identity is not driving the device, and it must never re-classify
+        // a plot script as a measurement one (scriptrole.ts pins the TS
+        // side).
+        let (env, lines, _rt) = test_env_with_device(fake_open("AB12"));
+        run_source_script(env, r#"print(device().serial); print(device().connected);"#).unwrap();
+        assert_eq!(outputs(&lines), vec!["AB12", "false"]);
+    }
+
+    #[test]
+    fn use_device_is_refused_legibly_in_both_families() {
+        // R4 settled read-only: the stub names the rule instead of
+        // "function not found", in both engines and both arities.
+        let (env, _lines, _frames, _rt) = test_env();
+        let err = run_measurement_script(env, r#"use_device("usb/AB12");"#).unwrap_err();
+        assert!(err.contains("never switches device mid-run"), "got: {err}");
+        let (env, _lines, _frames, _rt) = test_env();
+        let err = run_measurement_script(env, "use_device();").unwrap_err();
+        assert!(err.contains("never switches device mid-run"), "got: {err}");
+        let (env, _lines, _frames, _rt) = test_env();
+        let err = run_source_script(env, r#"use_device("usb/AB12");"#).unwrap_err();
+        assert!(err.contains("never switches device mid-run"), "got: {err}");
     }
 
     #[test]
@@ -1531,6 +1809,7 @@ mod tests {
             frame_sink,
             capture_sink,
             metrics_sink,
+            no_device_info(),
         );
         let cancel = CancelToken::new();
         rt.block_on(program.run(&mut session, &cancel)).unwrap();
@@ -1543,6 +1822,7 @@ mod tests {
             Arc::new(|_f: &Frame| {}),
             Arc::new(|_c: &ScriptCapture| {}),
             Arc::new(|_m| {}),
+            no_device_info(),
         );
         let err = rt.block_on(failing.run(&mut session, &cancel)).unwrap_err();
         assert!(err.contains("not connected"), "got: {err}");

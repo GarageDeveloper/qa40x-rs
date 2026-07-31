@@ -37,9 +37,11 @@ pub struct AppState {
     /// phase. Populated by the firmware extraction commands.
     firmware_images: firmware::FirmwareStore,
     /// QA40x-compatible REST automation server, built over the default
-    /// runtime's device handle (device selection for REST is lot F; the
-    /// QA40x-compatible scheme stays default-device-bound by specification).
-    /// Bound localhost-only by default; the UI can expose it on the network.
+    /// runtime's device handle. Mono-device BY SPECIFICATION (issue #25 lot
+    /// F6, doc + pin in `rest.rs`): genuine-app parity, what the A/B bench
+    /// diffs against. Multi-device REST is issue #69 — a separate endpoint
+    /// namespace to be specified, never a segment on these paths. Bound
+    /// localhost-only by default; the UI can expose it on the network.
     rest: Arc<Mutex<rest::RestControl>>,
     /// In-app Rhai scripting (task #22) — the scripting counterpart to the
     /// REST server. Device-agnostic since issue #25 lot F: `script_run`
@@ -462,8 +464,19 @@ async fn script_run(
         rt.generator().running_flag().clone(),
         rt.generator().stop_flag().clone(),
     );
+    let device_info = script_device_info(&rt);
     let ctl = { state.lock().await.script.clone() };
-    ctl.start(app, session, source, role, guard)
+    ctl.start(app, session, source, role, guard, device_info)
+}
+
+/// The device a script run reads through `device()` (issue #25 lot F6): the
+/// RESOLVED runtime's open-unit bookkeeping, read live and per call.
+/// Captures ONLY the runtime — never `AppState` (lock-cycle risk) — and is
+/// extracted from `script_run` so it is testable without an `AppHandle`
+/// (the E1 MockRuntime limitation, same rationale as `claim_script_gate`).
+fn script_device_info(rt: &device::DeviceRuntime) -> script::DeviceInfoFn {
+    let rt = rt.clone();
+    std::sync::Arc::new(move || rt.current())
 }
 
 /// The lot-F4 role→gate mapping of `script_run`, extracted so the tests can
@@ -2085,6 +2098,72 @@ mod command_arg_tests {
             session0.sample_rate_hz().await,
             48_000,
             "a `None` deviceId session must drive the default device — untouched by device B's config"
+        );
+    }
+
+    /// The `device()` provider (lot F6) reports the runtime it was BUILT
+    /// for — never the default device — and goes empty when that unit
+    /// closes mid-run (the live-read rule; `script_run` itself is out of
+    /// MockRuntime's reach, same E1 limitation as above, so the extracted
+    /// helper is the pinnable seam).
+    #[tokio::test]
+    async fn script_device_info_reports_the_runtime_it_was_built_for() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let devices = { state.lock().await.devices.clone() };
+        devices.open_virtual().await.expect("the default virtual device opens on slot 0");
+        devices
+            .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
+            .await
+            .expect("the built-in second virtual unit opens on a fresh slot");
+
+        let rt0 = devices.runtime_for(None).expect("default routes to slot 0");
+        let rt1 = devices
+            .runtime_for(Some("virtual/0DE0_0002"))
+            .expect("the second id routes to slot 1");
+
+        let info0 = script_device_info(&rt0);
+        let info1 = script_device_info(&rt1);
+        let open1 = info1().expect("slot 1's provider sees its open unit");
+        assert_eq!(open1.id.as_str(), "virtual/0DE0_0002");
+        let open0 = info0().expect("slot 0's provider sees its open unit");
+        assert_ne!(open0.id, open1.id, "each provider names ITS runtime's unit");
+
+        // Mid-run loss: the provider reads live bookkeeping, never a
+        // snapshot — a closed unit reads as None (device() then reports
+        // empty identity + connected:false).
+        devices.close_runtime(&rt1).await.expect("slot 1 closes");
+        assert!(info1().is_none(), "a closed runtime's provider must go empty");
+        assert!(info0().is_some(), "slot 0 is untouched");
+    }
+
+    /// The REST server is bound to the DEFAULT runtime's device handle —
+    /// mono-device by specification (lot F6 doc in `rest.rs`; multi-device
+    /// REST is #69). This pin is what catches a refactor accidentally
+    /// rebinding REST onto another slot's handle.
+    #[tokio::test]
+    async fn the_rest_server_is_bound_to_the_default_devices_handle() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let (devices, rest) = {
+            let st = state.lock().await;
+            (st.devices.clone(), st.rest.clone())
+        };
+        devices.open_virtual().await.expect("the default virtual device opens on slot 0");
+        devices
+            .open_additional(&device::DeviceId::from_wire("virtual/0DE0_0002"), None)
+            .await
+            .expect("the built-in second virtual unit opens on a fresh slot");
+        let rt1 = devices
+            .runtime_for(Some("virtual/0DE0_0002"))
+            .expect("the second id routes to slot 1");
+
+        let handle = rest.lock().await.device_handle();
+        assert!(
+            Arc::ptr_eq(&handle, &devices.default_runtime().handle()),
+            "REST drives slot 0's handle"
+        );
+        assert!(
+            !Arc::ptr_eq(&handle, &rt1.handle()),
+            "REST must not drive an additional slot's handle"
         );
     }
 }

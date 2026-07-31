@@ -40,10 +40,15 @@ export function runningPrograms(s: AppState): ProgramMeta[] {
     .filter((p): p is ProgramMeta => !!p && p.run === "running");
 }
 
-/** The RUNNING script program's id, or null — scripts stay bench-exclusive
- * in F4 (the backend `ScriptControl` is a single engine: one `running`
- * flag, an arg-less `script_stop`, un-keyed `script-log`/`script-frame`
- * events). Per-device scripts arrive with the Rhai device work (F5/F6). */
+/** The RUNNING script program's id, or null. Script ROUTING is per device
+ * since F1/F4 (`script_run` carries the program's `deviceId`, the backend
+ * builds the Session from that runtime and claims ITS gate — a slot-1 pin
+ * really runs on slot 1); what stays bench-exclusive is CONCURRENCY: the
+ * backend `ScriptControl` is a single engine (one `running` flag, an
+ * arg-less `script_stop`, un-keyed `script-log`/`script-frame` events —
+ * unambiguous precisely because only one script runs). N concurrent
+ * scripts (one engine per device) is a candidate follow-up, not scheduled
+ * (issue #25 lot F6). */
 export function runningScriptId(s: AppState): string | null {
   for (const p of runningPrograms(s)) {
     if (p.kind === "script") return p.id;

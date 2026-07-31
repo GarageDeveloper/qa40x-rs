@@ -162,6 +162,9 @@ print("Plotted sweep + spectrum + scope.");
 if !connected() {
     throw "Connect the QA40x first.";
 }
+// device() names the unit this run is bound to (issue #25 lot F6) — a
+// pass/fail log that identifies the analyzer it ran on.
+print("device: " + device().model + " " + device().serial);
 set_sample_rate(48000);
 set_input_range(6);
 set_output_range(8);

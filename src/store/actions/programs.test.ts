@@ -1068,6 +1068,45 @@ describe("actions/programs — session-keyed programs (issue #25 lot F)", () => 
     expect(store.get().traces.byId[id].capture?.device?.serial).toBe("B-SERIAL");
   });
 
+  it("a SCRIPT pinned to slot 1 sends its deviceId on script_run; a slot-0 script stays arg-less (lot F6 wire pin)", async () => {
+    // The sweep twin of this pin exists since F4; the script half was the
+    // gap the F6 planning session found — the routing was correct end to
+    // end, but nothing pinned the frontend's wire call.
+    const store = new Store(withConnectedSlot1(withDevice(initialState(), { status: "connected" })));
+    initProgramEvents(store);
+    const { listen } = await import("@tauri-apps/api/event");
+    const regs = (listen as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c: unknown[]) => c[0] === "script-state"
+    );
+    const stateHandler = regs[regs.length - 1]?.[1] as (e: {
+      payload: { running: boolean; error: string | null };
+    }) => void;
+    expect(stateHandler).toBeDefined();
+
+    const { ipc, calls } = recordingIpc();
+    const pinned = addProgram(store, "script");
+    setProgramDeviceSlot(store, pinned, 1);
+    const run1 = runProgram(store, ipc, pinned);
+    await flush();
+    const call1 = calls.find((c) => c.cmd === "script_run");
+    expect(call1, "script_run must have been invoked").toBeDefined();
+    expect((call1!.args as { deviceId?: string }).deviceId).toBe("usb/B");
+    stateHandler({ payload: { running: false, error: null } });
+    await run1;
+
+    const second = recordingIpc();
+    const unpinned = addProgram(store, "script");
+    const run0 = runProgram(store, second.ipc, unpinned);
+    await flush();
+    const call0 = second.calls.find((c) => c.cmd === "script_run");
+    expect(call0, "script_run must have been invoked").toBeDefined();
+    // Slot 0 is arg-less by the sessionArgs contract (the backend default
+    // runtime IS slot 0) — a deviceId here would break the devices.pw pin.
+    expect((call0!.args as { deviceId?: string }).deviceId).toBeUndefined();
+    stateHandler({ payload: { running: false, error: null } });
+    await run0;
+  });
+
   it("a second SCRIPT is refused bench-wide while one runs — and never clobbers the first run's record (globals-per-run, lot F4)", async () => {
     const store = new Store(withConnectedSlot1(withDevice(initialState(), { status: "connected" })));
     initProgramEvents(store);

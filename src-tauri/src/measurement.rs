@@ -101,6 +101,24 @@ pub struct LeftRight {
     pub right: f64,
 }
 
+/// One consistent status/config snapshot of a session's device (issue #25
+/// lot F6): the same cached values as the individual getters
+/// (`connected`/`model_name`/`firmware_version`/`sample_rate_hz`/
+/// `input_range_dbv`/`output_range_dbv`/`buffer_size`), read under a SINGLE
+/// device-lock acquisition by [`Session::status`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionStatus {
+    pub connected: bool,
+    /// Model display name; empty when nothing identified yet.
+    pub model: String,
+    /// Firmware build number as text; `"0"` when unknown.
+    pub firmware: String,
+    pub sample_rate_hz: u32,
+    pub input_range_dbv: i32,
+    pub output_range_dbv: i32,
+    pub buffer_size: usize,
+}
+
 /// The generator settings a session plays on `acquire()` — same model as the
 /// REST `GenConfig`, plus the output routing.
 #[derive(Clone, Debug)]
@@ -358,6 +376,33 @@ impl Session {
 
     pub async fn connected(&self) -> bool {
         self.device.lock().await.is_connected().await
+    }
+
+    /// One consistent status snapshot under a SINGLE device-lock acquisition
+    /// (issue #25 lot F6 — the Rhai `device()` verb): the same cached values
+    /// as the six individual getters, but read atomically — composing the
+    /// getters takes six lock acquisitions and can interleave with a config
+    /// write. The individual getters stay (frozen surface, other callers).
+    pub async fn status(&self) -> SessionStatus {
+        let dev = self.device.lock().await;
+        let connected = dev.is_connected().await;
+        let model = dev.model().await.map(|m| m.name().to_string()).unwrap_or_default();
+        let firmware = dev
+            .device_meta()
+            .await
+            .map(|m| m.firmware_version.to_string())
+            .unwrap_or_else(|| "0".into());
+        let cfg = dev.get_config().await;
+        drop(dev);
+        SessionStatus {
+            connected,
+            model,
+            firmware,
+            sample_rate_hz: cfg.sample_rate.as_hz(),
+            input_range_dbv: cfg.input_gain.as_dbv(),
+            output_range_dbv: cfg.output_gain.as_dbv(),
+            buffer_size: self.buffer_size(),
+        }
     }
 
     pub async fn firmware_version(&self) -> String {
@@ -777,6 +822,22 @@ mod tests {
         assert!(s.is_active());
         rt.block_on(s.end());
         assert!(!s.is_active());
+    }
+
+    #[test]
+    fn session_status_matches_the_individual_getters() {
+        // The anti-drift guard for the one-lock snapshot (lot F6): field by
+        // field equality with the six getters it replaces for `device()`.
+        let rt = rt();
+        let s = test_session();
+        let st = rt.block_on(s.status());
+        assert_eq!(st.connected, rt.block_on(s.connected()));
+        assert_eq!(st.model, rt.block_on(s.model_name()));
+        assert_eq!(st.firmware, rt.block_on(s.firmware_version()));
+        assert_eq!(st.sample_rate_hz, rt.block_on(s.sample_rate_hz()));
+        assert_eq!(st.input_range_dbv, rt.block_on(s.input_range_dbv()));
+        assert_eq!(st.output_range_dbv, rt.block_on(s.output_range_dbv()));
+        assert_eq!(st.buffer_size, s.buffer_size());
     }
 
     #[test]
