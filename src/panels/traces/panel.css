@@ -230,9 +230,54 @@ select.traces__group-sel {
   color: var(--ink-1);
 }
 
+/* The front-panel I2S port line (issue #71): toggle + reference + readout,
+   always rendered — state flips disabled/text, never presence. */
+.traces__group-i2s {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 2px;
+  min-width: 0;
+}
+
+.traces__group-i2s-tgl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  flex: none;
+}
+
+input.traces__group-i2s-ref {
+  font-size: 11px;
+  width: 52px;
+  padding: 3px 4px;
+}
+
+.traces__group-i2s-readout {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traces__group-i2s-readout--err {
+  color: var(--err);
+}
+
+.traces__group-i2s-readout--clip {
+  color: var(--err);
+}
+
 /* Collapsed group: header only — controls and rows fold away (same
    disclosure idiom as the sidebar sections' is-collapsed). */
 .traces__group--collapsed .traces__group-ctls,
+.traces__group--collapsed .traces__group-i2s,
 .traces__group--collapsed .traces__group-rows {
   display: none;
 }

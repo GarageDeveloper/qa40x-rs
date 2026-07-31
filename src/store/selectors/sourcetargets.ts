@@ -43,6 +43,12 @@ export interface SourceTargetVM {
   route: SourceRoute;
   left: boolean;
   right: boolean;
+  /** The cell's I2S dimension (issue #71) — off for an absent cell. */
+  i2sRoute: SourceRoute;
+  i2sLeft: boolean;
+  i2sRight: boolean;
+  /** This slot's I2S port is enabled (the device-group toggle). */
+  i2sPortOn: boolean;
   status: "disconnected" | "connecting" | "connected" | "absent";
   /** Session exists and is connected — the target can actually play. */
   live: boolean;
@@ -83,7 +89,7 @@ const COMBINED_NOTE = "same device as Focused right now — channels are combine
 export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
   const src = s.sources.byId[srcId];
   if (!src) return [];
-  const cells = new Map(sourceRouting(src).map((t) => [tagOfSlot(t.slot), t.route]));
+  const cells = new Map(sourceRouting(src).map((t) => [tagOfSlot(t.slot), t]));
   const focusSlot = slotOfSessionKey(s.devices.focus);
   // Coalescing tell: the implicit focus cell and an explicit cell for the
   // focused slot resolve onto ONE session — flag both rows.
@@ -120,9 +126,14 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
         : sess
           ? `#${n} ${deviceName}`
           : `#${n} — not connected`;
-    const route = cells.get(tag) ?? null;
-    const present = route !== null;
+    const cell = cells.get(tag) ?? null;
+    const route = cell?.route ?? null;
+    const present = cell !== null;
     const checks = routeChecks(route ?? "off");
+    const i2sRoute = cell?.i2sRoute ?? "off";
+    const i2sChecks = routeChecks(i2sRoute);
+    const i2sPortOn =
+      s.i2sPorts[String(slot ?? focusSlot)]?.enabled === true;
     const rate = sess?.device.config?.sample_rate ?? null;
     const playedHz =
       hasFreq && rate !== null
@@ -161,7 +172,15 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
       const label = s.traces.byId[lockId]?.label ?? "program";
       note = `measurement "${label}" is running — applies when it finishes`;
     } else if (sameAsFocus) note = COMBINED_NOTE;
-    else if (present && route === "off") note = "off (no channel)";
+    else if (present && i2sRoute !== "off" && !i2sPortOn) {
+      // Routed to a port that is off (issue #71): the checkbox looks live
+      // but nothing plays there until the device group's I2S toggle goes
+      // on — say so instead of silence (the F2 disabled-with-reason
+      // standard, note-shaped).
+      note = "I2S port off — enable it on the device group";
+    } else if (present && route === "off" && i2sRoute === "off") {
+      note = "off (no channel)";
+    }
     return {
       tag,
       slot,
@@ -173,6 +192,10 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
       route: route ?? "off",
       left: present && checks.left,
       right: present && checks.right,
+      i2sRoute,
+      i2sLeft: present && i2sChecks.left,
+      i2sRight: present && i2sChecks.right,
+      i2sPortOn,
       status,
       live,
       routable,
@@ -198,12 +221,17 @@ export function routingSummary(vms: SourceTargetVM[]): { text: string; title: st
   const warn = present.some((v) => !(v.live && v.routable));
   const tokens = present.map((v) => {
     const tagText = v.slot === null ? "focus" : `#${v.n}`;
-    return `${tagText} ${routeGlyph(v.route)}${v.live && v.routable ? "" : " ⚠"}`;
+    const i2s = v.i2sRoute !== "off" ? `·i2s ${routeGlyph(v.i2sRoute)}` : "";
+    return `${tagText} ${routeGlyph(v.route)}${i2s}${v.live && v.routable ? "" : " ⚠"}`;
   });
   const lines = present.map((v) => {
     if (!v.live) return `#${v.n}: not connected — nothing plays there`;
     const name = v.slot === null ? `Follows focus (${v.deviceName})` : `#${v.n} ${v.deviceName}`;
-    return `${name}: ${routeLong(v.route)}${v.routable ? "" : " (device id not adopted yet)"}`;
+    const i2s =
+      v.i2sRoute !== "off"
+        ? ` · I2S ${routeGlyph(v.i2sRoute)}${v.i2sPortOn ? "" : " (port off)"}`
+        : "";
+    return `${name}: ${routeLong(v.route)}${i2s}${v.routable ? "" : " (device id not adopted yet)"}`;
   });
   return {
     text: `Routing${warn ? " ⚠" : ""}`,

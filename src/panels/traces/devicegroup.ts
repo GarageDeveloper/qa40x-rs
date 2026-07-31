@@ -27,6 +27,7 @@ import {
   setOutputRange,
   setSampleRate,
 } from "../../store/actions/device";
+import { setI2sEnabled, setI2sReference } from "../../store/actions/i2s";
 import { startRun, stopRun } from "../../store/actions/stream";
 import { togglePanelCollapsed } from "../../store/actions/workspace";
 import { reviveCandidateId } from "../../store/selectors/devices";
@@ -70,6 +71,18 @@ export interface GroupVM {
   inputGain: number | null;
   outputGain: number | null;
   sampleRate: number | null;
+  /* Front-panel I2S port (issue #71). Deliberately NO blocks counter here —
+   * it advances every status poll and would re-render the pool through the
+   * JSON signature (the no-per-frame-fields rule above). */
+  i2sSupported: boolean;
+  i2sEnabled: boolean;
+  i2sReferenceDbv: number;
+  i2sRunning: boolean;
+  i2sSigmaDbv: number | null;
+  i2sClipped: boolean;
+  i2sError: string | null;
+  /** Some PLAYING source audibly routes to this port. */
+  i2sRouted: boolean;
 }
 
 export interface GroupView {
@@ -226,12 +239,59 @@ export function createDeviceGroup(
     rateSel.root
   );
 
+  // The front-panel I2S port line (issue #71): toggle + reference level +
+  // readout, ALWAYS rendered (no-layout-shift) — state flips disabled/text,
+  // never presence.
+  const i2sToggle = el("input", {
+    type: "checkbox",
+    "data-testid": `i2s-toggle-${slot}`,
+    onchange: (e: Event) =>
+      setI2sEnabled(store, ipc, key, (e.target as HTMLInputElement).checked),
+  }) as HTMLInputElement;
+  const i2sRef = el("input.field.traces__group-i2s-ref", {
+    type: "number",
+    step: "any",
+    "data-testid": `i2s-ref-${slot}`,
+    title:
+      "I2S reference level: the source level (dBV) that lands at the " +
+      "port's digital full scale — a source at this level plays 0 dBFS",
+    onchange: (e: Event) =>
+      setI2sReference(store, ipc, key, Number((e.target as HTMLInputElement).value)),
+  }) as HTMLInputElement;
+  const i2sReadout = el("span.traces__group-i2s-readout", {
+    "data-testid": `i2s-readout-${slot}`,
+  });
+  const i2s = el(
+    "div.traces__group-i2s",
+    {},
+    el(
+      "label.traces__group-i2s-tgl",
+      {
+        title:
+          "Drive the front-panel I2S expansion port (48 kHz, 32-bit). " +
+          "Route sources to it from the Signal Sources panel's I2S " +
+          "checkboxes; with nothing routed the port clocks silence.",
+      },
+      i2sToggle,
+      "I2S out"
+    ),
+    el(
+      "label.traces__group-ctl",
+      {},
+      el("span.traces__group-ctl-label", {}, "FS @"),
+      i2sRef,
+      el("span.traces__group-ctl-label", {}, "dBV")
+    ),
+    i2sReadout
+  );
+
   const rowHost = el("div.traces__group-rows");
   const root = el(
     "div.traces__group",
     { "data-testid": `traces-group-${slot}`, "data-slot": String(slot) },
     head,
     ctls,
+    i2s,
     rowHost
   );
 
@@ -324,6 +384,55 @@ export function createDeviceGroup(
     for (const sel of [inSel.input, outSel.input, rateSel.input]) {
       sel.toggleAttribute("disabled", ctlsDisabled);
     }
+
+    // I2S port line (issue #71) — disabled-with-reason, never silently
+    // inert (the F2 standard); the readout is present in every state.
+    const i2sBlocked =
+      ctlsDisabled || !vm.i2sSupported || !vm.routable || vm.locked;
+    i2sToggle.checked = vm.i2sEnabled;
+    i2sToggle.toggleAttribute("disabled", i2sBlocked);
+    i2sToggle.parentElement!.title = ctlsDisabled
+      ? "Not connected"
+      : !vm.i2sSupported
+        ? "This unit's I2S endpoint is not available"
+        : !vm.routable
+          ? "Device id not adopted yet — one enumeration away; retry in a moment"
+          : vm.locked
+            ? "A measurement program owns this device"
+            : "Drive the front-panel I2S expansion port (48 kHz, 32-bit). " +
+              "Route sources to it from the Signal Sources panel's I2S " +
+              "checkboxes; with nothing routed the port clocks silence.";
+    i2sRef.toggleAttribute("disabled", i2sBlocked);
+    if (document.activeElement !== i2sRef) {
+      i2sRef.value = String(vm.i2sReferenceDbv);
+    }
+    i2sReadout.textContent = !vm.i2sEnabled
+      ? "off"
+      : vm.i2sRunning
+        ? `48 kHz · 32-bit · Σ ${
+            vm.i2sSigmaDbv !== null ? `${vm.i2sSigmaDbv.toFixed(1)} dBV` : "silent"
+          }${vm.i2sClipped ? " · CLIP" : ""}`
+        : vm.i2sError !== null
+          ? `⚠ ${vm.i2sError}`
+          : "starting…";
+    i2sReadout.title = !vm.i2sEnabled
+      ? vm.i2sRouted
+        ? "Sources are routed to this port but it is off — nothing plays " +
+          "there until the toggle goes on"
+        : "The I2S port is off"
+      : vm.i2sClipped
+        ? "The I2S mix clips its reference level: samples are clamped at " +
+          "full scale (never rescaled) — lower the source levels or raise " +
+          "the reference"
+        : i2sReadout.textContent ?? "";
+    i2sReadout.classList.toggle(
+      "traces__group-i2s-readout--err",
+      vm.i2sEnabled && !vm.i2sRunning && vm.i2sError !== null
+    );
+    i2sReadout.classList.toggle(
+      "traces__group-i2s-readout--clip",
+      vm.i2sEnabled && vm.i2sClipped
+    );
   }
 
   return { root, rowHost, update };
