@@ -20,6 +20,30 @@
 //! pin it, otherwise generated per bind). Cross-origin browser access is off
 //! unless `QA40X_REST_CORS` names an allowed origin. Numbers use a `.` decimal
 //! separator (the official app emits the host locale's separator).
+//!
+//! # Device scope (issue #25 lot F6)
+//!
+//! This server is **mono-device by specification**: it drives the DEFAULT
+//! device (slot 0's handle, captured once at `AppState::new`), and no path
+//! segment selects a unit — genuine-app parity, and what the A/B bench
+//! (`doc/bench-ab.md`) diffs against. Device-scoped path SHAPES are not
+//! part of the scheme and 404 as unknown endpoints (pinned in the tests).
+//! One pre-existing parser looseness, recorded honestly (F6 review): a few
+//! measurement arms carry IGNORED positional params (`ThdnDb`/`ThdnPct`/
+//! `SnrDb` lo/hi, `PeakDbv` lo/hi), so a device-ish string in one of those
+//! slots parses as that ignored bound and answers 200 — it still selects
+//! nothing; the answer is the default device's, always. Multi-device REST
+//! is **issue #69** — a SEPARATE endpoint namespace still to be specified,
+//! never an extra segment bolted onto these paths.
+//!
+//! **Honest limit (pre-existing, recorded):** REST acquisitions are exempt
+//! from the per-device measurement-program gate
+//! (`DeviceRuntime::try_program_lock`, whose doc carries the other half of
+//! this note): a REST `/Acquisition` drives the device through its own
+//! session path and can interleave with a gated program on the same unit
+//! between that program's device locks. `sweep_cancel` itself stays sound —
+//! no exempt path writes it. Extending the gate over REST is a candidate
+//! follow-up, not scheduled.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -176,6 +200,14 @@ impl RestControl {
             }
             Err(_) => false,
         }
+    }
+
+    /// The device handle this server drives — test-only: the mono-device
+    /// binding pin (`lib.rs`) asserts it IS the default runtime's handle
+    /// (issue #25 lot F6 / #69), so a refactor can't silently rebind REST.
+    #[cfg(test)]
+    pub(crate) fn device_handle(&self) -> Arc<Mutex<QA40xDevice>> {
+        self.state.device.clone()
     }
 
     fn status(&self) -> RestStatus {
@@ -1156,6 +1188,35 @@ mod tests {
     async fn unknown_endpoint_is_404() {
         let st = state_with_tone().await;
         assert_eq!(dispatch("/Nope/x", &st).await.unwrap_err().0, 404);
+    }
+
+    #[tokio::test]
+    async fn a_device_scoped_path_is_not_part_of_the_scheme() {
+        // Mono-device by specification (issue #25 lot F6; multi-device REST
+        // is #69, a SEPARATE namespace): any device-flavored segment 404s
+        // like an unknown endpoint — never a quiet acceptance that would
+        // freeze an accidental URL shape into the compatibility surface.
+        let st = state_with_tone().await;
+        for path in [
+            "/Devices",
+            "/Device/usb%2FAB12/Acquisition",
+            "/Status/Connection/usb%2FAB12",
+            // The near-miss shapes too (F6 review note): the Settings prefix
+            // arm falls through its own match, and an exact-arity endpoint
+            // with one EXTRA segment matches nothing.
+            "/Settings/Device/usb%2FAB12",
+            "/RmsDbv/20/20000/usb%2FAB12",
+            "/Acquisition/usb%2FAB12",
+        ] {
+            assert_eq!(dispatch(path, &st).await.unwrap_err().0, 404, "path {path}");
+        }
+        // The recorded looseness, pinned POSITIVELY (re-review): a
+        // device-ish string in an IGNORED positional slot answers 200 —
+        // and still selects nothing, the answer is the default device's
+        // (state_with_tone already holds a capture for SnrDb to measure).
+        // A future tightening to num()? must move this pin consciously,
+        // it is QA40x compatibility surface.
+        assert!(dispatch("/SnrDb/1000/20/usb%2FAB12", &st).await.is_ok());
     }
 
     #[tokio::test]

@@ -1002,4 +1002,23 @@ mod tests {
         let err = looping.try_render(&mut l, &mut r, &c).unwrap_err();
         assert!(err.contains("operations"), "got: {err}");
     }
+
+    #[test]
+    fn device_is_unreachable_from_a_played_sources_render_ctx() {
+        // The `device()` doc (`script.rs`, issue #25 lot F6) claims it is
+        // NOT available inside a played source's `render(ctx)` — "the mixer
+        // compiles its own engine with no common API". `compile` above
+        // builds that engine with only `apply_sandbox`, never
+        // `register_common`/`register_measurement_api` (the module the Rhai
+        // `device()` verb — and every other host verb — is registered
+        // into), so `device()` here is simply an unregistered function: the
+        // same "function not found" shape as calling any other host verb
+        // from a source script, not a special-cased refusal.
+        let calling = RhaiSignalSource::compile("fn render(ctx) { let d = device(); [] }").unwrap();
+        let c = ctx(48_000, 1);
+        let mut l = vec![0.0f32; 1];
+        let mut r = vec![0.0f32; 1];
+        let err = calling.try_render(&mut l, &mut r, &c).unwrap_err();
+        assert!(err.contains("device"), "got: {err}");
+    }
 }

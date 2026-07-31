@@ -274,6 +274,8 @@ impl DeviceRuntime {
     /// frontend program made of several invokes (a "both channels" THD
     /// sweep is two) releases and re-claims between them — cross-invoke
     /// exclusivity is the frontend's per-session program lock (lot F4).
+    /// The REST half of this note lives in `rest.rs`'s module doc ("Device
+    /// scope", lot F6) — the two halves reference each other.
     pub fn try_program_lock(&self) -> Result<ProgramGuard, DeviceError> {
         self.inner
             .program_gate

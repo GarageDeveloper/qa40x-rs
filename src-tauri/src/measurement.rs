@@ -101,6 +101,26 @@ pub struct LeftRight {
     pub right: f64,
 }
 
+/// One consistent status/config snapshot of a session's device (issue #25
+/// lot F6): the same cached values as the individual getters
+/// (`connected`/`model_name`/`firmware_version`/`sample_rate_hz`/
+/// `input_range_dbv`/`output_range_dbv`), read under a SINGLE device-lock
+/// acquisition by [`Session::status`]. `buffer_size` is session state (the
+/// std-mutex the getter already reads), never under the device lock — it
+/// rides along for the one-call shape, not the atomicity claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionStatus {
+    pub connected: bool,
+    /// Model display name; empty when nothing identified yet.
+    pub model: String,
+    /// Firmware build number as text; `"0"` when unknown.
+    pub firmware: String,
+    pub sample_rate_hz: u32,
+    pub input_range_dbv: i32,
+    pub output_range_dbv: i32,
+    pub buffer_size: usize,
+}
+
 /// The generator settings a session plays on `acquire()` — same model as the
 /// REST `GenConfig`, plus the output routing.
 #[derive(Clone, Debug)]
@@ -358,6 +378,33 @@ impl Session {
 
     pub async fn connected(&self) -> bool {
         self.device.lock().await.is_connected().await
+    }
+
+    /// One consistent status snapshot under a SINGLE device-lock acquisition
+    /// (issue #25 lot F6 — the Rhai `device()` verb): the same cached values
+    /// as the six individual getters, but read atomically — composing the
+    /// getters takes six lock acquisitions and can interleave with a config
+    /// write. The individual getters stay (frozen surface, other callers).
+    pub async fn status(&self) -> SessionStatus {
+        let dev = self.device.lock().await;
+        let connected = dev.is_connected().await;
+        let model = dev.model().await.map(|m| m.name().to_string()).unwrap_or_default();
+        let firmware = dev
+            .device_meta()
+            .await
+            .map(|m| m.firmware_version.to_string())
+            .unwrap_or_else(|| "0".into());
+        let cfg = dev.get_config().await;
+        drop(dev);
+        SessionStatus {
+            connected,
+            model,
+            firmware,
+            sample_rate_hz: cfg.sample_rate.as_hz(),
+            input_range_dbv: cfg.input_gain.as_dbv(),
+            output_range_dbv: cfg.output_gain.as_dbv(),
+            buffer_size: self.buffer_size(),
+        }
     }
 
     pub async fn firmware_version(&self) -> String {
@@ -777,6 +824,66 @@ mod tests {
         assert!(s.is_active());
         rt.block_on(s.end());
         assert!(!s.is_active());
+    }
+
+    #[test]
+    fn session_status_matches_the_individual_getters() {
+        // The anti-drift guard for the one-lock snapshot (lot F6): field by
+        // field equality with the six getters it replaces for `device()`.
+        let rt = rt();
+        let s = test_session();
+        let st = rt.block_on(s.status());
+        assert_eq!(st.connected, rt.block_on(s.connected()));
+        assert_eq!(st.model, rt.block_on(s.model_name()));
+        assert_eq!(st.firmware, rt.block_on(s.firmware_version()));
+        assert_eq!(st.sample_rate_hz, rt.block_on(s.sample_rate_hz()));
+        assert_eq!(st.input_range_dbv, rt.block_on(s.input_range_dbv()));
+        assert_eq!(st.output_range_dbv, rt.block_on(s.output_range_dbv()));
+        assert_eq!(st.buffer_size, s.buffer_size());
+    }
+
+    /// The connected companion to `session_status_matches_the_individual_getters`
+    /// (issue #25 lot F6 coverage hunt): the disconnected pin above never
+    /// changes the config away from `QA40xDevice::new()`'s defaults, so a
+    /// bug that made `status()` return a HARD-CODED default snapshot instead
+    /// of a live read would still pass it. This connects a real embedded
+    /// virtual QA403, reconfigures it away from the defaults, and checks
+    /// `status()` both agrees with the individual getters AND reflects the
+    /// actual new values (multi_thread: `connect_virtual()` spawns worker
+    /// tasks on the ambient runtime for the register I/O round trip, same
+    /// requirement as `tests/virtual_device.rs`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_status_matches_the_individual_getters_when_connected_and_reconfigured() {
+        let device = QA40xDevice::new();
+        device.connect_virtual().await.expect("virtual connect");
+        let s = Session::new(
+            Arc::new(Mutex::new(device)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        s.apply_config(SessionConfig {
+            sample_rate: Some(SampleRate::Rate96kHz),
+            input_range: Some(InputGain::Gain18dBV),
+            output_range: Some(OutputGain::Gain18dBV),
+            ..SessionConfig::default()
+        })
+        .await
+        .expect("a connected virtual unit accepts the reconfigure");
+
+        let st = s.status().await;
+        assert_eq!(st.connected, s.connected().await);
+        assert_eq!(st.model, s.model_name().await);
+        assert_eq!(st.firmware, s.firmware_version().await);
+        assert_eq!(st.sample_rate_hz, s.sample_rate_hz().await);
+        assert_eq!(st.input_range_dbv, s.input_range_dbv().await);
+        assert_eq!(st.output_range_dbv, s.output_range_dbv().await);
+        assert_eq!(st.buffer_size, s.buffer_size());
+        // And not just coincidentally equal to the disconnected defaults:
+        assert!(st.connected);
+        assert_eq!(st.model, "QA403");
+        assert_eq!(st.sample_rate_hz, 96_000);
+        assert_eq!(st.input_range_dbv, 18);
+        assert_eq!(st.output_range_dbv, 18);
     }
 
     #[test]

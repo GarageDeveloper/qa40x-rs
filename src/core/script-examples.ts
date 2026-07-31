@@ -162,6 +162,9 @@ print("Plotted sweep + spectrum + scope.");
 if !connected() {
     throw "Connect the QA40x first.";
 }
+// device() names the unit this run is bound to (issue #25 lot F6) — a
+// pass/fail log that identifies the analyzer it ran on.
+print("device: " + device().model + " " + device().serial);
 set_sample_rate(48000);
 set_input_range(6);
 set_output_range(8);
@@ -174,8 +177,11 @@ print("Peak found at " + peak.left.round().to_string() + " Hz");
 let rms = rms_dbv(20.0, 20000.0);
 print("RMS  L " + rms.left.to_string() + " dBV   R " + rms.right.to_string() + " dBV");
 
-// -12 dBFS on the +8 dBV output range ≈ -7 dBV at the input (loopback).
-let expected = -7.0;
+// Full scale on the +8 dBV range is a +8 dBV RMS sine, so -12 dBFS lands
+// at about -4 dBV RMS in loopback (validated on hardware AND the virtual
+// device, both within 0.4 dB — the old -7 here applied the peak-to-RMS
+// conversion twice).
+let expected = -4.0;
 if rms.left > expected - 1.0 && rms.left < expected + 1.0 {
     print("PASS: left level within 1 dB of " + expected.to_string() + " dBV");
 } else {
