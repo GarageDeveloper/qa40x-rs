@@ -57,9 +57,11 @@
 //!
 //! Everything is read LIVE at each call — never a run-start snapshot. The
 //! two halves come from two lock domains (status = the device mutex,
-//! identity/caps = the runtime's lock-free bookkeeping), so around an
-//! unplug they can briefly disagree; key presence on `connected`, identity
-//! on `id != ""` (see `device_map`'s doc). `caps` is an EMPTY map when
+//! identity/caps = the runtime's lock-free bookkeeping) and can disagree
+//! around an open/close — notably, an unplugged unit reads an EMPTY
+//! identity while `connected` (a claim state, not a bus probe) can stay
+//! true until the claim teardown lands (see `device_map`'s doc); treat
+//! `id != ""` and `connected` as two facts. `caps` is an EMPTY map when
 //! nothing is open through the registry — guard nested reads with
 //! `d.caps.len() > 0`. NOT available inside a *played* source's
 //! `render(ctx)` (the mixer compiles its own engine with no common API —
@@ -420,13 +422,20 @@ fn caps_map(caps: &crate::device::DeviceCapabilities) -> Map {
 ///
 /// Two read domains, deliberately: status/config is one device-lock
 /// acquisition (`Session::status`), identity/caps a lock-free bookkeeping
-/// read — around an open/close they can briefly DISAGREE in either
-/// direction (an unplug clears the bookkeeping before the claim release,
-/// which is best-effort under the lifecycle gate). Status is read FIRST so
-/// the likely transient is "identity gone, connected already false" rather
-/// than a vanished unit still claiming `connected: true`; scripts should
-/// key presence on `connected` and identity on `id != ""`, and treat the
-/// pair as two facts, not one atomic snapshot (F6 review #1).
+/// read — they are two facts, never one atomic snapshot, and around an
+/// open/close they DISAGREE (F6 review #1, re-review): an unplug clears
+/// the bookkeeping FIRST and only then flips the claim state, best-effort
+/// under the lifecycle gate and never retried — so "identity empty,
+/// `connected` still true" is the unplug's dominant window (up to seconds,
+/// or indefinite on gate contention), whatever the read order.
+/// `connected` is CLAIM state, not a bus-presence probe — pre-existing
+/// `connected()` semantics, shared by the whole verb family.
+///
+/// Status is read FIRST for a different reason: `status()` can block for a
+/// whole concurrent capture (the capture holds the device mutex), and
+/// identity-first would stretch the inter-read gap across that entire
+/// wait — status-first collapses the gap to the microseconds between the
+/// lock release and the bookkeeping read.
 fn device_map(env: &ScriptEnv) -> Map {
     let st = env.block(env.session.status());
     let open = (env.device_info)();
@@ -1574,6 +1583,11 @@ mod tests {
             let err = run_measurement_script(env, call).unwrap_err();
             assert!(err.contains("never switches device mid-run"), "{call} got: {err}");
         }
+        // The 3-arg boundary stays the generic error — the same bound as
+        // register_source_stubs, recorded rather than silently widened.
+        let (env, _lines, _frames, _rt) = test_env();
+        let err = run_measurement_script(env, "use_device(1, 2, 3);").unwrap_err();
+        assert!(!err.contains("never switches device mid-run"), "got: {err}");
     }
 
     #[test]

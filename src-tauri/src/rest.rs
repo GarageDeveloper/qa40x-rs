@@ -1210,6 +1210,13 @@ mod tests {
         ] {
             assert_eq!(dispatch(path, &st).await.unwrap_err().0, 404, "path {path}");
         }
+        // The recorded looseness, pinned POSITIVELY (re-review): a
+        // device-ish string in an IGNORED positional slot answers 200 —
+        // and still selects nothing, the answer is the default device's
+        // (state_with_tone already holds a capture for SnrDb to measure).
+        // A future tightening to num()? must move this pin consciously,
+        // it is QA40x compatibility surface.
+        assert!(dispatch("/SnrDb/1000/20/usb%2FAB12", &st).await.is_ok());
     }
 
     #[tokio::test]
