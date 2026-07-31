@@ -104,8 +104,10 @@ pub struct LeftRight {
 /// One consistent status/config snapshot of a session's device (issue #25
 /// lot F6): the same cached values as the individual getters
 /// (`connected`/`model_name`/`firmware_version`/`sample_rate_hz`/
-/// `input_range_dbv`/`output_range_dbv`/`buffer_size`), read under a SINGLE
-/// device-lock acquisition by [`Session::status`].
+/// `input_range_dbv`/`output_range_dbv`), read under a SINGLE device-lock
+/// acquisition by [`Session::status`]. `buffer_size` is session state (the
+/// std-mutex the getter already reads), never under the device lock — it
+/// rides along for the one-call shape, not the atomicity claim.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionStatus {
     pub connected: bool,

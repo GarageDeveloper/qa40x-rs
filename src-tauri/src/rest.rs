@@ -26,10 +26,15 @@
 //! This server is **mono-device by specification**: it drives the DEFAULT
 //! device (slot 0's handle, captured once at `AppState::new`), and no path
 //! segment selects a unit — genuine-app parity, and what the A/B bench
-//! (`doc/bench-ab.md`) diffs against. A device-scoped segment is NOT quietly
-//! accepted: it 404s like any other unknown endpoint (pinned in the tests).
-//! Multi-device REST is **issue #69** — a SEPARATE endpoint namespace still
-//! to be specified, never an extra segment bolted onto these paths.
+//! (`doc/bench-ab.md`) diffs against. Device-scoped path SHAPES are not
+//! part of the scheme and 404 as unknown endpoints (pinned in the tests).
+//! One pre-existing parser looseness, recorded honestly (F6 review): a few
+//! measurement arms carry IGNORED positional params (`ThdnDb`/`ThdnPct`/
+//! `SnrDb` lo/hi, `PeakDbv` lo/hi), so a device-ish string in one of those
+//! slots parses as that ignored bound and answers 200 — it still selects
+//! nothing; the answer is the default device's, always. Multi-device REST
+//! is **issue #69** — a SEPARATE endpoint namespace still to be specified,
+//! never an extra segment bolted onto these paths.
 //!
 //! **Honest limit (pre-existing, recorded):** REST acquisitions are exempt
 //! from the per-device measurement-program gate
@@ -1196,6 +1201,12 @@ mod tests {
             "/Devices",
             "/Device/usb%2FAB12/Acquisition",
             "/Status/Connection/usb%2FAB12",
+            // The near-miss shapes too (F6 review note): the Settings prefix
+            // arm falls through its own match, and an exact-arity endpoint
+            // with one EXTRA segment matches nothing.
+            "/Settings/Device/usb%2FAB12",
+            "/RmsDbv/20/20000/usb%2FAB12",
+            "/Acquisition/usb%2FAB12",
         ] {
             assert_eq!(dispatch(path, &st).await.unwrap_err().0, 404, "path {path}");
         }

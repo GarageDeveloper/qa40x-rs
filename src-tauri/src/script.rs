@@ -55,10 +55,15 @@
 //! }
 //! ```
 //!
-//! A unit lost mid-run reads `connected: false` with an empty identity —
-//! live like `connected()`, never a stale snapshot. NOT available inside a
-//! *played* source's `render(ctx)` (the mixer compiles its own engine with
-//! no common API — use `ctx` there); a one-shot source run does see it.
+//! Everything is read LIVE at each call — never a run-start snapshot. The
+//! two halves come from two lock domains (status = the device mutex,
+//! identity/caps = the runtime's lock-free bookkeeping), so around an
+//! unplug they can briefly disagree; key presence on `connected`, identity
+//! on `id != ""` (see `device_map`'s doc). `caps` is an EMPTY map when
+//! nothing is open through the registry — guard nested reads with
+//! `d.caps.len() > 0`. NOT available inside a *played* source's
+//! `render(ctx)` (the mixer compiles its own engine with no common API —
+//! use `ctx` there); a one-shot source run does see it.
 //! `use_device(id)` deliberately does not exist (R4: a script driving two
 //! units = two script programs pinned to two devices) — calling it names
 //! that rule instead of "function not found".
@@ -406,15 +411,25 @@ fn caps_map(caps: &crate::device::DeviceCapabilities) -> Map {
 
 /// The `device()` map (issue #25 lot F6): identity + live status + caps of
 /// the device THIS run is bound to — the session the run was built on, never
-/// "the default device" and never the focused one. One fixed key set (no
-/// shape branching): registry-less runs (bare sessions in tests/examples,
-/// or nothing open) read empty identity strings and an empty `caps` map.
-/// Key is `is_virtual`, not `virtual` — `virtual` is Rhai-reserved in
-/// property position. Status is one device-lock acquisition
-/// (`Session::status`); identity is a lock-free bookkeeping read.
+/// "the default device" and never the focused one. Top-level keys are a
+/// FIXED set; `caps` holds the open unit's capability record and is an
+/// EMPTY map for registry-less runs (bare sessions in tests/examples, or
+/// nothing open) — guard nested reads with `d.caps.len() > 0`. Identity
+/// strings are then empty too. Key is `is_virtual`, not `virtual` —
+/// `virtual` is Rhai-reserved in property position.
+///
+/// Two read domains, deliberately: status/config is one device-lock
+/// acquisition (`Session::status`), identity/caps a lock-free bookkeeping
+/// read — around an open/close they can briefly DISAGREE in either
+/// direction (an unplug clears the bookkeeping before the claim release,
+/// which is best-effort under the lifecycle gate). Status is read FIRST so
+/// the likely transient is "identity gone, connected already false" rather
+/// than a vanished unit still claiming `connected: true`; scripts should
+/// key presence on `connected` and identity on `id != ""`, and treat the
+/// pair as two facts, not one atomic snapshot (F6 review #1).
 fn device_map(env: &ScriptEnv) -> Map {
-    let open = (env.device_info)();
     let st = env.block(env.session.status());
+    let open = (env.device_info)();
     let mut m = Map::new();
     match &open {
         Some(o) => {
@@ -637,16 +652,25 @@ fn register_common(engine: &mut Engine, env: &Arc<ScriptEnv>) {
     engine.register_fn("device", move || -> Map { device_map(&e) });
     // R4 (2026-07-30) settled read-only: mid-script device switching is an
     // improvement lead, not scheduled. The stub records the decision in the
-    // product — a legible refusal instead of "function not found".
+    // product — a legible refusal instead of "function not found". Dynamic
+    // args like register_source_stubs, for the same reason (F6 review #2):
+    // `use_device(1)` — a slot index is the most natural wrong guess — must
+    // hit the rule, not a generic arity error.
     const USE_DEVICE_MSG: &str = "use_device() does not exist: a script runs on the device its \
          program is pinned to. Pin it via the program's Device selector (or run the script from \
          the device's session) — a script never switches device mid-run.";
     engine.register_fn("use_device", move || -> Result<(), Box<EvalAltResult>> {
         Err(rt_err(USE_DEVICE_MSG))
     });
-    engine.register_fn("use_device", move |_id: &str| -> Result<(), Box<EvalAltResult>> {
+    engine.register_fn("use_device", move |_id: Dynamic| -> Result<(), Box<EvalAltResult>> {
         Err(rt_err(USE_DEVICE_MSG))
     });
+    engine.register_fn(
+        "use_device",
+        move |_a: Dynamic, _b: Dynamic| -> Result<(), Box<EvalAltResult>> {
+            Err(rt_err(USE_DEVICE_MSG))
+        },
+    );
 
     // ---- emission (script traces draw into the dashboard, task #39) ----------
     let e = env.clone();
@@ -1348,6 +1372,20 @@ mod tests {
         Arc<StdMutex<Vec<Frame>>>,
         tokio::runtime::Runtime,
     ) {
+        build_test_env(no_device_info())
+    }
+
+    /// The one env builder (F6 re-review N4: no `Arc::try_unwrap` on a
+    /// fresh env — a future clone-retaining helper must not turn into a
+    /// runtime panic in unrelated tests).
+    fn build_test_env(
+        device_info: DeviceInfoFn,
+    ) -> (
+        Arc<ScriptEnv>,
+        Arc<StdMutex<Vec<(String, bool)>>>,
+        Arc<StdMutex<Vec<Frame>>>,
+        tokio::runtime::Runtime,
+    ) {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -1369,14 +1407,17 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
-        let env = Arc::new(ScriptEnv::new(
-            session,
-            rt.handle().clone(),
-            Arc::new(AtomicBool::new(false)),
-            sink,
-            frame_sink,
-            capture_sink,
-        ));
+        let env = Arc::new(
+            ScriptEnv::new(
+                session,
+                rt.handle().clone(),
+                Arc::new(AtomicBool::new(false)),
+                sink,
+                frame_sink,
+                capture_sink,
+            )
+            .with_device_info(device_info),
+        );
         (env, lines, frames, rt)
     }
 
@@ -1394,9 +1435,7 @@ mod tests {
         Arc<StdMutex<Vec<(String, bool)>>>,
         tokio::runtime::Runtime,
     ) {
-        let (env, lines, _frames, rt) = test_env();
-        let env = Arc::try_unwrap(env).ok().expect("fresh env has one ref");
-        let env = Arc::new(env.with_device_info(Arc::new(move || Some(open.clone()))));
+        let (env, lines, _frames, rt) = build_test_env(Arc::new(move || Some(open.clone())));
         (env, lines, rt)
     }
 
@@ -1525,23 +1564,16 @@ mod tests {
     }
 
     #[test]
-    fn use_device_with_a_non_string_argument_misses_the_friendly_refusal() {
-        // NOTE (F6 coverage hunt, not a fix): the R4 stub is registered for
-        // exactly the 0-arg and `(&str)` arities. A call that matches
-        // NEITHER — e.g. a number, the id typed unquoted — resolves to
-        // neither overload, so Rhai's own "function not found" surfaces
-        // instead of the R4 message naming the read-only rule. Pinning the
-        // CURRENT behavior (a legibility gap worth a human call, not a
-        // silent tolerance change): a caller who fat-fingers the id as a
-        // bare number sees a generic arity error, not "a script never
-        // switches device mid-run".
-        let (env, _lines, _frames, _rt) = test_env();
-        let err = run_measurement_script(env, "use_device(123);").unwrap_err();
-        assert!(
-            !err.contains("never switches device mid-run"),
-            "expected the generic Rhai arity error, got the friendly R4 refusal instead: {err}"
-        );
-        assert!(err.to_lowercase().contains("use_device"), "got: {err}");
+    fn use_device_with_a_non_string_argument_hits_the_friendly_refusal() {
+        // F6 review #2 (the tester round pinned the pre-fix gap): the stub
+        // takes Dynamic args like register_source_stubs, so a slot index
+        // (`use_device(1)` — the most natural wrong guess), a map, or a
+        // 2-arg call all hit the R4 rule instead of a generic arity error.
+        for call in ["use_device(123);", "use_device(#{id: 1});", "use_device(\"a\", \"b\");"] {
+            let (env, _lines, _frames, _rt) = test_env();
+            let err = run_measurement_script(env, call).unwrap_err();
+            assert!(err.contains("never switches device mid-run"), "{call} got: {err}");
+        }
     }
 
     #[test]
