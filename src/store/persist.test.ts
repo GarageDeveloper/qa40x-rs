@@ -15,6 +15,7 @@ import {
   isQuotaExceeded,
   migrate,
   sanitizeCapture,
+  sanitizeI2sPorts,
   sanitizeSourceTargets,
   snapshotWorkspace,
   WS_VERSION,
@@ -963,5 +964,67 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
     expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right", i2sRoute: "off" }]);
+  });
+});
+
+describe("v5 in-version hook: front-panel I2S port (issue #71)", () => {
+  it("a doc predating i2sRoute/i2sPorts loads with the analog defaults", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    for (const src of Object.values(doc.sources.byId) as { i2sRoute?: unknown }[]) {
+      delete src.i2sRoute;
+    }
+    delete (doc as { i2sPorts?: unknown }).i2sPorts;
+    const migrated = migrate(doc)!;
+    for (const src of Object.values(migrated.sources.byId)) {
+      expect(src.i2sRoute).toBe("off");
+    }
+    expect(migrated.i2sPorts).toEqual({});
+  });
+
+  it("garbage i2sRoute degrades to off; a cell's bad I2S half degrades without dropping the cell", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    (doc.sources.byId["src-sine-1"] as { i2sRoute: unknown }).i2sRoute = "sideways";
+    const migrated = migrate(doc)!;
+    expect(migrated.sources.byId["src-sine-1"].i2sRoute).toBe("off");
+    expect(
+      sanitizeSourceTargets([{ slot: 1, route: "left", i2sRoute: "up" }])
+    ).toEqual([{ slot: 1, route: "left", i2sRoute: "off" }]);
+    expect(
+      sanitizeSourceTargets([{ slot: 1, route: "left", i2sRoute: "both" }])
+    ).toEqual([{ slot: 1, route: "left", i2sRoute: "both" }]);
+  });
+
+  it("sanitizeI2sPorts: enabled is FORCED off however the doc claims, references clamp, junk keys drop", () => {
+    expect(sanitizeI2sPorts("garbage")).toEqual({});
+    expect(sanitizeI2sPorts(null)).toEqual({});
+    expect(
+      sanitizeI2sPorts({
+        "0": { enabled: true, referenceDbv: -6 },
+        "1": { enabled: false, referenceDbv: 500 },
+        "2": { enabled: true, referenceDbv: "loud" },
+        "-1": { enabled: true, referenceDbv: 0 },
+        "1.5": { enabled: true, referenceDbv: 0 },
+        junk: { enabled: true, referenceDbv: 0 },
+        "3": "not an object",
+      })
+    ).toEqual({
+      "0": { enabled: false, referenceDbv: -6 },
+      "1": { enabled: false, referenceDbv: 18 },
+      "2": { enabled: false, referenceDbv: 0 },
+    });
+  });
+
+  it("the snapshot normalizes enabled OFF while keeping the reference (the outputOnly rule, port-shaped)", () => {
+    const store = freshStore();
+    store.update("test/i2s-on", (s) => ({
+      ...s,
+      i2sPorts: { "0": { enabled: true, referenceDbv: -12 } },
+    }));
+    const doc = snapshotWorkspace(store.get());
+    expect(doc.i2sPorts).toEqual({ "0": { enabled: false, referenceDbv: -12 } });
+    // Round trip: migrate + apply keep the reference and the off state.
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, migrate(JSON.parse(JSON.stringify(doc)))!)).toBe(true);
+    expect(dest.get().i2sPorts).toEqual({ "0": { enabled: false, referenceDbv: -12 } });
   });
 });

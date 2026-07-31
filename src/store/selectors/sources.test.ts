@@ -7,7 +7,13 @@
 import { describe, expect, it } from "vitest";
 import type { AppState, SourceMeta, SourceTarget } from "../state";
 import { initialSession, initialState, SLOT0 } from "../state";
-import { sessionHasSources, sessionsForSource, sourcesForSession, targetSessionKey } from "./sources";
+import {
+  sessionHasI2sSources,
+  sessionHasSources,
+  sessionsForSource,
+  sourcesForSession,
+  targetSessionKey,
+} from "./sources";
 
 function sine(id: string, over: Partial<SourceMeta> = {}): SourceMeta {
   return {
@@ -18,6 +24,7 @@ function sine(id: string, over: Partial<SourceMeta> = {}): SourceMeta {
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    i2sRoute: "off",
     targets: [],
     playing: true,
     ...over,
@@ -91,6 +98,33 @@ describe("sourcesForSession", () => {
   it("a dormant-slot target resolves nowhere — no throw, no phantom", () => {
     const s = bench([sine("a", { targets: [{ slot: 5, route: "both", i2sRoute: "off" }] })]);
     expect(sourcesForSession(s, SLOT0)).toEqual([]);
+  });
+
+  it("both dimensions coalesce INDEPENDENTLY on a duplicate resolution (issue #71)", () => {
+    // Focus cell carries Line L + I2S right; the explicit slot-0 cell Line
+    // R only: the coalesced entry is Line both, I2S right — the I2S union
+    // must never borrow the Line dimension's cells (or vice versa).
+    const s = bench([
+      sine("a", {
+        targets: [
+          { slot: null, route: "left", i2sRoute: "right" },
+          { slot: 0, route: "right", i2sRoute: "off" },
+        ],
+      }),
+    ]);
+    const [r] = sourcesForSession(s, SLOT0);
+    expect(r.route).toBe("both");
+    expect(r.i2sRoute).toBe("right");
+  });
+});
+
+describe("sessionHasI2sSources (issue #71)", () => {
+  it("true only for an AUDIBLE I2S routing — off cells feed no port note", () => {
+    expect(sessionHasI2sSources(bench([sine("a", { i2sRoute: "left" })]), SLOT0)).toBe(true);
+    expect(sessionHasI2sSources(bench([sine("a")]), SLOT0)).toBe(false);
+    expect(
+      sessionHasI2sSources(bench([sine("a", { i2sRoute: "left", playing: false })]), SLOT0)
+    ).toBe(false);
   });
 });
 

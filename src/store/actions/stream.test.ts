@@ -38,6 +38,7 @@ import {
   buildStreamConfig,
   disposeSession,
   frameCaptureProvenance,
+  i2sSlotsFromSources,
   ingestFrame,
   levelToAmplitude,
   playedFrequencyHz,
@@ -59,6 +60,7 @@ function sineSource(id: string, over: Partial<PeriodicSource> = {}): SourceMeta 
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    i2sRoute: "off",
     targets: [],
     playing: true,
     ...over,
@@ -477,6 +479,39 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
       const ids = buildStreamConfig(s, key).slots.map((x) => x.id);
       expect(new Set(ids).size).toBe(ids.length);
     }
+  });
+
+  it("i2sSlotsFromSources carries the I2S dimension at the port's pinned grid — no bin snap, its OWN Nyquist clamp (issue #71)", () => {
+    const s = initialState();
+    s.acquisition = { ...s.acquisition, coherentGen: true }; // snapping ON for the DAC…
+    s.sources = {
+      order: ["a", "hot"],
+      byId: {
+        a: sineSource("a", { route: "right", i2sRoute: "left" }),
+        // 30 kHz: above the port's 24 kHz Nyquist even if the ACQUISITION
+        // runs at 192 kHz — the clamp is the port's, never the converter's.
+        hot: sineSource("hot", { frequencyHz: 30000, i2sRoute: "both" }),
+      },
+    };
+    const slots = i2sSlotsFromSources(s, SLOT0);
+    expect(slots).toHaveLength(2);
+    // …but the I2S mix plays the ask verbatim (1000, not 1000.4883):
+    expect(slots[0]).toMatchObject({ id: "a", route: "left" });
+    expect((slots[0].source as { frequency_hz: number }).frequency_hz).toBe(1000);
+    expect((slots[1].source as { frequency_hz: number }).frequency_hz).toBeCloseTo(
+      24000 * 0.98,
+      6
+    );
+  });
+
+  it("one source, both outputs: the DAC slot and the I2S slot carry their own routes independently", () => {
+    const s = initialState();
+    s.sources = {
+      order: ["a"],
+      byId: { a: sineSource("a", { route: "left", i2sRoute: "right" }) },
+    };
+    expect(buildStreamConfig(s, SLOT0).slots[0]).toMatchObject({ id: "a", route: "left" });
+    expect(i2sSlotsFromSources(s, SLOT0)[0]).toMatchObject({ id: "a", route: "right" });
   });
 
   it("a target pinned to a slot with no live session resolves nowhere — silent (lot-F recorded default)", () => {

@@ -70,7 +70,10 @@ Does: connect/presence/config registers, the two dBFS→dBV converter offsets,
 mixer slot rendering (sine/square/triangle/sawtooth/tones/noise/chirp/
 multitone at correct RMS levels, routed and summed), a range-correct
 loopback capture with a small noise floor, real windowed FFTs and crude
-derived metrics, telemetry, in-memory storage stubs. THREE measurement
+derived metrics, telemetry, in-memory storage stubs, the front-panel I2S
+port (issue #71: idempotent `i2s_apply`, a paced block counter, the
+reference/clip verdict from a real 48 kHz render of the declared I2S slot
+set — declarations recorded in `i2sCalls` for spec assertions). THREE measurement
 programs, same discipline (a stub RESULT, gateable with `app.holdPrograms()`
 / `releasePrograms()` so the locked UI can be observed instead of raced,
 never asserted by value):
