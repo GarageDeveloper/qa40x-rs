@@ -24,6 +24,7 @@ use crate::qa40x::{QA40xDevice, Telemetry};
 use crate::stream::StreamControl;
 
 use super::error::DeviceError;
+use super::i2s::I2sEngine;
 use super::id::{DeviceDescriptor, DeviceId};
 use super::registry::OpenDevice;
 use super::source::DeviceHandle;
@@ -138,6 +139,11 @@ struct RuntimeInner {
     /// The signal mixer: stateful (slot declarations persist across frames),
     /// so it is per-device state, never shared between units.
     mixer: Arc<StdMutex<Mixer>>,
+    /// The front-panel I2S output engine (issue #71). Per-device like
+    /// everything else here; its endpoint cell was grabbed BEFORE the device
+    /// went behind its mutex (the telemetry-cell pattern) so the paced
+    /// writer never queues on the exclusive device lock.
+    i2s: I2sEngine,
     generator: GeneratorFlags,
     /// Cooperative cancel for the batched sweeps (one long stream
     /// transaction): `sweep_stop` sets it, a fresh program clears it on
@@ -189,11 +195,13 @@ impl DeviceRuntime {
     /// invariant is untouched).
     pub fn new() -> Self {
         let device = QA40xDevice::new();
-        // Telemetry cell BEFORE the device goes behind the mutex — see the
-        // field doc.
+        // Telemetry + I2S endpoint cells BEFORE the device goes behind the
+        // mutex — see the field docs.
         let telemetry = device.telemetry_cell();
+        let i2s_cell = device.i2s_endpoint_cell();
         let handle: DeviceHandle = Arc::new(TokioMutex::new(device));
         let mixer = Arc::new(StdMutex::new(Mixer::default()));
+        let i2s = I2sEngine::new(handle.clone(), i2s_cell);
         let generator = GeneratorFlags::default();
         let open_unit = OpenUnitCell::default();
         let stream = StreamControl::new(
@@ -207,6 +215,7 @@ impl DeviceRuntime {
                 handle,
                 telemetry,
                 mixer,
+                i2s,
                 generator,
                 sweep_cancel: Arc::new(AtomicBool::new(false)),
                 program_gate: Arc::new(TokioMutex::new(())),
@@ -239,6 +248,12 @@ impl DeviceRuntime {
     /// This device's signal mixer.
     pub fn mixer(&self) -> Arc<StdMutex<Mixer>> {
         self.inner.mixer.clone()
+    }
+
+    /// This device's front-panel I2S output engine (issue #71) — the same
+    /// engine on every call.
+    pub fn i2s(&self) -> I2sEngine {
+        self.inner.i2s.clone()
     }
 
     /// This device's continuous-generator flags.
@@ -410,6 +425,10 @@ impl DeviceRuntime {
     /// generator, each waited out so the device mutex is genuinely free.
     pub async fn quiesce(&self) {
         self.cancel_sweep();
+        // I2S after the sweep cancel (its stop writes a register, which a
+        // sweep holding the device would otherwise make wait minutes) and
+        // before the stream teardown, so nothing restarts it.
+        self.i2s().stop_and_wait().await;
         self.stream().stop_and_wait().await;
         self.generator().ensure_stopped().await;
     }
@@ -643,6 +662,10 @@ fn spawn_monitor_at(
                 // reports nothing: whoever cleared the bookkeeping told
                 // the user already.
                 if rt.note_closed_at(gen) {
+                    // Flag-only I2S stop (issue #71): no register I/O to a
+                    // unit that is gone; the writer exits when the claim
+                    // release below clears its endpoint cell.
+                    rt.i2s().stop_now();
                     log::info!("Device disconnected - emitting event");
                     on_lost(DeviceLost { device_id });
                     // Release the dead claim (interface/device handles) so
@@ -700,10 +723,15 @@ mod tests {
         assert!(Arc::ptr_eq(&rt.mixer(), &rt.mixer()));
         assert!(Arc::ptr_eq(rt.generator().running_flag(), rt.generator().running_flag()));
         assert!(Arc::ptr_eq(rt.sweep_cancel(), rt.sweep_cancel()));
+        assert!(rt.i2s().same_as(&rt.i2s()));
         // And a clone shares the same inner state.
         let clone = rt.clone();
         assert!(Arc::ptr_eq(&clone.handle(), &rt.handle()));
         assert!(Arc::ptr_eq(&clone.mixer(), &rt.mixer()));
+        assert!(clone.i2s().same_as(&rt.i2s()));
+        // Sibling runtimes have INDEPENDENT engines — device A's I2S must
+        // never drive device B's port.
+        assert!(!DeviceRuntime::new().i2s().same_as(&rt.i2s()));
     }
 
     #[tokio::test]

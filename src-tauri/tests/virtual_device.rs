@@ -6,6 +6,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tauri_app_lib::device::{DeviceRuntime, I2sRequest};
+use tauri_app_lib::mixer::{MixerSlotDesc, SlotSource};
+use tauri_app_lib::qa40x::i2s::I2sWidth;
+use tauri_app_lib::qa40x::register::{registers, RegisterOps};
 use tauri_app_lib::qa40x::{Channel, InputGain, OutputGain, QA40xDevice};
 use tauri_app_lib::utils::SignalGenerator;
 
@@ -273,4 +277,192 @@ async fn in_capture_keepalive_fires_at_roughly_1hz_during_a_long_capture() {
     assert!(device.last_telemetry().await.is_some());
 
     device.disconnect().await.expect("disconnect");
+}
+
+/* -------------------------------------------------------------------------- */
+/* Front-panel I2S output (issue #71)                                          */
+/* -------------------------------------------------------------------------- */
+
+/// A runtime attached to the embedded virtual QA403 — the I2S tests drive
+/// the engine exactly as the `i2s_apply` command does.
+async fn connected_runtime() -> DeviceRuntime {
+    let rt = DeviceRuntime::new();
+    {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.connect_virtual().await.expect("virtual connect");
+    }
+    rt
+}
+
+fn i2s_sine_request(enabled: bool) -> I2sRequest {
+    I2sRequest {
+        enabled,
+        slots: vec![MixerSlotDesc {
+            id: "tone".into(),
+            source: SlotSource::Waveform {
+                waveform: "sine".into(),
+                frequency_hz: 1000.0,
+                amplitude: 0.5,
+            },
+            route: "both".into(),
+            enabled: true,
+        }],
+        reference_dbv: 0.0,
+        width: I2sWidth::Bits32,
+    }
+}
+
+/// The whole port protocol against the simulator's real EP3 sink: apply →
+/// register 0x0A reads 1 and device-paced blocks flow (~23.4/s at 48 kHz);
+/// a re-apply while running swaps the mix WITHOUT restarting the writer;
+/// disable → register reads 0 and the writer exits.
+#[tokio::test(flavor = "multi_thread")]
+async fn i2s_streams_paced_blocks_and_stop_is_visible_on_the_register() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+
+    let st = engine.apply(i2s_sine_request(true)).await.expect("i2s start");
+    assert!(st.supported && st.enabled && st.running);
+    assert_eq!(st.width_bits, 32);
+    assert!(st.sigma_peak_dbv.is_some(), "a 0.5 sine mix is not silent");
+    assert!(!st.clipped);
+
+    // The simulator readable-registers path: 0x0A reads back 1 while the
+    // port runs (vqa40x-core v0.5.0).
+    let reg = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.read_register(registers::I2S_CTRL).await.expect("read 0x0A")
+    };
+    assert_eq!(u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]), 1);
+
+    // Device-paced flow: ~1 s must accept roughly 23 blocks (2048 frames @
+    // 48 kHz each). Loose bounds — pacing jitter and the two primed blocks.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let blocks = engine.status().await.blocks_written;
+    assert!(
+        (10..=40).contains(&blocks),
+        "expected ~23 device-paced blocks in 1 s, got {blocks}"
+    );
+
+    // Re-mix while running: no register cycle, the writer keeps its pace.
+    let st = engine.apply(i2s_sine_request(true)).await.expect("i2s re-mix");
+    assert!(st.running, "a re-apply must not stop the port");
+
+    let st = engine.apply(i2s_sine_request(false)).await.expect("i2s stop");
+    assert!(!st.enabled && !st.running);
+    let reg = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.read_register(registers::I2S_CTRL).await.expect("read 0x0A")
+    };
+    assert_eq!(u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]), 0);
+
+    rt.handle().lock().await.disconnect().await.expect("disconnect");
+}
+
+/// THE acceptance pin of issue #71: the I2S stream, a long acquisition and
+/// the ~1 Hz keepalive all run CONCURRENTLY — no endpoint is serialized
+/// behind another (device notes §10). During one real-time ~3 s capture,
+/// I2S blocks keep flowing AND completed keepalive cycles keep counting,
+/// while the capture itself comes back intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn i2s_keeps_flowing_during_a_long_capture_while_the_keepalive_still_fires() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+
+    engine.apply(i2s_sine_request(true)).await.expect("i2s start");
+
+    let (blocks_before, keepalives_before, tone, sr, n) = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        // Same ranges as the plain loopback test: at out 8 dBV / in 18 dBV
+        // a 0.2-peak sine captures at ≈ 0.068 (the connect forces the safe
+        // 42 dBV input range, which would bury the tone).
+        dev.set_input_gain(InputGain::Gain18dBV).await.unwrap();
+        dev.set_output_gain(OutputGain::Gain8dBV).await.unwrap();
+        // Baseline keepalive so later count deltas are in-capture firings.
+        dev.keepalive().await.expect("baseline keepalive");
+        let sr = 48_000u32;
+        let n = 150_000usize; // ~3.1 s of real-time-paced capture
+        (
+            engine.status().await.blocks_written,
+            dev.keepalive_ok_count(),
+            SignalGenerator::sine(1000.0, 0.2, sr, n),
+            sr,
+            n,
+        )
+    };
+
+    let captured = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.generate_and_capture(&tone, &tone)
+            .await
+            .expect("capture with the I2S port streaming")
+    };
+
+    // The capture is intact — the I2S stream corrupted nothing.
+    assert_eq!(captured.sample_rate, sr);
+    assert_eq!(captured.left_channel.len(), n);
+    let peak = captured
+        .left_channel
+        .iter()
+        .fold(0f32, |m, s| m.max(s.abs()));
+    assert!(
+        peak > 0.03 && peak < 0.3,
+        "loopback peak {peak} out of range — the capture path changed with I2S running"
+    );
+
+    // I2S kept flowing DURING the capture: ≥ 50 paced blocks over ~3 s
+    // (~23.4/s nominal — loose lower bound).
+    let blocks_during = engine.status().await.blocks_written - blocks_before;
+    assert!(
+        blocks_during >= 50,
+        "I2S starved during the capture: only {blocks_during} blocks in ~3 s"
+    );
+    assert!(engine.status().await.running, "the writer must survive the capture");
+
+    // And the in-capture keepalive kept completing (issue #54's guarantee,
+    // now with a third stream on the wire).
+    let keepalives_during = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.keepalive_ok_count() - keepalives_before
+    };
+    assert!(
+        keepalives_during >= 2,
+        "keepalive starved while I2S streamed: {keepalives_during} completed cycles in ~3 s"
+    );
+
+    engine.apply(i2s_sine_request(false)).await.expect("i2s stop");
+    rt.handle().lock().await.disconnect().await.expect("disconnect");
+}
+
+/// Teardown: quiescing the runtime (the disconnect/shutdown path) stops the
+/// port, and a fresh reconnect reports it off — never a stale "running".
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnect_stops_the_i2s_port() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+
+    engine.apply(i2s_sine_request(true)).await.expect("i2s start");
+    assert!(engine.status().await.running);
+
+    rt.quiesce().await;
+    let st = engine.status().await;
+    assert!(!st.running, "quiesce must stop the writer");
+    assert!(!st.enabled, "quiesce reports the port off");
+
+    {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.disconnect().await.expect("disconnect");
+        assert!(!dev.i2s_available().await, "no EP 0x03 claim once disconnected");
+    }
+    assert!(!engine.status().await.supported);
 }

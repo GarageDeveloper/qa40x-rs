@@ -1,6 +1,7 @@
 use crate::audio::frequency_response::{FrequencyResponseData, FrequencyResponseTrace};
 use crate::qa40x::{
     error::{QA40xError, Result},
+    i2s::I2sWidth,
     register::{registers, RegisterOps},
     settle::{SettleDeadline, RANGE_RELAY_SETTLE},
     transport::{demo_sim_options, BulkIn, BulkOut, EndpointQueue, VirtEp},
@@ -76,6 +77,12 @@ pub struct QA40xDevice {
     interface: Arc<Mutex<Option<nusb::Interface>>>,
     /// nusb 0.2 claimed endpoints (submit/next_complete live here).
     eps: Arc<Mutex<Option<ClaimedEndpoints>>>,
+    /// The front-panel I2S OUT endpoint (0x03, issue #71) — deliberately NOT
+    /// in [`ClaimedEndpoints`]: `stream_pump` holds the `eps` mutex for a
+    /// WHOLE capture, and §10 of the device notes requires the I2S stream and
+    /// register I/O to keep flowing concurrently with an acquisition. Its own
+    /// cell keeps the paced I2S writer off every other endpoint's lock.
+    i2s_ep: Arc<Mutex<Option<BulkOut>>>,
     endpoints: UsbEndpoints,
     config: Arc<Mutex<DeviceConfig>>,
     /// Cached raw 512-byte factory calibration page (loaded at connect).
@@ -117,6 +124,7 @@ impl QA40xDevice {
             device: Arc::new(Mutex::new(None)),
             interface: Arc::new(Mutex::new(None)),
             eps: Arc::new(Mutex::new(None)),
+            i2s_ep: Arc::new(Mutex::new(None)),
             endpoints: UsbEndpoints::default(),
             config: Arc::new(Mutex::new(DeviceConfig::default())),
             cal_page: Arc::new(Mutex::new(None)),
@@ -160,6 +168,9 @@ impl QA40xDevice {
     pub(crate) async fn release_claim(&self) {
         // Drop the claimed endpoints first (they hold refs to the interface),
         // then the interface and device, so the OS releases the USB claim.
+        // The I2S cell too: its writer (if any) exits on the next iteration
+        // when it finds the cell empty.
+        *self.i2s_ep.lock().await = None;
         *self.eps.lock().await = None;
         self.release_virtual_import().await;
         let mut iface = self.interface.lock().await;
@@ -297,9 +308,24 @@ impl QA40xDevice {
         let _ = eps.data_write.clear_halt().await;
         let _ = eps.data_read.clear_halt().await;
 
+        // Front-panel I2S OUT endpoint (0x03, issue #71) — best-effort: a
+        // firmware/OS that refuses the claim must still connect; the port
+        // then reports as unsupported (`i2s_available`).
+        let i2s_ep = match interface.endpoint::<Bulk, Out>(self.endpoints.i2s_write) {
+            Ok(mut ep) => {
+                let _ = ep.clear_halt().await;
+                Some(BulkOut::Usb(ep))
+            }
+            Err(e) => {
+                warn!("I2S endpoint 0x{:02X} not claimed ({}); I2S output disabled", self.endpoints.i2s_write, e);
+                None
+            }
+        };
+
         *self.device.lock().await = Some(device);
         *self.interface.lock().await = Some(interface);
         *self.eps.lock().await = Some(eps);
+        *self.i2s_ep.lock().await = i2s_ep;
 
         info!("Successfully connected to QA40x device");
 
@@ -355,6 +381,7 @@ impl QA40xDevice {
     pub(crate) async fn connect_virtual_sim(&self, sim: Simulator, model: Model) -> Result<()> {
         // Release any prior claim (real or virtual), same as connect().
         {
+            *self.i2s_ep.lock().await = None;
             *self.eps.lock().await = None;
             self.release_virtual_import().await;
             *self.interface.lock().await = None;
@@ -376,6 +403,8 @@ impl QA40xDevice {
             data_write: BulkOut::Virt(VirtEp::new(sim.clone(), self.endpoints.data_write)),
             data_read: BulkIn::Virt(VirtEp::new(sim.clone(), self.endpoints.data_read)),
         });
+        *self.i2s_ep.lock().await =
+            Some(BulkOut::Virt(VirtEp::new(sim.clone(), self.endpoints.i2s_write)));
         self.virtual_active.store(true, Ordering::SeqCst);
 
         // The simulator serves the serial through register 0x1D as a packed
@@ -459,7 +488,10 @@ impl QA40xDevice {
         // Front-panel I2S off (reg 0x0A = 0), as the official app writes on
         // every connect — part of putting the unit in a defined state. (This
         // register was "unknown init" until a USB capture of the app's I2S
-        // feature identified it.) Best-effort — must not block connecting.
+        // feature identified it.) Also the I2S engine's contract (issue #71):
+        // the port always comes up OFF after a (re)connect, so engine state
+        // never claims a stream the device isn't running.
+        // Best-effort — must not block connecting.
         let _ = self
             .write_register(registers::I2S_CTRL, &0u32.to_be_bytes())
             .await;
@@ -612,6 +644,7 @@ impl QA40xDevice {
             .write_register(registers::STREAM_CTRL, &registers::STREAM_STOP.to_be_bytes())
             .await;
         // Drop endpoints (they hold refs to the interface) before the interface.
+        *self.i2s_ep.lock().await = None;
         *self.eps.lock().await = None;
         self.release_virtual_import().await;
         *self.interface.lock().await = None;
@@ -666,6 +699,7 @@ impl QA40xDevice {
     /// as the NXP bootloader (a normal disconnect() would try to write registers
     /// to a device that is already going away).
     pub async fn mark_disconnected(&self) {
+        *self.i2s_ep.lock().await = None;
         *self.eps.lock().await = None;
         self.release_virtual_import().await;
         *self.interface.lock().await = None;
@@ -724,6 +758,36 @@ impl QA40xDevice {
     /// mutex during a long capture is what fed the quit-hang's lock convoy.
     pub fn telemetry_cell(&self) -> Arc<Mutex<Option<Telemetry>>> {
         self.cached_telemetry.clone()
+    }
+
+    /// The front-panel I2S OUT endpoint cell itself (issue #71). Grab it ONCE
+    /// at runtime construction — the `telemetry_cell` pattern: the I2S writer
+    /// must reach its endpoint WITHOUT the exclusive device mutex, or a 22 s
+    /// capture would starve the paced I2S stream (and §10 forbids serializing
+    /// the endpoints behind each other).
+    pub fn i2s_endpoint_cell(&self) -> Arc<Mutex<Option<BulkOut>>> {
+        self.i2s_ep.clone()
+    }
+
+    /// Whether the front-panel I2S OUT endpoint was claimed on this
+    /// connection (false when disconnected or the claim failed).
+    pub async fn i2s_available(&self) -> bool {
+        self.i2s_ep.lock().await.is_some()
+    }
+
+    /// Write the I2S frame width (register 0x0B). The vendor app pauses
+    /// ~100 ms between this and `I2S_CTRL = 1`; that pause is the CALLER's
+    /// (the engine's) so the device mutex is not held across a sleep.
+    pub async fn set_i2s_width(&self, width: I2sWidth) -> Result<()> {
+        self.write_register(registers::I2S_WIDTH, &width.register_value().to_be_bytes())
+            .await
+    }
+
+    /// Start (`true`) or stop (`false`) the front-panel I2S stream
+    /// (register 0x0A). Samples then flow on bulk EP 0x03.
+    pub async fn set_i2s_running(&self, on: bool) -> Result<()> {
+        self.write_register(registers::I2S_CTRL, &u32::from(on).to_be_bytes())
+            .await
     }
 
     /// Rate limiter shared by the between-stream and in-capture keepalives:
@@ -843,6 +907,7 @@ impl QA40xDevice {
         if !device_found {
             debug!("Device no longer present in USB device list");
             // Clean up the internal state
+            *self.i2s_ep.lock().await = None;
             *self.eps.lock().await = None;
             *self.interface.lock().await = None;
             *self.device.lock().await = None;
@@ -1964,7 +2029,7 @@ impl QA40xDevice {
 /// cancelled it), so on timeout we cancel the endpoint's queued transfers and
 /// drain every cancellation — otherwise the next submit/collect would pick up a
 /// stale completion.
-async fn complete_or_cancel<T: EndpointQueue>(
+pub(crate) async fn complete_or_cancel<T: EndpointQueue>(
     ep: &mut T,
     timeout: Duration,
 ) -> Result<Completion> {
@@ -1981,7 +2046,7 @@ async fn complete_or_cancel<T: EndpointQueue>(
 /// completions, leaving the endpoint's completion queue empty. Leaving even one
 /// stale (cancelled) completion queued would hand it to the next collector and
 /// fail it with "transfer was cancelled" — see `stream_pump`.
-async fn cancel_and_drain<T: EndpointQueue>(ep: &mut T) {
+pub(crate) async fn cancel_and_drain<T: EndpointQueue>(ep: &mut T) {
     ep.cancel_all();
     while ep.pending() > 0 {
         if tokio::time::timeout(Duration::from_millis(500), ep.next_complete())

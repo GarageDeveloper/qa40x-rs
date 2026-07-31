@@ -66,6 +66,7 @@
 pub mod analyzer;
 pub mod caps;
 pub mod error;
+pub mod i2s;
 pub mod id;
 pub mod registry;
 pub mod runtime;
@@ -80,6 +81,7 @@ pub mod testing;
 pub use analyzer::Analyzer;
 pub use caps::{CalibrationSource, DeviceCapabilities};
 pub use error::DeviceError;
+pub use i2s::{I2sEngine, I2sRequest, I2sStatus};
 pub use id::{DeviceDescriptor, DeviceId, DeviceIdentity, SourceId, SourceKind, Transport};
 pub use registry::{DeviceRegistry, OpenDevice};
 pub use runtime::{
