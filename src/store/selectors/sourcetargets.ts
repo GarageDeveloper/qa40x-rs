@@ -144,9 +144,11 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
             s.acquisition.fftSize
           )
         : null;
+    const i2sError = sess?.run.i2s.slotErrors.find((e) => e.id === srcId)?.error;
     const error =
       present && sess
-        ? sess.run.slotErrors.find((e) => e.id === srcId)?.error ?? null
+        ? sess.run.slotErrors.find((e) => e.id === srcId)?.error ??
+          (i2sError !== undefined ? `I2S: ${i2sError}` : null)
         : null;
     const sameAsFocus = combined && (slot === null || key === s.devices.focus);
     const lockId = sess?.run.programLock ?? null;

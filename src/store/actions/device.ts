@@ -479,6 +479,11 @@ export async function removeDevice(
   // physically different converter/DUT. Applies to the dormant-group purge
   // too (no session, just dead rows and a doc-pinned route).
   store.update("sources/drop-slot-targets", (s) => dropSourceTargetsForSlot(s, slot));
+  // The slot's I2S port config goes with it too (issue #71 review
+  // MUST-FIX #1): a surviving `enabled: true` would silently start the
+  // NEXT tenant's port the moment a re-add lands on this slot — the exact
+  // re-target class D5 exists to refuse, digital-port-shaped.
+  store.update("i2s/drop-slot-port", (s) => resetI2sOnDisconnect(s, key));
   // A focus that sat on the dropped key fell back, and the target drop can
   // have emptied a running loop's slot set — wire-visible for BOTH DAC-owner
   // kinds (the F2 focus-atomicity rule), like setFocusedSession.

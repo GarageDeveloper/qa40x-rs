@@ -126,7 +126,7 @@ describe("setI2sEnabled / setI2sReference — the port declaration", () => {
       sources: { order: ["a"], byId: { a: sine("a") } },
       i2sPorts: { "0": { enabled: true, referenceDbv: 0 } },
     };
-    s = withRun(s, { i2s: { running: true, sigmaPeakDbv: -12, clipped: false, blocks: 3, error: null } });
+    s = withRun(s, { i2s: { running: true, sigmaPeakDbv: -12, clipped: false, blocks: 3, error: null, slotErrors: [] } });
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc(() =>
       runningStatus({ enabled: false, running: false, sigma_peak_dbv: null })
@@ -215,13 +215,10 @@ describe("setI2sEnabled / setI2sReference — the port declaration", () => {
 });
 
 describe("applyI2sStatus — the status fold", () => {
-  it("I2S slot errors merge into slotErrors tagged, replacing stale I2S entries and keeping the DAC's", () => {
+  it("I2S slot errors land in run.i2s.slotErrors, never in the DAC's run.slotErrors (which the stream replaces wholesale)", () => {
     let s = connectedState();
     s = withRun(s, {
-      slotErrors: [
-        { id: "dac-src", error: "unknown waveform" },
-        { id: "old", error: "I2S: stale entry" },
-      ],
+      slotErrors: [{ id: "dac-src", error: "unknown waveform" }],
     });
     const store = new Store<AppState>(s, { freeze: true });
     applyI2sStatus(
@@ -229,10 +226,9 @@ describe("applyI2sStatus — the status fold", () => {
       SLOT0,
       runningStatus({ errors: [{ id: "scr", error: "script refused" }] })
     );
-    expect(store.get().devices.sessions[SLOT0].run.slotErrors).toEqual([
-      { id: "dac-src", error: "unknown waveform" },
-      { id: "scr", error: "I2S: script refused" },
-    ]);
+    const run = store.get().devices.sessions[SLOT0].run;
+    expect(run.i2s.slotErrors).toEqual([{ id: "scr", error: "script refused" }]);
+    expect(run.slotErrors).toEqual([{ id: "dac-src", error: "unknown waveform" }]);
   });
 });
 
@@ -240,7 +236,7 @@ describe("resetI2sOnDisconnect — enabled must never survive a teardown", () =>
   it("clears run.i2s and forces the slot's toggle off", () => {
     let s = connectedState();
     s = withRun(s, {
-      i2s: { running: true, sigmaPeakDbv: -6, clipped: true, blocks: 42, error: null },
+      i2s: { running: true, sigmaPeakDbv: -6, clipped: true, blocks: 42, error: null, slotErrors: [] },
     });
     s = { ...s, i2sPorts: { "0": { enabled: true, referenceDbv: -6 } } };
     const out = resetI2sOnDisconnect(s, SLOT0);

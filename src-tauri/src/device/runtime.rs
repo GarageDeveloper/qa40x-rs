@@ -425,12 +425,14 @@ impl DeviceRuntime {
     /// generator, each waited out so the device mutex is genuinely free.
     pub async fn quiesce(&self) {
         self.cancel_sweep();
-        // I2S after the sweep cancel (its stop writes a register, which a
-        // sweep holding the device would otherwise make wait minutes) and
-        // before the stream teardown, so nothing restarts it.
-        self.i2s().stop_and_wait().await;
         self.stream().stop_and_wait().await;
         self.generator().ensure_stopped().await;
+        // I2S LAST (issue #71 review MUST-FIX #2): its stop writes register
+        // 0x0A through the device mutex, which the stream loop and the
+        // generator hold across whole captures — stopped first, the register
+        // write lands instead of timing out and leaving the hardware port
+        // asserted. Nothing above can restart the port.
+        self.i2s().stop_and_wait().await;
     }
 
     /// [`Self::quiesce`] + the device-side safe state (42 dBV max-headroom

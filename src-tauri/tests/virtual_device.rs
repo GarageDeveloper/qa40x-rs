@@ -442,6 +442,48 @@ async fn i2s_keeps_flowing_during_a_long_capture_while_the_keepalive_still_fires
     rt.handle().lock().await.disconnect().await.expect("disconnect");
 }
 
+/// Review MUST-FIX #2's pin: quiesce must leave register 0x0A at 0 even
+/// when a capture holds the device mutex at the moment the stop lands —
+/// the stream teardown runs FIRST, so the I2S stop's register write gets
+/// a free mutex instead of timing out and leaving the hardware port
+/// asserted while the UI says "off".
+#[tokio::test(flavor = "multi_thread")]
+async fn quiesce_stops_the_port_register_even_around_a_live_capture() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+    engine.apply(i2s_sine_request(true)).await.expect("i2s start");
+
+    // A ~2 s real-time capture holding the device mutex, racing the quiesce.
+    let capture = {
+        let handle = rt.handle();
+        tokio::spawn(async move {
+            let dev = handle.lock().await;
+            let tone = SignalGenerator::sine(1000.0, 0.2, 48_000, 96_000);
+            let _ = dev.generate_and_capture(&tone, &tone).await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await; // capture underway
+
+    rt.quiesce().await;
+    capture.await.expect("capture task");
+
+    let st = engine.status().await;
+    assert!(!st.running && !st.enabled);
+    let reg = {
+        let handle = rt.handle();
+        let dev = handle.lock().await;
+        dev.read_register(registers::I2S_CTRL).await.expect("read 0x0A")
+    };
+    assert_eq!(
+        u32::from_be_bytes([reg[0], reg[1], reg[2], reg[3]]),
+        0,
+        "the hardware port must be OFF after quiesce, capture or not"
+    );
+
+    rt.handle().lock().await.disconnect().await.expect("disconnect");
+}
+
 /// Teardown: quiescing the runtime (the disconnect/shutdown path) stops the
 /// port, and a fresh reconnect reports it off — never a stale "running".
 #[tokio::test(flavor = "multi_thread")]

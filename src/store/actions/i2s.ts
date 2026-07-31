@@ -103,7 +103,11 @@ export function syncAllI2s(store: Store<AppState>, ipc: Ipc): void {
   }
 }
 
-/** Fold one backend `I2sStatus` into a session's `run.i2s`. */
+/** Fold one backend `I2sStatus` into a session's `run.i2s`. The port's
+ * per-slot errors live in `run.i2s.slotErrors`, NOT merged into the DAC's
+ * `run.slotErrors` — the stream replaces that array wholesale ~8×/s, so a
+ * merge would be wiped between polls (review #9); the sources panel reads
+ * both fields. */
 export function applyI2sStatus(
   store: Store<AppState>,
   key: SessionKey,
@@ -118,28 +122,10 @@ export function applyI2sStatus(
         clipped: status.clipped,
         blocks: status.blocks_written,
         error: status.last_error,
-        // Per-slot source problems ride the same channel as the DAC's
-        // (run.slotErrors is the stream's) — surface the port's own here.
+        slotErrors: status.errors,
       },
-      // I2S slot errors land in the shared per-source error store so the
-      // sources panel attributes them like DAC slot errors.
-      slotErrors: mergeI2sErrors(r.slotErrors, status),
     }))
   );
-}
-
-/** The port's per-slot errors merged into the session's slotErrors: replace
- * previous I2S-tagged entries, keep the DAC's. Tagging by message prefix
- * keeps the wire type untouched. */
-function mergeI2sErrors(
-  existing: { id: string; error: string }[],
-  status: I2sStatus
-): { id: string; error: string }[] {
-  const keep = existing.filter((e) => !e.error.startsWith("I2S: "));
-  return [
-    ...keep,
-    ...status.errors.map((e) => ({ id: e.id, error: `I2S: ${e.error}` })),
-  ];
 }
 
 /** Reset a session's live port state (disconnect / device lost): the

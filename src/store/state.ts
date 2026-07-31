@@ -161,10 +161,21 @@ export interface SessionI2sState {
   blocks: number;
   /** The writer's last error, surfaced by the status poll. */
   error: string | null;
+  /** The port's per-source slot problems, in their OWN field: the DAC's
+   * `run.slotErrors` is replaced wholesale by every stream frame, so I2S
+   * entries merged there would be wiped between polls. */
+  slotErrors: SlotError[];
 }
 
 export function initialSessionI2s(): SessionI2sState {
-  return { running: false, sigmaPeakDbv: null, clipped: false, blocks: 0, error: null };
+  return {
+    running: false,
+    sigmaPeakDbv: null,
+    clipped: false,
+    blocks: 0,
+    error: null,
+    slotErrors: [],
+  };
 }
 
 /** Persisted per-device I2S port config (issue #71), slot-keyed like the

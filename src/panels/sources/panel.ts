@@ -320,7 +320,9 @@ export function mountSourcesPanel(
           {
             title:
               "Route to the front-panel I2S port's L / R (plays once the " +
-              "device's I2S output is enabled in the Traces panel)",
+              "device's I2S output is enabled in the Traces panel). The " +
+              "port runs at 48 kHz and plays the asked frequency verbatim " +
+              "— no FFT-grid rounding.",
           },
           el("span.sources__route-tag", {}, "I2S"),
           el("label.sources__route-ch", {}, i2sL, "L"),
@@ -550,7 +552,9 @@ export function mountSourcesPanel(
           {
             title:
               "Route to this device's front-panel I2S port (plays once its " +
-              "I2S output is enabled in the Traces panel)",
+              "I2S output is enabled in the Traces panel). The port runs " +
+              "at 48 kHz and plays the asked frequency verbatim — no " +
+              "FFT-grid rounding.",
           },
           el("span.sources__route-tag", {}, "I2S"),
           el("label.sources__route-ch", {}, i2sL, "L"),

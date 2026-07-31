@@ -643,6 +643,13 @@ impl QA40xDevice {
         let _ = self
             .write_register(registers::STREAM_CTRL, &registers::STREAM_STOP.to_be_bytes())
             .await;
+        // Front-panel I2S off too (issue #71 review MUST-FIX #2): the
+        // engine's own stop is best-effort behind a busy device, so the
+        // safe-state teardown is the backstop that never leaves the port
+        // asserted for the next session.
+        let _ = self
+            .write_register(registers::I2S_CTRL, &0u32.to_be_bytes())
+            .await;
         // Drop endpoints (they hold refs to the interface) before the interface.
         *self.i2s_ep.lock().await = None;
         *self.eps.lock().await = None;

@@ -17,11 +17,14 @@
 //! ([`crate::qa40x::QA40xDevice::i2s_endpoint_cell`]) — never the exclusive
 //! device mutex and never the `eps` mutex `stream_pump` holds for a whole
 //! capture. Register writes (0x0A/0x0B) do take the device mutex, but only
-//! at start/stop, between captures. So an acquisition, the ~1 Hz keepalive
-//! and the I2S stream all run concurrently, which is what the hardware
-//! expects. The endpoint cell is locked per writer iteration (one
-//! completion + one refill), so teardown paths that clear the cell wait at
-//! most one paced block.
+//! at start/stop and always with a bound ([`DEVICE_LOCK_BOUND`]). So an
+//! acquisition, the ~1 Hz keepalive and the I2S stream all run
+//! concurrently, which is what the hardware expects. The endpoint cell is
+//! locked per writer iteration (one completion + one refill): teardown
+//! paths that clear the cell wait one paced block (~42.7 ms) in the
+//! healthy case, and up to ~3 s worst case on a stalling endpoint (the
+//! completion timeout plus its internal cancel-and-drain) — bounded either
+//! way, inside `stop_locked`'s 5 s join budget.
 //!
 //! # Level convention
 //!
@@ -54,6 +57,12 @@ const I2S_WIDTH_SETTLE: Duration = Duration::from_millis(100);
 /// ~42.7 ms; 2 s means a dead endpoint is detected well within a status
 /// poll, while a busy bus never false-trips.
 const WRITER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Bound on every device-mutex acquisition the engine performs (start and
+/// stop registers): a capture holds that mutex for whole frames — the
+/// engine answers "busy" (start) or skips the write (stop, recovered by
+/// the connect/disconnect I2S_CTRL = 0 backstops) instead of parking.
+const DEVICE_LOCK_BOUND: Duration = Duration::from_secs(3);
 
 /// One `i2s_apply` invocation: the idempotent full-state declaration
 /// (enable/rebuild/disable in one shape, mirroring `output_only_start`).
@@ -266,6 +275,14 @@ impl I2sEngine {
             st.last_error = None;
         }
 
+        // A flag-only stop (the unplug path, not serialized by the apply
+        // gate) may still be draining: treat it as not-running and wait the
+        // old writer out, or the fresh enable would adopt a writer that is
+        // about to die on the stale flag (review #8).
+        if self.inner.running.load(Ordering::SeqCst) && self.inner.stop.load(Ordering::SeqCst) {
+            self.stop_locked().await;
+        }
+
         if !self.inner.running.load(Ordering::SeqCst) {
             if let Err(e) = self.start_port(width).await {
                 let mut st = self.inner.status.lock().expect("i2s status lock");
@@ -295,9 +312,12 @@ impl I2sEngine {
 
     /// Flag-only stop for the unplug path: no register I/O to a unit that is
     /// gone, no awaits. The writer exits on its next iteration (the endpoint
-    /// cell is cleared by `mark_disconnected` anyway).
+    /// cell is cleared by `mark_disconnected` anyway). `enabled` drops too
+    /// (review #6): the unit is gone, so a status consumer (REST/scripts)
+    /// must not read a stale intent as "the port died mid-run".
     pub fn stop_now(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.status.lock().expect("i2s status lock").enabled = false;
     }
 
     /* ---- internals ------------------------------------------------------ */
@@ -313,14 +333,27 @@ impl I2sEngine {
 
     /// Register bring-up: width, the vendor's ~100 ms pause, then start.
     /// The device mutex is held across each register write only — never the
-    /// pause.
+    /// pause — and acquired with a BOUND (review #4): a capture can hold it
+    /// for tens of seconds, and an enable must answer "busy, try again"
+    /// instead of parking the command (and the apply gate behind it) for a
+    /// whole 1M-FFT frame.
     async fn start_port(&self, width: I2sWidth) -> Result<(), DeviceError> {
+        let busy = || {
+            DeviceError::Source(
+                "I2S start: the device is busy with a long capture — try again when it completes"
+                    .into(),
+            )
+        };
         {
-            let dev = self.inner.device.lock().await;
+            let dev = tokio::time::timeout(DEVICE_LOCK_BOUND, self.inner.device.lock())
+                .await
+                .map_err(|_| busy())?;
             dev.set_i2s_width(width).await.map_err(DeviceError::from)?;
         }
         tokio::time::sleep(I2S_WIDTH_SETTLE).await;
-        let dev = self.inner.device.lock().await;
+        let dev = tokio::time::timeout(DEVICE_LOCK_BOUND, self.inner.device.lock())
+            .await
+            .map_err(|_| busy())?;
         dev.set_i2s_running(true).await.map_err(DeviceError::from)
     }
 
@@ -345,8 +378,9 @@ impl I2sEngine {
         }
         // Port off. The device mutex is acquired with a bound: a program
         // holding the device for minutes must not hang a stop — the write
-        // is then skipped, and the next connect's I2S_CTRL = 0 recovers.
-        match tokio::time::timeout(Duration::from_secs(3), self.inner.device.lock()).await {
+        // is then skipped, and the connect/disconnect I2S_CTRL = 0
+        // backstops recover.
+        match tokio::time::timeout(DEVICE_LOCK_BOUND, self.inner.device.lock()).await {
             Ok(dev) => {
                 if let Err(e) = dev.set_i2s_running(false).await {
                     log::debug!("I2S stop register write skipped: {e}");

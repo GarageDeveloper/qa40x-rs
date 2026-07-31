@@ -287,6 +287,17 @@ describe("removeDevice — keyed disconnect + eviction + purge (issue #25 lot E4
     expect(s.triggers["hw-in-left@1"]).toBeUndefined();
   });
 
+  it("drops the slot's I2S port toggle with the device — a re-add must never silently start the NEXT tenant's port (issue #71 review MUST-FIX #1)", async () => {
+    const store = slot1Store();
+    store.update("test/i2s-on", (s) => ({
+      ...s,
+      i2sPorts: { "1": { enabled: true, referenceDbv: -6 } },
+    }));
+    const { ipc } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(store.get().i2sPorts["1"]).toEqual({ enabled: false, referenceDbv: -6 });
+  });
+
   it("swallows an 'Unknown device' disconnect rejection — no error toast, eviction still happens (F8 rule)", async () => {
     const store = slot1Store();
     const { ipc } = fakeIpc({

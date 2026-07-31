@@ -166,9 +166,14 @@ export function i2sSlotsFromSources(s: AppState, sessionKey?: SessionKey): Mixer
   const key = sessionKey ?? s.devices.focus;
   const clamp = (hz: number): number =>
     Math.min(Math.max(hz, 1), (I2S_RATE_HZ / 2) * 0.98);
-  return sourcesForSession(s, key).map(({ src, i2sRoute }) =>
-    slotFromSource(src, clamp, i2sRoute)
-  );
+  return sourcesForSession(s, key)
+    // Off cells stay OUT of the port's declaration (unlike the DAC's,
+    // where an off cell means "a silent program"): the port streams
+    // silence while enabled regardless, and declaring a DAC-only script
+    // here would compile it a second time just to report a phantom
+    // I2S-tagged error on a source that never routes to the port.
+    .filter(({ i2sRoute }) => i2sRoute !== "off")
+    .map(({ src, i2sRoute }) => slotFromSource(src, clamp, i2sRoute));
 }
 
 /** The stream config is a pure projection of the state tree. The spectra

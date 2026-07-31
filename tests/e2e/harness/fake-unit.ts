@@ -336,7 +336,9 @@ export class FakeUnit {
 
   i2sStatusWire(): unknown {
     return {
-      supported: true,
+      // The real engine derives this from the EP 0x03 cell, cleared on
+      // every teardown — the fake's honest proxy is the connection.
+      supported: this.connected,
       enabled: this.i2s.enabled,
       running: this.i2s.running,
       width_bits: this.i2s.widthBits,

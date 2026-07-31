@@ -202,11 +202,18 @@ export class FakeDevice {
       if (slot === 0) {
         u.connected = false;
         u.openId = null;
+        // The real monitor's loss branch flag-stops the I2S engine
+        // (issue #71) — mirror it or the fake's paced timer leaks and
+        // reports a running port on a unit that is gone.
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected");
       } else if (u.openId !== null && u.openId.startsWith("usb/")) {
         const lost = u.openId;
         u.connected = false;
         u.openId = null;
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected", { device_id: lost });
       }
     }
@@ -233,6 +240,10 @@ export class FakeDevice {
       if (u.connected && u.openId === id) {
         u.connected = false;
         u.openId = null;
+        // Mirror the real monitor's loss branch (issue #71) — see
+        // setPresent above.
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected", { device_id: id });
       }
     }
