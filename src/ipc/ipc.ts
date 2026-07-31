@@ -22,6 +22,7 @@ import type {
   Frame,
   FrameMeasures,
   FrequencyResponseTrace,
+  I2sStatus,
   InputDbvOffset,
   MixerSlotDesc,
   OutputOnlyStatus,
@@ -127,6 +128,23 @@ export interface Commands {
   };
   stop_generator: { args: DeviceScoped; result: string };
   is_generator_running: { args: DeviceScoped; result: boolean };
+
+  // Front-panel I2S output (issue #71): one idempotent full-state
+  // declaration (enable with a slot set / rebuild / disable) on the
+  // device's own I2S engine — 48 kHz pinned, runs concurrently with the
+  // acquisition stream. `widthBits` optional (default 32 — the only value
+  // the vendor app was observed writing). `i2s_status` is a pure backend
+  // cache read, safe to poll during a capture.
+  i2s_apply: {
+    args: {
+      enabled: boolean;
+      slots: MixerSlotDesc[];
+      referenceDbv: number;
+      widthBits?: number;
+    } & DeviceScoped;
+    result: I2sStatus;
+  };
+  i2s_status: { args: DeviceScoped; result: I2sStatus };
 
   // Per-trace measurements for the tile chips (measurements:: math; the
   // frontend memoizes by trace seq and only formats — plan M3).

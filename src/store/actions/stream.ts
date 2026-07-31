@@ -150,6 +150,27 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
   return sourcesForSession(s, key).map(({ src, route }) => slotFromSource(src, snap, route));
 }
 
+/** The port's pinned sample rate (backend `I2S_RATE_HZ`) — the vendor app
+ * always generates I2S at 48 kHz, independent of the acquisition rate. */
+export const I2S_RATE_HZ = 48000;
+
+/** The slot declarations `sessionKey`'s I2S port receives (issue #71): the
+ * playing sources whose matrix routes an I2S dimension onto this session,
+ * each with its coalesced I2S route. NO bin snapping — the FFT grid
+ * describes the acquisition, not the front-panel port: the port plays the
+ * asked frequency (clamped below ITS OWN 48 kHz Nyquist, never the
+ * acquisition rate's), with the same 1 s-loop wrap discontinuity the
+ * output-only generator has. Follow-up: snap to the 1 Hz loop grid with an
+ * honest played-Hz readout. */
+export function i2sSlotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlotDesc[] {
+  const key = sessionKey ?? s.devices.focus;
+  const clamp = (hz: number): number =>
+    Math.min(Math.max(hz, 1), (I2S_RATE_HZ / 2) * 0.98);
+  return sourcesForSession(s, key).map(({ src, i2sRoute }) =>
+    slotFromSource(src, clamp, i2sRoute)
+  );
+}
+
 /** The stream config is a pure projection of the state tree. The spectra
  * request is the display budget: an FFT is computed only for hardware
  * endpoints some displayed spectrum tile shows (#52). `sessionKey` keys

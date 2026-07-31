@@ -305,7 +305,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
   it("multitone / noise / chirp carry only their level", () => {
     for (const kind of ["multitone", "noise", "chirp"] as const) {
       const slot = slotFromSource(
-        { id: "b", label: kind, kind, levelDbv: -12, route: "both", targets: [], playing: true },
+        { id: "b", label: kind, kind, levelDbv: -12, route: "both", i2sRoute: "off", targets: [], playing: true },
         noSnap,
         "both"
       );
@@ -320,6 +320,7 @@ describe("slotFromSource (the mixer.ts slot-building port)", () => {
       kind: "script",
       source: "fn render(ctx) { [] }",
       route: "both",
+      i2sRoute: "off",
       targets: [],
       playing: true,
     };
@@ -411,7 +412,7 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
     const s = addSlot1(initialState());
     s.sources = {
       order: ["a"],
-      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }) },
     };
     expect(s.devices.focus).toBe(SLOT0);
     expect(buildStreamConfig(s, SLOT0).slots).toEqual([]); // focused, but not targeted
@@ -427,8 +428,8 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
       byId: {
         a: sineSource("a", {
           targets: [
-            { slot: 0, route: "left" },
-            { slot: 1, route: "right" },
+            { slot: 0, route: "left", i2sRoute: "off" },
+            { slot: 1, route: "right", i2sRoute: "off" },
           ],
         }),
       },
@@ -446,8 +447,8 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
       byId: {
         a: sineSource("a", {
           targets: [
-            { slot: null, route: "left" },
-            { slot: 0, route: "right" },
+            { slot: null, route: "left", i2sRoute: "off" },
+            { slot: 0, route: "right", i2sRoute: "off" },
           ],
         }),
       },
@@ -464,9 +465,9 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
       byId: {
         a: sineSource("a", {
           targets: [
-            { slot: null, route: "both" },
-            { slot: 0, route: "both" },
-            { slot: 1, route: "left" },
+            { slot: null, route: "both", i2sRoute: "off" },
+            { slot: 0, route: "both", i2sRoute: "off" },
+            { slot: 1, route: "left", i2sRoute: "off" },
           ],
         }),
         b: sineSource("b"),
@@ -482,7 +483,7 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
     const s = initialState(); // slot 1 has NO session
     s.sources = {
       order: ["a"],
-      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both" }] }) },
+      byId: { a: sineSource("a", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }) },
     };
     expect(buildStreamConfig(s, SLOT0).slots).toEqual([]);
     expect(sourcesForSession(s, "slot-1")).toHaveLength(1); // structural: it WOULD play there
@@ -506,8 +507,8 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
       byId: {
         a: sineSource("a", {
           targets: [
-            { slot: 0, route: "left" },
-            { slot: 1, route: "left" },
+            { slot: 0, route: "left", i2sRoute: "off" },
+            { slot: 1, route: "left", i2sRoute: "off" },
           ],
         }),
       },
@@ -1238,7 +1239,7 @@ describe("startRun's playAllIfIdle fan-out reaches OTHER sessions (F2 review SHO
           // start (slot 0), so this source's own play/pause fan-out
           // (sources.ts::setSourcePlaying) never runs; only startRun's
           // playAllIfIdle sweep flips it.
-          a: sineSource("a", { playing: false, targets: [{ slot: 1, route: "both" }] }),
+          a: sineSource("a", { playing: false, targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }),
         },
       },
     };

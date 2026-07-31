@@ -741,7 +741,7 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
             "src-sine-1": {
               ...base.sources.byId["src-sine-1"],
               playing: true,
-              targets: [{ slot: 0, route: "left" }], // pinned to slot 0
+              targets: [{ slot: 0, route: "left", i2sRoute: "off" }], // pinned to slot 0
             },
           },
         },
@@ -793,7 +793,7 @@ describe("setFocusedSession (issue #25 lot E3 review #1) — the focus is a WIRE
             "src-sine-1": {
               ...base.sources.byId["src-sine-1"],
               playing: true,
-              targets: [{ slot: 2, route: "both" }], // pinned onto the LOCKED device
+              targets: [{ slot: 2, route: "both", i2sRoute: "off" }], // pinned onto the LOCKED device
             },
           },
         },

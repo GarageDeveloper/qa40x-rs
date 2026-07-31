@@ -43,8 +43,8 @@ function bench(sources: SourceMeta[], slots: number[] = [0]): AppState {
 describe("targetSessionKey", () => {
   it("slot null resolves to the FOCUSED session, a number to its own slot key", () => {
     const s = bench([]);
-    expect(targetSessionKey(s, { slot: null, route: "left" })).toBe(SLOT0);
-    expect(targetSessionKey(s, { slot: 3, route: "left" })).toBe("slot-3");
+    expect(targetSessionKey(s, { slot: null, route: "left", i2sRoute: "off" })).toBe(SLOT0);
+    expect(targetSessionKey(s, { slot: 3, route: "left", i2sRoute: "off" })).toBe("slot-3");
   });
 });
 
@@ -62,7 +62,7 @@ describe("sourcesForSession", () => {
   });
 
   it("a pinned target is focus-independent", () => {
-    const targets: SourceTarget[] = [{ slot: 1, route: "right" }];
+    const targets: SourceTarget[] = [{ slot: 1, route: "right", i2sRoute: "off" }];
     const s = bench([sine("a", { targets })], [0, 1]);
     expect(sourcesForSession(s, SLOT0)).toEqual([]);
     expect(sourcesForSession(s, "slot-1").map((r) => [r.src.id, r.route])).toEqual([
@@ -79,8 +79,8 @@ describe("sourcesForSession", () => {
     const s = bench([
       sine("a", {
         targets: [
-          { slot: null, route: "left" },
-          { slot: 0, route: "right" },
+          { slot: null, route: "left", i2sRoute: "off" },
+          { slot: 0, route: "right", i2sRoute: "off" },
         ],
       }),
     ]);
@@ -89,7 +89,7 @@ describe("sourcesForSession", () => {
   });
 
   it("a dormant-slot target resolves nowhere — no throw, no phantom", () => {
-    const s = bench([sine("a", { targets: [{ slot: 5, route: "both" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 5, route: "both", i2sRoute: "off" }] })]);
     expect(sourcesForSession(s, SLOT0)).toEqual([]);
   });
 });
@@ -114,10 +114,10 @@ describe("sessionsForSource", () => {
       [
         sine("a", {
           targets: [
-            { slot: null, route: "left" }, // focus = slot-0
-            { slot: 0, route: "right" }, // same session, deduped
-            { slot: 1, route: "both" }, // live
-            { slot: 5, route: "both" }, // dormant: dropped
+            { slot: null, route: "left", i2sRoute: "off" }, // focus = slot-0
+            { slot: 0, route: "right", i2sRoute: "off" }, // same session, deduped
+            { slot: 1, route: "both", i2sRoute: "off" }, // live
+            { slot: 5, route: "both", i2sRoute: "off" }, // dormant: dropped
           ],
         }),
       ],

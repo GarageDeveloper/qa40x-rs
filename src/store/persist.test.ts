@@ -882,14 +882,14 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
         { slot: -1, route: "left" },
         { slot: 1.5, route: "left" },
         { slot: 1, route: "up" },
-        { slot: 1, route: "left" },
-        { slot: 1, route: "right" }, // duplicate slot: FIRST wins
-        { slot: null, route: "both" },
-        { slot: null, route: "off" }, // duplicate focus target: first wins
+        { slot: 1, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" }, // duplicate slot: FIRST wins
+        { slot: null, route: "both", i2sRoute: "off" },
+        { slot: null, route: "off", i2sRoute: "off" }, // duplicate focus target: first wins
       ])
     ).toEqual([
-      { slot: 1, route: "left" },
-      { slot: null, route: "both" },
+      { slot: 1, route: "left", i2sRoute: "off" },
+      { slot: null, route: "both", i2sRoute: "off" },
     ]);
     // A hand-edited flood is capped, never an unbounded matrix.
     const flood = Array.from({ length: 40 }, (_, i) => ({ slot: i, route: "left" as const }));
@@ -907,8 +907,8 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
           "src-sine-1": {
             ...s.sources.byId["src-sine-1"],
             targets: [
-              { slot: 1, route: "both" },
-              { slot: null, route: "left" },
+              { slot: 1, route: "both", i2sRoute: "off" },
+              { slot: null, route: "left", i2sRoute: "off" },
             ],
           },
         },
@@ -918,8 +918,8 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
     expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: 1, route: "both" },
-      { slot: null, route: "left" },
+      { slot: 1, route: "both", i2sRoute: "off" },
+      { slot: null, route: "left", i2sRoute: "off" },
     ]);
     // Stability: the reloaded bench re-snapshots to the same document.
     expect(snapshotWorkspace(dest.get())).toEqual(doc);
@@ -943,7 +943,7 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
           ...s.sources.byId,
           "src-sine-1": {
             ...s.sources.byId["src-sine-1"],
-            targets: [{ slot: 1, route: "both" }],
+            targets: [{ slot: 1, route: "both", i2sRoute: "off" }],
           },
         },
       },
@@ -957,11 +957,11 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
   it("applyWorkspaceDoc sanitizes targets itself — a template-style doc that never saw migrate()", () => {
     const doc = snapshotWorkspace(freshStore().get());
     (doc.sources.byId["src-sine-1"] as { targets: unknown }).targets = [
-      { slot: 2, route: "right" },
+      { slot: 2, route: "right", i2sRoute: "off" },
       { slot: "two", route: "right" },
     ];
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
-    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right" }]);
+    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right", i2sRoute: "off" }]);
   });
 });

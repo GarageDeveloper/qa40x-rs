@@ -17,10 +17,12 @@ import { sessionKeyForSlot } from "../sessionkey";
 import type { SessionKey } from "../sessionkey";
 
 /** One source as ONE session receives it: the coalesced route of every
- * matrix cell that resolved onto that session. */
+ * matrix cell that resolved onto that session — both dimensions (Line out
+ * and the I2S port, issue #71) coalesced independently. */
 export interface RoutedSource {
   src: SourceMeta;
   route: SourceRoute;
+  i2sRoute: SourceRoute;
 }
 
 /** The session a matrix cell resolves to: the FOCUSED session for the
@@ -57,9 +59,13 @@ export function sourcesForSession(s: AppState, key: SessionKey): RoutedSource[] 
       const i = at.get(src.id);
       if (i === undefined) {
         at.set(src.id, out.length);
-        out.push({ src, route: t.route });
+        out.push({ src, route: t.route, i2sRoute: t.i2sRoute });
       } else {
-        out[i] = { src: out[i].src, route: unionRoutes(out[i].route, t.route) };
+        out[i] = {
+          src: out[i].src,
+          route: unionRoutes(out[i].route, t.route),
+          i2sRoute: unionRoutes(out[i].i2sRoute, t.i2sRoute),
+        };
       }
     }
   }
@@ -70,6 +76,15 @@ export function sourcesForSession(s: AppState, key: SessionKey): RoutedSource[] 
  * of the bench-global "any source playing" predicate (outputonly.ts). */
 export function sessionHasSources(s: AppState, key: SessionKey): boolean {
   return sourcesForSession(s, key).length > 0;
+}
+
+/** Whether some playing source AUDIBLY routes to `key`'s I2S port (issue
+ * #71). Off cells don't count here — unlike `sessionHasSources`, this
+ * feeds the port UI's "routed but the port is off" note, where a silent
+ * cell has nothing to announce. The port itself streams silence while
+ * enabled regardless. */
+export function sessionHasI2sSources(s: AppState, key: SessionKey): boolean {
+  return sourcesForSession(s, key).some((r) => r.i2sRoute !== "off");
 }
 
 /** The LIVE sessions one source currently resolves onto (pinned targets

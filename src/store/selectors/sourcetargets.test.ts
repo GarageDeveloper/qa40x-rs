@@ -79,7 +79,7 @@ describe("tagOfSlot", () => {
 describe("sourceTargetVMs — row list and per-target state", () => {
   it("orders rows focus first, live sessions by slot, then dormant matrix slots", () => {
     const s = bench(
-      [sine("a", { targets: [{ slot: 5, route: "both" }] })],
+      [sine("a", { targets: [{ slot: 5, route: "both", i2sRoute: "off" }] })],
       [{ slot: 1, rate: 48000 }]
     );
     expect(sourceTargetVMs(s, "a").map((v) => v.tag)).toEqual(["focus", "0", "1", "5"]);
@@ -104,7 +104,7 @@ describe("sourceTargetVMs — row list and per-target state", () => {
   });
 
   it("a dormant target has playedHz null and says 'not connected' — never the 48 kHz fallback", () => {
-    const s = bench([sine("a", { targets: [{ slot: 2, route: "left" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 2, route: "left", i2sRoute: "off" }] })]);
     const dormant = sourceTargetVMs(s, "a").find((v) => v.tag === "2")!;
     expect(dormant.status).toBe("absent");
     expect(dormant.live).toBe(false);
@@ -115,8 +115,8 @@ describe("sourceTargetVMs — row list and per-target state", () => {
 
   it("readouts snap on the TARGET session's rate — two rates, two values (#14 class)", () => {
     const targets: SourceTarget[] = [
-      { slot: null, route: "left" },
-      { slot: 1, route: "right" },
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 1, route: "right", i2sRoute: "off" },
     ];
     const s = bench([sine("a", { targets })], [{ slot: 1, rate: 192000 }]);
     const vms = sourceTargetVMs(s, "a");
@@ -128,7 +128,7 @@ describe("sourceTargetVMs — row list and per-target state", () => {
   });
 
   it("an unadopted live slot ≥ 1 reads 'device id not adopted yet'", () => {
-    let s = bench([sine("a", { targets: [{ slot: 1, route: "left" }] })], [
+    let s = bench([sine("a", { targets: [{ slot: 1, route: "left", i2sRoute: "off" }] })], [
       { slot: 1, rate: 48000 },
     ]);
     s = {
@@ -148,8 +148,8 @@ describe("sourceTargetVMs — row list and per-target state", () => {
 
   it("errors come from the TARGET's own session, never the focused one", () => {
     const targets: SourceTarget[] = [
-      { slot: null, route: "left" },
-      { slot: 1, route: "right" },
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 1, route: "right", i2sRoute: "off" },
     ];
     let s = bench([sine("a", { targets })], [{ slot: 1, rate: 48000 }]);
     s = withRun(s, { slotErrors: [{ id: "a", error: "bad script" }] }, "slot-1");
@@ -163,8 +163,8 @@ describe("sourceTargetVMs — row list and per-target state", () => {
 
   it("a focus cell plus an explicit cell for the focused slot flags BOTH rows as combined", () => {
     const targets: SourceTarget[] = [
-      { slot: null, route: "left" },
-      { slot: 0, route: "right" },
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 0, route: "right", i2sRoute: "off" },
     ];
     const s = bench([sine("a", { targets })]);
     const vms = sourceTargetVMs(s, "a");
@@ -176,7 +176,7 @@ describe("sourceTargetVMs — row list and per-target state", () => {
     expect(slot0.note).toMatch(/channels are combined/);
     // An explicit cell for a NON-focused slot is not combined.
     const t = bench(
-      [sine("b", { targets: [{ slot: null, route: "left" }, { slot: 1, route: "right" }] })],
+      [sine("b", { targets: [{ slot: null, route: "left", i2sRoute: "off" }, { slot: 1, route: "right", i2sRoute: "off" }] })],
       [{ slot: 1, rate: 48000 }]
     );
     for (const v of sourceTargetVMs(t, "b")) expect(v.sameAsFocus).toBe(false);
@@ -184,7 +184,7 @@ describe("sourceTargetVMs — row list and per-target state", () => {
 
   it("a routing edit held by a program lock says so (review #4: accepted-but-deferred, never a silent claim)", () => {
     let s = bench(
-      [sine("a", { targets: [{ slot: 1, route: "both" }] })],
+      [sine("a", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] })],
       [{ slot: 1, rate: 48000 }]
     );
     s = withRun(s, { programLock: "prog-trace" }, "slot-1");
@@ -205,7 +205,7 @@ describe("sourceTargetVMs — row list and per-target state", () => {
   });
 
   it("an off cell on a connected target reads 'off (no channel)'", () => {
-    const s = bench([sine("a", { targets: [{ slot: 0, route: "off" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 0, route: "off", i2sRoute: "off" }] })]);
     const slot0 = sourceTargetVMs(s, "a").find((v) => v.tag === "0")!;
     expect(slot0.present).toBe(true);
     expect(slot0.left).toBe(false);
@@ -220,9 +220,9 @@ describe("routingSummary", () => {
       [
         sine("a", {
           targets: [
-            { slot: 5, route: "left" },
-            { slot: null, route: "both" },
-            { slot: 1, route: "right" },
+            { slot: 5, route: "left", i2sRoute: "off" },
+            { slot: null, route: "both", i2sRoute: "off" },
+            { slot: 1, route: "right", i2sRoute: "off" },
           ],
         }),
       ],
@@ -246,7 +246,7 @@ describe("routingSummary", () => {
 
   it("a connected-but-UNADOPTED target gets the ⚠ too — every transport verb refuses it (review #5)", () => {
     let s = bench(
-      [sine("a", { targets: [{ slot: 1, route: "right" }] })],
+      [sine("a", { targets: [{ slot: 1, route: "right", i2sRoute: "off" }] })],
       [{ slot: 1, rate: 48000 }]
     );
     s = {
@@ -279,8 +279,8 @@ describe("snappedReadout", () => {
       [
         sine("a", {
           targets: [
-            { slot: null, route: "left" },
-            { slot: 1, route: "right" },
+            { slot: null, route: "left", i2sRoute: "off" },
+            { slot: 1, route: "right", i2sRoute: "off" },
           ],
         }),
       ],
@@ -292,7 +292,7 @@ describe("snappedReadout", () => {
   });
 
   it("no live target is an honest — (never a substituted grid)", () => {
-    const s = bench([sine("a", { targets: [{ slot: 4, route: "both" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 4, route: "both", i2sRoute: "off" }] })]);
     const r = snappedReadout(sourceTargetVMs(s, "a"), 1000);
     expect(r.text).toBe("→ —");
     expect(r.title).toBe("Not routed to any connected device");
@@ -303,8 +303,8 @@ describe("snappedReadout", () => {
       [
         sine("a", {
           targets: [
-            { slot: null, route: "off" },
-            { slot: 1, route: "off" },
+            { slot: null, route: "off", i2sRoute: "off" },
+            { slot: 1, route: "off", i2sRoute: "off" },
           ],
         }),
       ],
@@ -318,8 +318,8 @@ describe("snappedReadout", () => {
       [
         sine("a", {
           targets: [
-            { slot: null, route: "left" },
-            { slot: 1, route: "right" },
+            { slot: null, route: "left", i2sRoute: "off" },
+            { slot: 1, route: "right", i2sRoute: "off" },
           ],
         }),
       ],
@@ -346,19 +346,19 @@ describe("sourceRowMode", () => {
   it("matrix at ≥ 2 live sessions, or whenever the matrix is explicit", () => {
     const two = bench([sine("a")], [{ slot: 1, rate: 48000 }]);
     expect(sourceRowMode(two, two.sources.byId["a"])).toBe("matrix");
-    const pinned = bench([sine("a", { targets: [{ slot: 0, route: "left" }] })]);
+    const pinned = bench([sine("a", { targets: [{ slot: 0, route: "left", i2sRoute: "off" }] })]);
     expect(sourceRowMode(pinned, pinned.sources.byId["a"])).toBe("matrix");
   });
 });
 
 describe("hasLiveTarget", () => {
   it("true for a connected target — an off cell counts (silent DAC program)", () => {
-    const s = bench([sine("a", { targets: [{ slot: 0, route: "off" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 0, route: "off", i2sRoute: "off" }] })]);
     expect(hasLiveTarget(sourceTargetVMs(s, "a"))).toBe(true);
   });
 
   it("false when every cell points at something dead", () => {
-    const s = bench([sine("a", { targets: [{ slot: 3, route: "both" }] })]);
+    const s = bench([sine("a", { targets: [{ slot: 3, route: "both", i2sRoute: "off" }] })]);
     expect(hasLiveTarget(sourceTargetVMs(s, "a"))).toBe(false);
     const disc = withDevice(bench([sine("b")]), { status: "disconnected" });
     expect(hasLiveTarget(sourceTargetVMs(disc, "b"))).toBe(false);
@@ -379,8 +379,8 @@ describe("rowErrorText", () => {
     let s = bench([
       sine("a", {
         targets: [
-          { slot: null, route: "left" },
-          { slot: 0, route: "right" },
+          { slot: null, route: "left", i2sRoute: "off" },
+          { slot: 0, route: "right", i2sRoute: "off" },
         ],
       }),
     ]);

@@ -617,6 +617,7 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
             id: "src-1",
             label: "Sine 1000 Hz",
             route: "left",
+            i2sRoute: "off",
             targets: [],
             playing: true,
             kind: "sine",

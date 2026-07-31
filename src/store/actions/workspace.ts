@@ -15,22 +15,30 @@ import { clearTriggerSnapshots } from "../../data/triggered";
 import { resetAllChains, syncChains } from "../../data/chains";
 import { sanitizeUserCurve } from "../../core/weightingcurve";
 import type { Store } from "../store";
-import type { AppState } from "../state";
+import type { AppState, SourceRoute } from "../state";
 import type { WorkspaceDoc } from "../persist";
 import {
   docToFrames,
   isQuotaExceeded,
   loadLegacyCurrent,
   loadLegacyNamed,
+  sanitizeI2sPorts,
   sanitizeSourceTargets,
   snapshotWorkspace,
 } from "../persist";
 import type { WorkspaceStore } from "../wsstore";
 import { anyProgramLock } from "../selectors/session";
+import { syncAllI2s } from "./i2s";
 import { syncAllOutputOnly } from "./outputonly";
 import { syncAllStreams } from "./stream";
 import { reconcileHwTraces } from "./traces";
 import { toast } from "./ui";
+
+/** The implicit I2S route of a doc source, validated (issue #71): docs
+ * predating the field — and garbage — degrade to "off". */
+function sanitizeRoute(v: unknown): SourceRoute {
+  return v === "left" || v === "right" || v === "both" ? v : "off";
+}
 
 /** A quota-exceeded save is either a one-off (a huge document on THIS
  * save) or a standing condition (storage already full) — either way, warn
@@ -92,6 +100,7 @@ export function applyWorkspaceDoc(
               ...doc.sources.byId[id],
               playing: false,
               targets: sanitizeSourceTargets(doc.sources.byId[id].targets),
+              i2sRoute: sanitizeRoute(doc.sources.byId[id].i2sRoute),
             },
           ])
       ),
@@ -127,6 +136,10 @@ export function applyWorkspaceDoc(
     layout: { ...doc.layout, focus: null },
     workspace: { name: doc.name, collapsed: [...doc.collapsed] },
     triggers: doc.triggers,
+    // Same re-sanitize rationale as the weighting curve below; `enabled`
+    // comes back FALSE whatever the doc claims (issue #71 — a load must
+    // never start clocking a digital stream into a DUT).
+    i2sPorts: sanitizeI2sPorts(doc.i2sPorts),
     // Sanitized again here (not just trusting `migrate()` ran) — a
     // template or any other caller can hand `applyWorkspaceDoc` a doc that
     // never passed through `migrate()` (issue #29 review finding #5).
@@ -152,6 +165,9 @@ export function applyWorkspaceDoc(
   // load left a running generator looping the OLD bench's mix.
   syncAllStreams(store, ipc);
   syncAllOutputOnly(store, ipc);
+  // I2S ports follow too (issue #71): the sanitizer forced `enabled` off,
+  // so a port left running by the PREVIOUS bench takes its stop branch.
+  syncAllI2s(store, ipc);
   syncChains(store, ipc);
   return true;
 }

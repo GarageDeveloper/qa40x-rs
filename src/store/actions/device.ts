@@ -16,6 +16,7 @@ import {
   updateRun,
 } from "../selectors/session";
 import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
+import { resetI2sOnDisconnect } from "./i2s";
 import { syncAllDacOwners, syncOutputOnly } from "./outputonly";
 import { armSessionForSources, dropSourceTargetsForSlot } from "./sources";
 import { disposeSession, syncStream } from "./stream";
@@ -272,19 +273,22 @@ export async function disconnect(
   } finally {
     if (sessionKey === SLOT0) {
       store.update("device/disconnected", (s) =>
-        updateRun(
-          updateDevice(s, sessionKey, (d) => ({
-            ...d,
-            status: "disconnected",
-            // Manual disconnect: hold off auto-reconnect until a manual connect.
-            userDisconnected: true,
-            info: null,
-            config: null,
-            telemetry: null,
-            offsets: null,
-          })),
-          sessionKey,
-          runStoppedByDisconnect
+        resetI2sOnDisconnect(
+          updateRun(
+            updateDevice(s, sessionKey, (d) => ({
+              ...d,
+              status: "disconnected",
+              // Manual disconnect: hold off auto-reconnect until a manual connect.
+              userDisconnected: true,
+              info: null,
+              config: null,
+              telemetry: null,
+              offsets: null,
+            })),
+            sessionKey,
+            runStoppedByDisconnect
+          ),
+          sessionKey
         )
       );
     } else {
@@ -295,7 +299,9 @@ export async function disconnect(
       // (D1), source targets stay (the revive reopens the same unit on the
       // same slot); the module maps and the session go.
       disposeSession(sessionKey);
-      store.update("device/disconnect-evicted", (s) => dropSession(s, sessionKey));
+      store.update("device/disconnect-evicted", (s) =>
+        resetI2sOnDisconnect(dropSession(s, sessionKey), sessionKey)
+      );
       // A focus that sat on this key fell back — wire-visible for BOTH
       // DAC-owner kinds (the F2 focus-atomicity rule).
       syncAllDacOwners(store, ipc);
@@ -537,24 +543,29 @@ export function deviceLost(
     // re-sync in this same gesture. Traces and source targets stay (D1):
     // a replug revives the same unit on the same slot.
     disposeSession(key);
-    store.update("device/lost-evicted", (s) => dropSession(s, key));
+    store.update("device/lost-evicted", (s) =>
+      resetI2sOnDisconnect(dropSession(s, key), key)
+    );
     syncAllDacOwners(store, ipc);
     toast(store, "info", "Device disconnected");
     return;
   }
   store.update("device/lost", (s) =>
-    updateRun(
-      updateDevice(s, key, (d) => ({
-        ...d,
-        status: "disconnected",
-        present: false,
-        info: null,
-        config: null,
-        telemetry: null,
-        offsets: null,
-      })),
-      key,
-      runStoppedByDisconnect
+    resetI2sOnDisconnect(
+      updateRun(
+        updateDevice(s, key, (d) => ({
+          ...d,
+          status: "disconnected",
+          present: false,
+          info: null,
+          config: null,
+          telemetry: null,
+          offsets: null,
+        })),
+        key,
+        runStoppedByDisconnect
+      ),
+      key
     )
   );
   // Info, not error: an unplug is a state change (LED, greyed controls and
