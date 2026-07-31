@@ -101,3 +101,45 @@ fn a_script_on_the_default_device_names_the_default_unit() {
     assert!(out[0].starts_with("virtual/"), "got: {}", out[0]);
     assert_eq!(out[1], "true");
 }
+
+/// Two module-doc claims pinned together against one real virtual open
+/// (issue #25 lot F6 coverage hunt — `script.rs`'s `device()` doc):
+///
+/// (a) `device()` is read LIVE, not a run-start snapshot — a
+/// `set_sample_rate()`/`set_input_range()`/`set_output_range()` earlier in
+/// the SAME script shows up in the very next `device()` call. The unit
+/// tests only ever call `device()` without reconfiguring first (a bare
+/// `Session` can't accept a range change unless it matches the default —
+/// see `changing_a_range_needs_the_device` in `script.rs`), so this is the
+/// first pin that actually changes a value and reads it back.
+///
+/// (b) `caps.calibration` on a REAL registry open of the built-in virtual
+/// unit is `"factory"`, not `"unknown"` — the embedded sim serves a genuine
+/// factory calibration page (already established by
+/// `tests/virtual_device.rs`'s `dbv_stimulus_lands_at_the_commanded_level_once_trimmed`,
+/// which prices a real DAC/ADC trim off it). The `script.rs` unit tests only
+/// ever exercise `caps.calibration` off `device::testing::fake_descriptor`,
+/// whose calibration is deliberately left `Unknown` — never off a real open.
+#[test]
+fn a_reconfiguring_script_sees_the_live_change_and_the_sims_real_calibration_tag() {
+    let rt = test_rt();
+    let _guard = rt.block_on(SIM_LOCK.lock());
+    let reg = DeviceRegistry::new();
+    rt.block_on(reg.open_virtual()).expect("the default virtual unit opens on slot 0");
+    let rt0 = reg.runtime_for(None).expect("None resolves to the default runtime");
+
+    let lines = Arc::new(StdMutex::new(Vec::new()));
+    let env = env_for(&rt0, rt.handle().clone(), lines.clone());
+    run_measurement_script(
+        env,
+        r#"set_sample_rate(96000);
+           set_input_range(18);
+           set_output_range(18);
+           let d = device();
+           print(d.sample_rate); print(d.input_range); print(d.output_range);
+           print(d.caps.calibration);"#,
+    )
+    .expect("the script runs");
+    let out = lines.lock().unwrap().clone();
+    assert_eq!(out, vec!["96000", "18", "18", "factory"]);
+}

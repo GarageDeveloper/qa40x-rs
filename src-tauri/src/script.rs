@@ -1525,6 +1525,26 @@ mod tests {
     }
 
     #[test]
+    fn use_device_with_a_non_string_argument_misses_the_friendly_refusal() {
+        // NOTE (F6 coverage hunt, not a fix): the R4 stub is registered for
+        // exactly the 0-arg and `(&str)` arities. A call that matches
+        // NEITHER — e.g. a number, the id typed unquoted — resolves to
+        // neither overload, so Rhai's own "function not found" surfaces
+        // instead of the R4 message naming the read-only rule. Pinning the
+        // CURRENT behavior (a legibility gap worth a human call, not a
+        // silent tolerance change): a caller who fat-fingers the id as a
+        // bare number sees a generic arity error, not "a script never
+        // switches device mid-run".
+        let (env, _lines, _frames, _rt) = test_env();
+        let err = run_measurement_script(env, "use_device(123);").unwrap_err();
+        assert!(
+            !err.contains("never switches device mid-run"),
+            "expected the generic Rhai arity error, got the friendly R4 refusal instead: {err}"
+        );
+        assert!(err.to_lowercase().contains("use_device"), "got: {err}");
+    }
+
+    #[test]
     fn config_readback_works_while_disconnected() {
         let (env, lines, _frames, _rt) = test_env();
         run_measurement_script(

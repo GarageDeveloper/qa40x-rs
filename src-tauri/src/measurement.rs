@@ -840,6 +840,50 @@ mod tests {
         assert_eq!(st.buffer_size, s.buffer_size());
     }
 
+    /// The connected companion to `session_status_matches_the_individual_getters`
+    /// (issue #25 lot F6 coverage hunt): the disconnected pin above never
+    /// changes the config away from `QA40xDevice::new()`'s defaults, so a
+    /// bug that made `status()` return a HARD-CODED default snapshot instead
+    /// of a live read would still pass it. This connects a real embedded
+    /// virtual QA403, reconfigures it away from the defaults, and checks
+    /// `status()` both agrees with the individual getters AND reflects the
+    /// actual new values (multi_thread: `connect_virtual()` spawns worker
+    /// tasks on the ambient runtime for the register I/O round trip, same
+    /// requirement as `tests/virtual_device.rs`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_status_matches_the_individual_getters_when_connected_and_reconfigured() {
+        let device = QA40xDevice::new();
+        device.connect_virtual().await.expect("virtual connect");
+        let s = Session::new(
+            Arc::new(Mutex::new(device)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        s.apply_config(SessionConfig {
+            sample_rate: Some(SampleRate::Rate96kHz),
+            input_range: Some(InputGain::Gain18dBV),
+            output_range: Some(OutputGain::Gain18dBV),
+            ..SessionConfig::default()
+        })
+        .await
+        .expect("a connected virtual unit accepts the reconfigure");
+
+        let st = s.status().await;
+        assert_eq!(st.connected, s.connected().await);
+        assert_eq!(st.model, s.model_name().await);
+        assert_eq!(st.firmware, s.firmware_version().await);
+        assert_eq!(st.sample_rate_hz, s.sample_rate_hz().await);
+        assert_eq!(st.input_range_dbv, s.input_range_dbv().await);
+        assert_eq!(st.output_range_dbv, s.output_range_dbv().await);
+        assert_eq!(st.buffer_size, s.buffer_size());
+        // And not just coincidentally equal to the disconnected defaults:
+        assert!(st.connected);
+        assert_eq!(st.model, "QA403");
+        assert_eq!(st.sample_rate_hz, 96_000);
+        assert_eq!(st.input_range_dbv, 18);
+        assert_eq!(st.output_range_dbv, 18);
+    }
+
     #[test]
     fn acquire_requires_a_connection() {
         let rt = rt();
