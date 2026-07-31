@@ -23,10 +23,9 @@
  * keeping the values locale-proof. Non-finite values (digital silence at
  * -∞ dB) become empty cells.
  */
-import type { AppState, CaptureProvenance, TraceMeta } from "../store/state";
-import { captureBenchSignature, hwSlotOfTraceId, liveCaptureProvenance } from "../store/state";
+import type { AppState, CaptureProvenance, DeviceState, TraceMeta } from "../store/state";
+import { captureBenchSignature, deviceCaptureProvenance, hwSlotOfTraceId } from "../store/state";
 import type { ScopeVM, SpectrumVM, SweepVM } from "../store/selectors/chartvm";
-import { focusedDevice } from "../store/selectors/session";
 import type { DecodedSweep } from "../data/frames";
 import type { DecodedFd, DecodedTd } from "../ipc/stream";
 
@@ -97,14 +96,23 @@ export function provenanceComments(lines: ProvenanceLine[]): string[] {
  * trace or a reloaded document may have been captured under different
  * settings — the trailing `note` line says so, and the data columns stay
  * self-describing (explicit Hz / seconds axes) regardless.
+ *
+ * `owner` (issue #25 lot F5) is the device the header DESCRIBES — the one
+ * owning the exported data, resolved by selectors/provenance.ts and passed
+ * EXPLICITLY (required: a forgotten argument must be a compile error, not a
+ * silent focused-device stamp — the very bug this lot kills). `null` =
+ * "resolved to NOBODY" (dormant owner) → `device_model=none`, no rates, no
+ * ranges, NO offsets — never a substituted converter. Callers meaning "the
+ * focused bench" say `focusedDevice(s)`.
  */
 export function benchProvenance(
   s: AppState,
   appVersion: string,
-  exportedAt: string
+  exportedAt: string,
+  owner: DeviceState | null
 ): ProvenanceLine[] {
   return [
-    ...benchLines(s, appVersion, exportedAt),
+    ...benchLines(s, owner, appVersion, exportedAt),
     {
       key: "note",
       value:
@@ -114,15 +122,21 @@ export function benchProvenance(
   ];
 }
 
-/** The export-time bench block (no note — the caller picks one). */
-function benchLines(s: AppState, appVersion: string, exportedAt: string): ProvenanceLine[] {
+/** The export-time bench block for one owner device (no note — the caller
+ * picks one). `null` owner = no device: identity/rates/offsets absent. */
+function benchLines(
+  s: AppState,
+  owner: DeviceState | null,
+  appVersion: string,
+  exportedAt: string
+): ProvenanceLine[] {
   const lines: ProvenanceLine[] = [
     { key: "format_version", value: "1" },
     { key: "app", value: "qa40x-rs" },
     { key: "app_version", value: appVersion },
     { key: "exported_at", value: exportedAt },
   ];
-  const info = focusedDevice(s).info;
+  const info = owner?.info ?? null;
   if (info) {
     lines.push(
       { key: "device_model", value: info.model },
@@ -133,7 +147,7 @@ function benchLines(s: AppState, appVersion: string, exportedAt: string): Proven
   } else {
     lines.push({ key: "device_model", value: "none" });
   }
-  const cfg = focusedDevice(s).config;
+  const cfg = owner?.config ?? null;
   if (cfg) {
     lines.push(
       { key: "sample_rate_hz", value: String(cfg.sample_rate) },
@@ -151,15 +165,21 @@ function benchLines(s: AppState, appVersion: string, exportedAt: string): Proven
     lines.push({ key: "averaging_count", value: String(acq.averaging.count) });
   }
   lines.push({ key: "round_to_bin", value: String(acq.coherentGen) });
-  const off = focusedDevice(s).offsets;
-  lines.push({ key: "calibrated", value: String(off?.calibrated === true) });
-  if (off) {
-    lines.push(
-      { key: "offset_input_l_db", value: numCell(off.input_l) },
-      { key: "offset_input_r_db", value: numCell(off.input_r) },
-      { key: "offset_output_l_db", value: numCell(off.output_l) },
-      { key: "offset_output_r_db", value: numCell(off.output_r) }
-    );
+  // A dormant owner (null) claims NOTHING about calibration — "false" would
+  // assert an uncalibrated device nobody can see (the capture_calibrated
+  // rule: nullable means unknown, never a default claim). A live owner
+  // whose offsets are simply not read yet keeps the historic false.
+  if (owner) {
+    const off = owner.offsets;
+    lines.push({ key: "calibrated", value: String(off?.calibrated === true) });
+    if (off) {
+      lines.push(
+        { key: "offset_input_l_db", value: numCell(off.input_l) },
+        { key: "offset_input_r_db", value: numCell(off.input_r) },
+        { key: "offset_output_l_db", value: numCell(off.output_l) },
+        { key: "offset_output_r_db", value: numCell(off.output_r) }
+      );
+    }
   }
   return lines;
 }
@@ -227,27 +247,41 @@ export function captureProvenanceLines(c: CaptureProvenance): ProvenanceLine[] {
  * MOVED since capture (the QA403-froze-then-QA402-connected case). A live
  * hardware trace whose snapshot still matches the bench adds nothing — the
  * header stays as lean as before #40.
+ *
+ * `owner` follows benchProvenance's contract (required; `null` = dormant).
+ * The moved-since-capture gate compares against the OWNER's bench, not the
+ * focused one (lot F5): a slot-1 live trace matching its own bench emits no
+ * `capture_*` block even when the focused slot-0 bench differs — and a
+ * dormant owner's null-device bench can't match any real signature, so the
+ * block (the only honest identity left) always emits.
  */
 export function traceProvenance(
   s: AppState,
   capture: CaptureProvenance | null,
   appVersion: string,
-  exportedAt: string
+  exportedAt: string,
+  owner: DeviceState | null
 ): ProvenanceLine[] {
   const emit = (c: CaptureProvenance): boolean =>
     c.capturedAt !== null ||
     c.derived === true ||
     c.mixed === true ||
-    captureBenchSignature(c) !== captureBenchSignature(liveCaptureProvenance(s));
-  if (capture === null || !emit(capture)) return benchProvenance(s, appVersion, exportedAt);
+    captureBenchSignature(c) !== captureBenchSignature(deviceCaptureProvenance(s, owner));
+  if (capture === null || !emit(capture)) return benchProvenance(s, appVersion, exportedAt, owner);
   return [
-    ...benchLines(s, appVersion, exportedAt),
+    ...benchLines(s, owner, appVersion, exportedAt),
     ...captureProvenanceLines(capture),
     {
       key: "note",
       value:
         "capture_* keys describe the bench when this data was captured; " +
-        "unprefixed keys reflect the bench at export time",
+        "unprefixed keys reflect the bench at export time" +
+        // The clause appears exactly when the header needs it — appending it
+        // everywhere would change every capture-bearing export's bytes and
+        // assert something false next to a live device_model.
+        (owner === null
+          ? "; device_model=none means the owning device is no longer on the bench"
+          : ""),
     },
   ];
 }

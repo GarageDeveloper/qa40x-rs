@@ -107,8 +107,9 @@ describe("csv cells", () => {
 
 describe("benchProvenance", () => {
   it("carries app, device identity (#25), acquisition, ranges and calibration", () => {
+    const s = stateWithDevice();
     const lines = provenanceComments(
-      benchProvenance(stateWithDevice(), "0.3.0", "2026-07-27T10:00:00.000Z")
+      benchProvenance(s, "0.3.0", "2026-07-27T10:00:00.000Z", focusedDevice(s))
     );
     expect(lines[0]).toBe("# qa40x-rs data export");
     for (const expected of [
@@ -135,8 +136,9 @@ describe("benchProvenance", () => {
   });
 
   it("degrades honestly with no device connected", () => {
+    const s = initialState();
     const lines = provenanceComments(
-      benchProvenance(initialState(), "0.3.0", "2026-07-27T10:00:00.000Z")
+      benchProvenance(s, "0.3.0", "2026-07-27T10:00:00.000Z", focusedDevice(s))
     );
     expect(lines).toContain("# device_model=none");
     expect(lines.some((l) => l.startsWith("# device_serial"))).toBe(false);
@@ -150,13 +152,9 @@ describe("benchProvenance", () => {
     // readback lands): `info` is set, `config`/`offsets` are still null. The
     // header must not fabricate a sample rate or "calibrated=true" it never
     // measured.
-    const s = stateWithDevice();
+    const s = withDevice(stateWithDevice(), { config: null, offsets: null });
     const lines = provenanceComments(
-      benchProvenance(
-        withDevice(s, { config: null, offsets: null }),
-        "0.3.0",
-        "2026-07-27T10:00:00.000Z"
-      )
+      benchProvenance(s, "0.3.0", "2026-07-27T10:00:00.000Z", focusedDevice(s))
     );
     expect(lines).toContain("# device_model=QA403");
     expect(lines).toContain("# device_serial=AB12_CD34");
@@ -186,17 +184,19 @@ describe("traceProvenance (issue #40: capture snapshot preferred over the live b
   }
   const at = "2026-07-27T10:00:00.000Z";
   const asLines = (s: AppState, c: CaptureProvenance | null): string[] =>
-    provenanceComments(traceProvenance(s, c, "0.3.0", at));
+    provenanceComments(traceProvenance(s, c, "0.3.0", at, focusedDevice(s)));
 
   it("no snapshot → exactly the classic bench header", () => {
     const s = stateWithDevice();
-    expect(traceProvenance(s, null, "0.3.0", at)).toEqual(benchProvenance(s, "0.3.0", at));
+    expect(traceProvenance(s, null, "0.3.0", at, focusedDevice(s))).toEqual(
+      benchProvenance(s, "0.3.0", at, focusedDevice(s))
+    );
   });
 
   it("a LIVE snapshot matching the bench adds nothing — the header stays lean", () => {
     const s = stateWithDevice();
     expect(asLines(s, liveMatchingCapture())).toEqual(
-      provenanceComments(benchProvenance(s, "0.3.0", at))
+      provenanceComments(benchProvenance(s, "0.3.0", at, focusedDevice(s)))
     );
   });
 
