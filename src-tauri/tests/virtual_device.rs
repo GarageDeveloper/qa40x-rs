@@ -484,6 +484,43 @@ async fn quiesce_stops_the_port_register_even_around_a_live_capture() {
     rt.handle().lock().await.disconnect().await.expect("disconnect");
 }
 
+/// Review fix (#71, 6a04efa): `start_port`'s device-mutex acquisitions are
+/// bounded by `DEVICE_LOCK_BOUND` (3 s) — a long capture holding the device
+/// mutex must make an enabling `apply` answer "busy" within that bound
+/// instead of parking the apply gate (and every other I2S command behind
+/// it) for the capture's whole duration. A plain lock-hold stands in for
+/// the capture; no need to actually run one.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_port_answers_busy_instead_of_parking_on_a_held_device_mutex() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+
+    // Hold the device mutex for longer than the 3 s bound. `lock_owned`
+    // (not a borrowed `lock()`) so the guard can move into the spawned task
+    // without tying it to a local borrow.
+    let guard = rt.handle().lock_owned().await;
+    let holder = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        drop(guard);
+    });
+
+    let start = Instant::now();
+    let err = engine
+        .apply(i2s_sine_request(true))
+        .await
+        .expect_err("apply must answer busy, not silently adopt the held mutex");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "apply parked past the 3 s DEVICE_LOCK_BOUND instead of answering busy: {elapsed:?}"
+    );
+    assert!(err.to_string().contains("busy"), "unexpected error: {err}");
+
+    holder.await.expect("lock holder task");
+    rt.handle().lock().await.disconnect().await.expect("disconnect");
+}
+
 /// Teardown: quiescing the runtime (the disconnect/shutdown path) stops the
 /// port, and a fresh reconnect reports it off — never a stale "running".
 #[tokio::test(flavor = "multi_thread")]

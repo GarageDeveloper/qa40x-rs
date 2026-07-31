@@ -504,6 +504,21 @@ describe("buildStreamConfig — the device × channel matrix (issue #25 lot F2)"
     );
   });
 
+  it("a source with i2sRoute \"off\" is NOT declared to the port (the DAC slot is unaffected)", () => {
+    const s = initialState();
+    s.sources = {
+      order: ["a", "b"],
+      byId: {
+        a: sineSource("a"), // default i2sRoute: "off"
+        b: sineSource("b", { i2sRoute: "left" }),
+      },
+    };
+    const i2sSlots = i2sSlotsFromSources(s, SLOT0);
+    expect(i2sSlots.map((slot) => slot.id)).toEqual(["b"]);
+    // The DAC's own projection is untouched by the I2S filter.
+    expect(buildStreamConfig(s, SLOT0).slots.map((slot) => slot.id)).toEqual(["a", "b"]);
+  });
+
   it("one source, both outputs: the DAC slot and the I2S slot carry their own routes independently", () => {
     const s = initialState();
     s.sources = {

@@ -644,6 +644,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_now_drops_enabled_even_without_a_prior_apply() {
+        // Review #6's pin: the unplug path's flag-only stop must not leave a
+        // status reader seeing a stale "enabled" intent as "the port died
+        // mid-run". Set `enabled` directly (same module — private field
+        // access), standing in for a completed `apply(enabled: true)`
+        // without paying for a real EP 0x03 claim.
+        let engine = test_engine();
+        engine.inner.status.lock().expect("i2s status lock").enabled = true;
+        engine.stop_now();
+        let st = engine.status().await;
+        assert!(!st.enabled, "stop_now must drop enabled, not just stop the writer");
+        assert!(!st.running, "no writer was ever spawned");
+    }
+
+    #[tokio::test]
     async fn engine_clones_share_state_and_new_engines_do_not() {
         let engine = test_engine();
         assert!(engine.same_as(&engine.clone()));
