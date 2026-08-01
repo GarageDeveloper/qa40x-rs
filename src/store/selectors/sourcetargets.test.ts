@@ -314,6 +314,18 @@ describe("snappedReadout", () => {
     expect(snappedReadout(sourceTargetVMs(s, "a"), 1000).text).toBe("→ —");
   });
 
+  it("the 'I2S port off' note tracks the TARGET slot's toggle: shown while off, gone once enabled (test-sheet A3)", () => {
+    const cell = { slot: 1, route: "off" as const, i2sRoute: "left" as const };
+    const s = bench([sine("a", { targets: [cell] })], [{ slot: 1, rate: 48000 }]);
+    // Port off (no i2sPorts entry): the row must say WHY nothing plays.
+    expect(sourceTargetVMs(s, "a").find((v) => v.tag === "1")!.note).toBe(
+      "I2S port off — enable it on the device group"
+    );
+    // Port on: the note clears (the cell genuinely plays now).
+    const on: AppState = { ...s, i2sPorts: { "1": { enabled: true, referenceDbv: 0 } } };
+    expect(sourceTargetVMs(on, "a").find((v) => v.tag === "1")!.note).toBe("");
+  });
+
   it("an I2S-only routing still reads a value — the PORT's, verbatim, never '—' and never the DAC grid (issue #71 screenshot round)", () => {
     // The exact bench of the screenshot: sine snapped to 1000.4883 on the
     // acquisition grid, routed ONLY to a device's I2S L. The params line
