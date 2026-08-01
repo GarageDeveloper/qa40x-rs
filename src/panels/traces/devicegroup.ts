@@ -261,26 +261,35 @@ export function createDeviceGroup(
   const i2sReadout = el("span.traces__group-i2s-readout", {
     "data-testid": `i2s-readout-${slot}`,
   });
+  // Two rows (screenshot round, 2026-08-01): toggle + reference on the
+  // first, the readout ALONE on the second — in the ~380 px sidebar the
+  // one-line layout squeezed "FS @" into a two-line wrap and ellipsized
+  // the Σ readout to nothing, hiding the one live proof the port carries
+  // signal. Both rows always rendered (no-layout-shift).
   const i2s = el(
     "div.traces__group-i2s",
     {},
     el(
-      "label.traces__group-i2s-tgl",
-      {
-        title:
-          "Drive the front-panel I2S expansion port (48 kHz, 32-bit). " +
-          "Route sources to it from the Signal Sources panel's I2S " +
-          "checkboxes; with nothing routed the port clocks silence.",
-      },
-      i2sToggle,
-      "I2S out"
-    ),
-    el(
-      "label.traces__group-ctl",
+      "div.traces__group-i2s-row",
       {},
-      el("span.traces__group-ctl-label", {}, "FS @"),
-      i2sRef,
-      el("span.traces__group-ctl-label", {}, "dBV")
+      el(
+        "label.traces__group-i2s-tgl",
+        {
+          title:
+            "Drive the front-panel I2S expansion port (48 kHz, 32-bit). " +
+            "Route sources to it from the Signal Sources panel's I2S " +
+            "checkboxes; with nothing routed the port clocks silence.",
+        },
+        i2sToggle,
+        "I2S out"
+      ),
+      el(
+        "label.traces__group-ctl",
+        {},
+        el("span.traces__group-ctl-label", {}, "FS @"),
+        i2sRef,
+        el("span.traces__group-ctl-label", {}, "dBV")
+      )
     ),
     i2sReadout
   );

@@ -29,6 +29,7 @@ function sine(id: string, over: Partial<SourceMeta> = {}): SourceMeta {
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    i2sRoute: "off",
     targets: [],
     playing: true,
     ...over,
@@ -311,6 +312,43 @@ describe("snappedReadout", () => {
       [{ slot: 1, rate: 192000 }]
     );
     expect(snappedReadout(sourceTargetVMs(s, "a"), 1000).text).toBe("→ —");
+  });
+
+  it("an I2S-only routing still reads a value — the PORT's, verbatim, never '—' and never the DAC grid (issue #71 screenshot round)", () => {
+    // The exact bench of the screenshot: sine snapped to 1000.4883 on the
+    // acquisition grid, routed ONLY to a device's I2S L. The params line
+    // must not claim "routed nowhere", and must print the port's verbatim
+    // 1000.0000 — not the converter's bin-snapped value.
+    const s = bench(
+      [sine("a", { targets: [{ slot: 1, route: "off", i2sRoute: "left" }] })],
+      [{ slot: 1, rate: 48000 }]
+    );
+    const vms = sourceTargetVMs(s, "a");
+    expect(vms.find((v) => v.tag === "1")!.playedHz).toBe(1000);
+    const r = snappedReadout(vms, 1000);
+    expect(r.text).toBe("→ 1000.0000 Hz");
+    expect(r.title).toContain("I2S port");
+  });
+
+  it("the I2S-only readout is the port's own grid even on a 192 kHz converter (and needs no known rate at all)", () => {
+    // 30 kHz fits a 192 kHz acquisition but NOT the port's pinned 48 kHz:
+    // the cell must read the port clamp (23520), not the converter value —
+    // and a session whose rate is still unknown reads it too (the port
+    // rate is fixed by specification).
+    const s = bench(
+      [sine("a", { frequencyHz: 30000, targets: [{ slot: 1, route: "off", i2sRoute: "both" }] })],
+      [{ slot: 1, rate: 192000 }]
+    );
+    const vm = sourceTargetVMs(s, "a").find((v) => v.tag === "1")!;
+    expect(vm.playedHz).toBeCloseTo(23520, 6);
+    // A cell driving BOTH Line and I2S keeps the converter's value (the
+    // pair's tooltip covers the port's verbatim behavior).
+    const both = bench(
+      [sine("b", { targets: [{ slot: 1, route: "left", i2sRoute: "left" }] })],
+      [{ slot: 1, rate: 48000 }]
+    );
+    const vmBoth = sourceTargetVMs(both, "b").find((v) => v.tag === "1")!;
+    expect(vmBoth.playedHz).toBeCloseTo(1000.4883, 3);
   });
 
   it("coherent-gen OFF: two rates below both Nyquists play the SAME unsnapped ask — the single-value form, not '2 values'", () => {

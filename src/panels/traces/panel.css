@@ -230,13 +230,20 @@ select.traces__group-sel {
   color: var(--ink-1);
 }
 
-/* The front-panel I2S port line (issue #71): toggle + reference + readout,
-   always rendered — state flips disabled/text, never presence. */
+/* The front-panel I2S port block (issue #71): toggle + reference on the
+   first row, the readout alone on the second — both always rendered (state
+   flips disabled/text, never presence). Two rows because the one-line form
+   wrapped "FS @" and ellipsized the Σ readout away in the narrow sidebar
+   (screenshot round, 2026-08-01). */
 .traces__group-i2s {
+  padding: 0 4px 2px;
+  min-width: 0;
+}
+
+.traces__group-i2s-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 4px 2px;
   min-width: 0;
 }
 
@@ -248,6 +255,11 @@ select.traces__group-sel {
   color: var(--ink-2);
   cursor: pointer;
   flex: none;
+  white-space: nowrap;
+}
+
+.traces__group-i2s .traces__group-ctl-label {
+  white-space: nowrap;
 }
 
 input.traces__group-i2s-ref {
@@ -257,8 +269,10 @@ input.traces__group-i2s-ref {
 }
 
 .traces__group-i2s-readout {
+  display: block;
   min-width: 0;
   overflow: hidden;
+  padding: 1px 0 0 20px; /* aligned under the toggle's label */
   font-family: var(--mono);
   font-size: 10px;
   color: var(--ink-3);

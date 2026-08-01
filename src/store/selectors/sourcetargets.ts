@@ -11,7 +11,7 @@
  * Selector discipline: leaf values only (`core/bins`, `core/routing`,
  * `store/sessionkey`) plus sibling selectors — never an action module.
  */
-import { playedFrequency } from "../../core/bins";
+import { i2sPlayedFrequency, playedFrequency } from "../../core/bins";
 import { routeChecks, sourceRouting } from "../../core/routing";
 import type { AppState, SourceMeta, SourceRoute } from "../state";
 import { isRoutable, session, sessionKeys } from "./session";
@@ -113,6 +113,7 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
   }
 
   const hasFreq = src.kind !== "script" && "frequencyHz" in src;
+  const freqOf = (): number => (src as { frequencyHz: number }).frequencyHz;
   return rows.map(({ tag, slot, key }) => {
     const sess = session(s, key);
     const status = sess?.device.status ?? "absent";
@@ -135,15 +136,24 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
     const i2sPortOn =
       s.i2sPorts[String(slot ?? focusSlot)]?.enabled === true;
     const rate = sess?.device.config?.sample_rate ?? null;
-    const playedHz =
-      hasFreq && rate !== null
-        ? playedFrequency(
-            (src as { frequencyHz: number }).frequencyHz,
-            rate,
-            s.acquisition.coherentGen,
-            s.acquisition.fftSize
-          )
-        : null;
+    // An I2S-ONLY cell reads the PORT's grid, not the converter's (issue
+    // #71 screenshot round): the port plays the ask verbatim at its pinned
+    // 48 kHz whatever the acquisition rate — printing the DAC's bin-snapped
+    // value under a cell that drives no DAC lies about what plays. Cells
+    // driving BOTH keep the DAC value (the pair's tooltip covers the port).
+    const i2sOnly = present && route === "off" && i2sRoute !== "off";
+    const playedHz = !hasFreq
+      ? null
+      : i2sOnly
+        ? i2sPlayedFrequency(freqOf())
+        : rate !== null
+          ? playedFrequency(
+              freqOf(),
+              rate,
+              s.acquisition.coherentGen,
+              s.acquisition.fftSize
+            )
+          : null;
     const i2sError = sess?.run.i2s.slotErrors.find((e) => e.id === srcId)?.error;
     const error =
       present && sess
@@ -262,6 +272,19 @@ export function snappedReadout(
   );
   const values = [...new Set(live.map((v) => v.playedHz as number))];
   if (values.length === 0) {
+    // No Line-out cell — but an I2S-routed one still PLAYS (issue #71
+    // screenshot round: `→ —` next to a source audibly driving a port read
+    // as "routed nowhere"). The port's value is rate-independent (pinned
+    // 48 kHz, no bin snap), so every I2S cell shares one number.
+    const i2s = vms.find((v) => v.present && v.live && v.i2sRoute !== "off");
+    if (i2s !== undefined) {
+      return {
+        text: `→ ${i2sPlayedFrequency(askedHz).toFixed(4)} Hz`,
+        title:
+          "Actually-played frequency on the I2S port (pinned 48 kHz, the " +
+          "ask played verbatim — no FFT-grid rounding)",
+      };
+    }
     return { text: "→ —", title: "Not routed to any connected device" };
   }
   if (values.length === 1) {

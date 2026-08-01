@@ -38,6 +38,10 @@ test("the port toggle declares the I2S mix and the readout reports it — one de
   await app.setSineRoute(id, "off"); // I2S-only: the DAC slot goes silent
   await app.playSine(id);
 
+  // An I2S-only source reads the PORT's verbatim frequency — never "—"
+  // and never the acquisition grid's snapped value (screenshot round).
+  await expect.poll(() => app.sourceSnapped(id)).toBe("→ 1000.0000 Hz");
+
   await app.setI2sEnabled(0, true);
 
   // Wire truth: ONE i2s_apply enabled with the source's slot, and the

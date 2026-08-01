@@ -58,6 +58,7 @@ import {
   sourceTargetVMs,
   type SourceTargetVM,
 } from "../../store/selectors/sourcetargets";
+import { i2sPlayedFrequency } from "../../core/bins";
 import { routeChecks, routeFromChecks } from "../../core/routing";
 import { toneListStats } from "../../core/tonestats";
 import { el, keyedList } from "../../ui/dom";
@@ -659,6 +660,14 @@ export function mountSourcesPanel(
         const r = snappedReadout(vm.targets, src.frequencyHz);
         snapped.textContent = r.text;
         snapped.title = r.title;
+      } else if (src.route === "off" && src.i2sRoute !== "off") {
+        // Legacy row driving ONLY the I2S port: the port plays the ask
+        // verbatim at its pinned 48 kHz — the DAC's bin-snapped value
+        // would lie about what plays (issue #71 screenshot round).
+        snapped.textContent = `→ ${i2sPlayedFrequency(src.frequencyHz).toFixed(4)} Hz`;
+        snapped.title =
+          "Actually-played frequency on the I2S port (pinned 48 kHz, the " +
+          "ask played verbatim — no FFT-grid rounding)";
       } else if (vm.played !== null) {
         const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
         snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
