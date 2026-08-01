@@ -373,9 +373,12 @@ I2S Input / Output"; our USB captures):
 - Fixed level mapping: **0 dBV maps to 0 dBFS**, levels above 0 dBV clip
   (the app shows a clip warning, shared with its PC-mirroring output).
 - A "Front Panel I2S Settings" dialog offers Bit Depth 16/32 (changeable
-  only while the port is stopped) and a Sample Rate selector that is
-  **locked at 48 kSPS** — the manual confirms other rates are not
-  supported today. Generation is only active while Gen1 or Gen2 is active.
+  only while the port is stopped) and a Sample Rate selector listing
+  "48 kSPS (locked)" / 96 / 192 — but the rate CHOICE is not applied:
+  only the bit depth is persisted, and the generation loop forces 48 kSPS
+  regardless. The 96/192 entries are UI prepared for a future capability
+  (the manual confirms other rates are not supported today). Generation
+  is only active while Gen1 or Gen2 is active.
 - REST (mono-device API): `PUT /Settings/I2sGen/{On|Off}` and
   `PUT /Settings/I2sGen/Width/{16|32}` (width refused while running).
 - Hardware facts from the same sources: the expansion port also carries
