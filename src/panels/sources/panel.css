@@ -307,12 +307,21 @@
 
 .sources__footer {
   display: flex;
+  /* Wrap instead of truncate: at ≥ 2 live sessions the device prefix
+     (lot F3) squeezed "Round to bin" / "Output only" off the edge —
+     the toggles drop to a second line when tight (2026-08-01 field
+     round on a two-device bench). */
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 4px 8px;
   font-family: var(--mono);
   font-size: 12px;
   color: var(--ink-2);
+}
+
+.sources__outonly {
+  white-space: nowrap;
 }
 
 /* Which device the footer describes (issue #25 lot F3) — present only at

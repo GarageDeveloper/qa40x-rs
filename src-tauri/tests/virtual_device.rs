@@ -442,6 +442,35 @@ async fn i2s_keeps_flowing_during_a_long_capture_while_the_keepalive_still_fires
     rt.handle().lock().await.disconnect().await.expect("disconnect");
 }
 
+/// The clip verdict through the REAL engine (test-sheet A4): a mix whose
+/// peak exceeds the reference reports `clipped` in the apply status AND in
+/// the later cache reads; back inside the reference the flag clears on the
+/// next declaration. (The sine slot's amplitude is 0.5 = a −6.02 dBV
+/// source, peak 0.5 FS at the default 0 dBV reference — so it clips a
+/// −20 dBV reference by ~14 dB and fits the default with margin.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mix_beyond_the_reference_reports_clip_and_clears_when_back_inside() {
+    let _sim = SIM_LOCK.lock().await;
+    let rt = connected_runtime().await;
+    let engine = rt.i2s();
+
+    let mut hot = i2s_sine_request(true);
+    hot.reference_dbv = -20.0;
+    let st = engine.apply(hot).await.expect("i2s start");
+    assert!(st.clipped, "a −6 dBV sine must clip a −20 dBV reference");
+    assert!(st.running);
+    assert!(engine.status().await.clipped, "the poll reads the same verdict");
+
+    // Same mix, default reference: fits — the flag clears without any
+    // register cycle (the port keeps running).
+    let st = engine.apply(i2s_sine_request(true)).await.expect("re-declare");
+    assert!(!st.clipped);
+    assert!(st.running);
+
+    engine.apply(i2s_sine_request(false)).await.expect("stop");
+    rt.handle().lock().await.disconnect().await.expect("disconnect");
+}
+
 /// Review MUST-FIX #2's pin: quiesce must leave register 0x0A at 0 even
 /// when a capture holds the device mutex at the moment the stop lands —
 /// the stream teardown runs FIRST, so the I2S stop's register write gets
