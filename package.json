@@ -20,7 +20,7 @@
     "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.0",
     "@tauri-apps/cli": "^2",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
