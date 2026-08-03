@@ -92,8 +92,14 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
   const cells = new Map(sourceRouting(src).map((t) => [tagOfSlot(t.slot), t]));
   const focusSlot = slotOfSessionKey(s.devices.focus);
   // Coalescing tell: the implicit focus cell and an explicit cell for the
-  // focused slot resolve onto ONE session — flag both rows.
-  const combined = cells.has("focus") && cells.has(String(focusSlot));
+  // focused slot resolve onto ONE session — flag both rows. Only when BOTH
+  // cells actually CONTRIBUTE something (test-sheet A3 field round,
+  // 2026-08-03): coalescing with an all-off cell is the identity, and the
+  // note was masking real information (the I2S-port-off explanation) on
+  // benches where a fully-unchecked focus cell lingered.
+  const audible = (t: { route: string; i2sRoute: string } | undefined): boolean =>
+    t !== undefined && (t.route !== "off" || t.i2sRoute !== "off");
+  const combined = audible(cells.get("focus")) && audible(cells.get(String(focusSlot)));
 
   const rows: Array<{ tag: TargetTag; slot: number | null; key: SessionKey }> = [
     { tag: "focus", slot: null, key: s.devices.focus },
@@ -183,14 +189,15 @@ export function sourceTargetVMs(s: AppState, srcId: string): SourceTargetVM[] {
       // on the next source gesture there.
       const label = s.traces.byId[lockId]?.label ?? "program";
       note = `measurement "${label}" is running — applies when it finishes`;
-    } else if (sameAsFocus) note = COMBINED_NOTE;
-    else if (present && i2sRoute !== "off" && !i2sPortOn) {
+    } else if (present && i2sRoute !== "off" && !i2sPortOn) {
       // Routed to a port that is off (issue #71): the checkbox looks live
       // but nothing plays there until the device group's I2S toggle goes
       // on — say so instead of silence (the F2 disabled-with-reason
-      // standard, note-shaped).
+      // standard, note-shaped). ABOVE the combined note (A3 field round):
+      // "nothing plays and here is why" outranks "these rows coalesce".
       note = "I2S port off — enable it on the device group";
-    } else if (present && route === "off" && i2sRoute === "off") {
+    } else if (sameAsFocus) note = COMBINED_NOTE;
+    else if (present && route === "off" && i2sRoute === "off") {
       note = "off (no channel)";
     }
     return {

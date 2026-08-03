@@ -314,6 +314,39 @@ describe("snappedReadout", () => {
     expect(snappedReadout(sourceTargetVMs(s, "a"), 1000).text).toBe("→ —");
   });
 
+  it("an all-off focus cell never flags 'combined' — and never masks the port-off note (A3 field round, 2026-08-03)", () => {
+    // The exact screenshot bench: a fully-unchecked focus cell lingering
+    // beside a focused-slot cell routed I2S-only, port off. The old
+    // presence-based `combined` masked the port-off explanation on BOTH
+    // rows with a note about a coalescing that combines nothing.
+    const targets: SourceTarget[] = [
+      { slot: null, route: "off", i2sRoute: "off" },
+      { slot: 0, route: "off", i2sRoute: "right" },
+    ];
+    const s = bench([sine("a", { targets })]);
+    const vms = sourceTargetVMs(s, "a");
+    expect(vms.find((v) => v.tag === "0")!.note).toBe(
+      "I2S port off — enable it on the device group"
+    );
+    expect(vms.find((v) => v.tag === "focus")!.note).toBe("off (no channel)");
+    for (const v of vms) expect(v.sameAsFocus).toBe(false);
+  });
+
+  it("when both cells DO contribute, the port-off note still outranks the combined note on the I2S-routed row", () => {
+    const targets: SourceTarget[] = [
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 0, route: "off", i2sRoute: "right" },
+    ];
+    const s = bench([sine("a", { targets })]);
+    const vms = sourceTargetVMs(s, "a");
+    // The I2S row explains the silence; the focus row keeps the coalescing
+    // warning (it audibly drives the DAC on the same session).
+    expect(vms.find((v) => v.tag === "0")!.note).toBe(
+      "I2S port off — enable it on the device group"
+    );
+    expect(vms.find((v) => v.tag === "focus")!.note).toMatch(/channels are combined/);
+  });
+
   it("the 'I2S port off' note tracks the TARGET slot's toggle: shown while off, gone once enabled (test-sheet A3)", () => {
     const cell = { slot: 1, route: "off" as const, i2sRoute: "left" as const };
     const s = bench([sine("a", { targets: [cell] })], [{ slot: 1, rate: 48000 }]);
