@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import type { Commands, Ipc } from "../../ipc/ipc";
+import type { I2sStatus } from "../../gen";
 import { Store } from "../store";
 import { initialSession, initialState, type AppState, type DeviceSession } from "../state";
 import { focusedRun, session } from "../selectors/session";
@@ -292,6 +293,70 @@ describe("actions/programs — the device lock", () => {
         wowGenerate: true,
       })
     ).toBe("W&F 3150 Hz");
+  });
+});
+
+/**
+ * The I2S port's deferred sync (issue #71 review #3): `syncI2s` used to be
+ * gated on the program lock for the WHOLE run, so a port left enabled
+ * across a program never got the finally block's release-time re-sync it
+ * needed to pick up any routing/reference change made mid-run. The fix adds
+ * an unconditional `syncI2s(store, ipc, key)` to `runProgram`'s `finally` —
+ * pinned here against a port that was already enabled at run start (the
+ * simplest case: still just one `i2s_apply`, fired strictly after the lock
+ * lifts).
+ */
+describe("actions/programs — the I2S port re-syncs when the lock lifts (issue #71)", () => {
+  beforeEach(() => clearAllFrames());
+
+  it("a port left enabled during the run gets exactly one i2s_apply, after the measurement completes", async () => {
+    let s = connectedStreamingState();
+    s = { ...s, i2sPorts: { "0": { enabled: true, referenceDbv: 0 } } };
+    const store = new Store(s);
+    const { ipc: baseIpc, log, release } = stubIpc();
+
+    const i2sApplies: Record<string, unknown>[] = [];
+    const status: I2sStatus = {
+      supported: true,
+      enabled: true,
+      running: true,
+      width_bits: 32,
+      reference_dbv: 0,
+      sigma_peak_dbv: -6,
+      clipped: false,
+      errors: [],
+      blocks_written: 1,
+      last_error: null,
+    };
+    const ipc: Ipc = {
+      async call<K extends keyof Commands>(
+        cmd: K,
+        args: Commands[K]["args"]
+      ): Promise<Commands[K]["result"]> {
+        if (cmd === "i2s_apply") {
+          i2sApplies.push((args ?? {}) as Record<string, unknown>);
+          log.push(cmd);
+          return status as Commands[K]["result"];
+        }
+        return baseIpc.call(cmd, args);
+      },
+    };
+
+    const id = addProgram(store, "thd");
+    const run = runProgram(store, ipc, id);
+    await flush();
+    // Mid-run: the program lock is held — no I2S wire call has fired yet.
+    expect(i2sApplies).toHaveLength(0);
+
+    release();
+    await run;
+
+    expect(i2sApplies).toHaveLength(1);
+    expect(i2sApplies[0].enabled).toBe(true);
+    expect(i2sApplies[0].deviceId).toBeUndefined(); // slot 0 = arg-less
+    expect(log.indexOf("i2s_apply")).toBeGreaterThan(
+      log.indexOf("measure_thd_vs_frequency")
+    );
   });
 });
 
@@ -617,6 +682,7 @@ describe("actions/programs — wow & flutter as a sweep program", () => {
             id: "src-1",
             label: "Sine 1000 Hz",
             route: "left",
+            i2sRoute: "off",
             targets: [],
             playing: true,
             kind: "sine",

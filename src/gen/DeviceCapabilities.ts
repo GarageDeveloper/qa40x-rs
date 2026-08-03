@@ -62,6 +62,13 @@ calibration: CalibrationSource,
  */
 supports_flash: boolean, 
 /**
+ * Whether the front-panel I2S output port is drivable (issue #71).
+ * From the model table at enumerate time (the whole family has the
+ * port); refined at open with [`Self::with_i2s`] to the honest
+ * post-claim value (EP 0x03 claimed or not).
+ */
+supports_i2s: boolean, 
+/**
  * True for the embedded simulator.
  */
 is_virtual: boolean, };

@@ -60,6 +60,12 @@ application **v1** and the upcoming **v2** expected in 2026.
 - **Signal generation** — backend-mixed multi-source generator: sine,
   square, multitone mixes, script-defined sources; output-only mode for
   driving external gear.
+- **I2S output** — drive the front-panel I2S expansion port (48 kHz,
+  32-bit) with any mix of sources, concurrently with the acquisition —
+  per-device toggle and digital reference level. Deliberately richer than
+  the official app, which mirrors Generator 1/2 at a fixed 0 dBV = 0 dBFS;
+  at the default reference the level mapping is identical (see
+  `doc/device-notes.md` §10).
 - **Weighting** — A/C curves, inverse RIAA for phono work, user-loadable
   custom curves.
 - **Workspaces** — the whole session (layout, sources, traces, settings) can

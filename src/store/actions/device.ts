@@ -16,6 +16,7 @@ import {
   updateRun,
 } from "../selectors/session";
 import { dropSession, mintSession, refreshDevices, setFocusedSession } from "./devices";
+import { resetI2sOnDisconnect } from "./i2s";
 import { syncAllDacOwners, syncOutputOnly } from "./outputonly";
 import { armSessionForSources, dropSourceTargetsForSlot } from "./sources";
 import { disposeSession, syncStream } from "./stream";
@@ -272,19 +273,22 @@ export async function disconnect(
   } finally {
     if (sessionKey === SLOT0) {
       store.update("device/disconnected", (s) =>
-        updateRun(
-          updateDevice(s, sessionKey, (d) => ({
-            ...d,
-            status: "disconnected",
-            // Manual disconnect: hold off auto-reconnect until a manual connect.
-            userDisconnected: true,
-            info: null,
-            config: null,
-            telemetry: null,
-            offsets: null,
-          })),
-          sessionKey,
-          runStoppedByDisconnect
+        resetI2sOnDisconnect(
+          updateRun(
+            updateDevice(s, sessionKey, (d) => ({
+              ...d,
+              status: "disconnected",
+              // Manual disconnect: hold off auto-reconnect until a manual connect.
+              userDisconnected: true,
+              info: null,
+              config: null,
+              telemetry: null,
+              offsets: null,
+            })),
+            sessionKey,
+            runStoppedByDisconnect
+          ),
+          sessionKey
         )
       );
     } else {
@@ -295,7 +299,9 @@ export async function disconnect(
       // (D1), source targets stay (the revive reopens the same unit on the
       // same slot); the module maps and the session go.
       disposeSession(sessionKey);
-      store.update("device/disconnect-evicted", (s) => dropSession(s, sessionKey));
+      store.update("device/disconnect-evicted", (s) =>
+        resetI2sOnDisconnect(dropSession(s, sessionKey), sessionKey)
+      );
       // A focus that sat on this key fell back — wire-visible for BOTH
       // DAC-owner kinds (the F2 focus-atomicity rule).
       syncAllDacOwners(store, ipc);
@@ -473,6 +479,11 @@ export async function removeDevice(
   // physically different converter/DUT. Applies to the dormant-group purge
   // too (no session, just dead rows and a doc-pinned route).
   store.update("sources/drop-slot-targets", (s) => dropSourceTargetsForSlot(s, slot));
+  // The slot's I2S port config goes with it too (issue #71 review
+  // MUST-FIX #1): a surviving `enabled: true` would silently start the
+  // NEXT tenant's port the moment a re-add lands on this slot — the exact
+  // re-target class D5 exists to refuse, digital-port-shaped.
+  store.update("i2s/drop-slot-port", (s) => resetI2sOnDisconnect(s, key));
   // A focus that sat on the dropped key fell back, and the target drop can
   // have emptied a running loop's slot set — wire-visible for BOTH DAC-owner
   // kinds (the F2 focus-atomicity rule), like setFocusedSession.
@@ -537,24 +548,29 @@ export function deviceLost(
     // re-sync in this same gesture. Traces and source targets stay (D1):
     // a replug revives the same unit on the same slot.
     disposeSession(key);
-    store.update("device/lost-evicted", (s) => dropSession(s, key));
+    store.update("device/lost-evicted", (s) =>
+      resetI2sOnDisconnect(dropSession(s, key), key)
+    );
     syncAllDacOwners(store, ipc);
     toast(store, "info", "Device disconnected");
     return;
   }
   store.update("device/lost", (s) =>
-    updateRun(
-      updateDevice(s, key, (d) => ({
-        ...d,
-        status: "disconnected",
-        present: false,
-        info: null,
-        config: null,
-        telemetry: null,
-        offsets: null,
-      })),
-      key,
-      runStoppedByDisconnect
+    resetI2sOnDisconnect(
+      updateRun(
+        updateDevice(s, key, (d) => ({
+          ...d,
+          status: "disconnected",
+          present: false,
+          info: null,
+          config: null,
+          telemetry: null,
+          offsets: null,
+        })),
+        key,
+        runStoppedByDisconnect
+      ),
+      key
     )
   );
   // Info, not error: an unplug is a state change (LED, greyed controls and

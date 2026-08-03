@@ -232,3 +232,11 @@ export function sessionRates(s: AppState, key: SessionKey): number[] {
   }
   return entry?.capabilities.sample_rates_hz ?? device?.info?.sample_rates ?? NO_VALUES;
 }
+
+/** Whether a session's unit can drive its front-panel I2S port (issue
+ * #71). Optimistic while the registry entry hasn't landed yet (the whole
+ * family has the port; `i2s_apply` refuses honestly if the claim failed —
+ * the same window in which the range menus show placeholders). */
+export function sessionSupportsI2s(s: AppState, key: SessionKey): boolean {
+  return sessionEntry(s, key)?.capabilities.supports_i2s ?? true;
+}

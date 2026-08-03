@@ -30,8 +30,10 @@ import {
   targetSessionKey,
 } from "../selectors/sources";
 import { writeTarget } from "../../core/routing";
+import type { TargetPatch } from "../../core/routing";
 import { startRun, syncStream } from "./stream";
 import { syncOutputOnly } from "./outputonly";
+import { i2sPortConfig, syncI2s } from "./i2s";
 
 // Starts at 2: the boot workspace ships "Sine 1" (state.ts initialSources).
 let nextId = 2;
@@ -81,6 +83,7 @@ function defaultSource(kind: SourceKind, id: string, label: string): SourceMeta 
     id,
     label,
     route: "left" as SourceRoute,
+    i2sRoute: "off" as SourceRoute,
     targets: [] as SourceTarget[],
     playing: false,
   };
@@ -110,6 +113,12 @@ function syncSourcesEverywhere(store: Store<AppState>, ipc: Ipc): void {
   for (const key of sessionKeys(s)) {
     if (session(s, key)?.run.outputOnly) syncOutputOnly(store, ipc, key);
     else syncStream(store, ipc, key);
+    // The I2S port is a THIRD output beside the two DAC owners (issue #71),
+    // fed from the same source pool — re-declare its mix wherever it is on
+    // (or was, so a just-silenced port takes its stop branch).
+    if (i2sPortConfig(s, key).enabled || session(s, key)?.run.i2s.running) {
+      syncI2s(store, ipc, key);
+    }
   }
 }
 
@@ -135,9 +144,9 @@ export function dropSourceTargetsForSlot(s: AppState, slot: number): AppState {
     // exact re-target class D5 exists to refuse).
     (byId ??= { ...s.sources.byId })[id] =
       targets.length === 0
-        ? { ...src, targets: [], route: "off" }
+        ? { ...src, targets: [], route: "off", i2sRoute: "off" }
         : targets.length === 1 && targets[0].slot === null
-          ? { ...src, targets: [], route: targets[0].route }
+          ? { ...src, targets: [], route: targets[0].route, i2sRoute: targets[0].i2sRoute }
           : { ...src, targets };
   }
   return byId ? { ...s, sources: { ...s.sources, byId } } : s;
@@ -216,6 +225,7 @@ export function setSourceKind(
       id: src.id,
       label,
       route: src.route,
+      i2sRoute: src.i2sRoute,
       targets: src.targets,
       playing: src.playing,
     };
@@ -269,6 +279,20 @@ export function setSourceRoute(
   syncSourcesEverywhere(store, ipc);
 }
 
+/** The legacy (single-device, implicit-matrix) I2S pair's write (issue
+ * #71) — `setSourceRoute`'s twin on the cell's second dimension. Writes
+ * the compact field directly, so an I2S-only edit never mints an explicit
+ * matrix (`sourceRowMode` keeps returning "legacy"). */
+export function setSourceI2sRoute(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  i2sRoute: SourceRoute
+): void {
+  patch(store, "sources/i2s-route", id, (src) => ({ ...src, i2sRoute }));
+  syncSourcesEverywhere(store, ipc);
+}
+
 /**
  * Write one cell of a source's device × channel matrix (issue #25 lot F3 —
  * the row editor's checkbox handler): create-or-update the target's cell
@@ -285,11 +309,7 @@ export function setSourceTargetRoute(
   slot: number | null,
   route: SourceRoute
 ): void {
-  patch(store, "sources/target-route", id, (src) => ({
-    ...src,
-    ...writeTarget(src, slot, route, MAX_SOURCE_TARGETS),
-  }));
-  syncSourcesEverywhere(store, ipc);
+  setSourceTargetPatch(store, ipc, id, slot, { route });
   // Route-then-play parity (F3 review MUST-FIX 1): a PLAYING source routed
   // onto a connected-but-idle capture session must be audible without a
   // second gesture — exactly setSourcePlaying's rule, which only covers the
@@ -302,8 +322,41 @@ export function setSourceTargetRoute(
   const s = store.get();
   const src = s.sources.byId[id];
   if (src?.playing && route !== "off") {
-    armSessionForSources(store, ipc, targetSessionKey(s, { slot, route }));
+    armSessionForSources(
+      store,
+      ipc,
+      targetSessionKey(s, { slot, route, i2sRoute: "off" })
+    );
   }
+}
+
+/** The matrix editor's I2S checkbox handler (issue #71): write the cell's
+ * SECOND dimension, Line out untouched (partial patch). No capture
+ * auto-start — the port streams on its own engine; audibility is the
+ * per-device I2S toggle's business, and the row's note says so while the
+ * port is off. */
+export function setSourceTargetI2sRoute(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null,
+  i2sRoute: SourceRoute
+): void {
+  setSourceTargetPatch(store, ipc, id, slot, { i2sRoute });
+}
+
+function setSourceTargetPatch(
+  store: Store<AppState>,
+  ipc: Ipc,
+  id: string,
+  slot: number | null,
+  cellPatch: TargetPatch
+): void {
+  patch(store, "sources/target-route", id, (src) => ({
+    ...src,
+    ...writeTarget(src, slot, cellPatch, MAX_SOURCE_TARGETS),
+  }));
+  syncSourcesEverywhere(store, ipc);
 }
 
 /** Auto-starts in flight per session (see armSessionForSources). */

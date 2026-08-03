@@ -87,7 +87,7 @@ describe("Sources panel (DOM) — legacy mode (one session, implicit matrix)", (
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       route: "right",
-      targets: [{ slot: 0, route: "both" }],
+      targets: [{ slot: 0, route: "both", i2sRoute: "off" }],
     };
     const { host, store } = mount(s);
     await flush();
@@ -115,7 +115,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       route: "left",
-      targets: [{ slot: 0, route: "both" }],
+      targets: [{ slot: 0, route: "both", i2sRoute: "off" }],
     };
     const { host } = mount(s);
     await flush();
@@ -152,8 +152,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     r1.dispatchEvent(new Event("change"));
     await flush();
     expect(store.get().sources.byId[SRC_ID].targets).toEqual([
-      { slot: null, route: "left" },
-      { slot: 1, route: "right" },
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 1, route: "right", i2sRoute: "off" },
     ]);
     expect(q<HTMLInputElement>(host, `src-tgt-l-${SRC_ID}-focus`)!.checked).toBe(true);
     expect(q<HTMLButtonElement>(host, `src-tgt-del-${SRC_ID}-1`)!.disabled).toBe(false);
@@ -164,8 +164,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       targets: [
-        { slot: null, route: "left" },
-        { slot: 1, route: "right" },
+        { slot: null, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" },
       ],
     };
     const { host, store } = mount(s);
@@ -177,6 +177,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     expect(store.get().sources.byId[SRC_ID].targets).toContainEqual({
       slot: 1,
       route: "off",
+      i2sRoute: "off",
     });
     expect(q(host, `src-tgt-note-${SRC_ID}-1`)!.textContent).toBe("off (no channel)");
     expect(q<HTMLButtonElement>(host, `src-tgt-del-${SRC_ID}-1`)!.disabled).toBe(false);
@@ -186,7 +187,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     const s = initialState();
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
-      targets: [{ slot: 0, route: "both" }],
+      targets: [{ slot: 0, route: "both", i2sRoute: "off" }],
     };
     const { host, store } = mount(s);
     await flush();
@@ -204,8 +205,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       targets: [
-        { slot: null, route: "left" },
-        { slot: 1, route: "right" },
+        { slot: null, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" },
       ],
     };
     const { host } = mount(s);
@@ -232,7 +233,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     const s = initialState();
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
-      targets: [{ slot: 3, route: "both" }],
+      targets: [{ slot: 3, route: "both", i2sRoute: "off" }],
     };
     const { host, store } = mount(s);
     await flush();
@@ -274,7 +275,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     const s = twoSessionState();
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
-      targets: [{ slot: 1, route: "left" }],
+      targets: [{ slot: 1, route: "left", i2sRoute: "off" }],
     };
     s.devices.sessions["slot-0"] = {
       ...s.devices.sessions["slot-0"],
@@ -360,8 +361,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       targets: [
-        { slot: null, route: "left" },
-        { slot: 1, route: "right" },
+        { slot: null, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" },
       ],
     };
     const { host, store } = mount(s);
@@ -387,7 +388,7 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     let s = initialState();
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
-      targets: [{ slot: 0, route: "off" }],
+      targets: [{ slot: 0, route: "off", i2sRoute: "off" }],
     };
     s = withDevice(s, { status: "connected" });
     const { host } = mount(s);
@@ -426,8 +427,8 @@ describe("Sources panel (DOM) — matrix mode (issue #25 lot F3)", () => {
     s.sources.byId[SRC_ID] = {
       ...s.sources.byId[SRC_ID],
       targets: [
-        { slot: null, route: "left" },
-        { slot: 1, route: "right" },
+        { slot: null, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" },
       ],
     };
     s.devices.sessions["slot-1"] = {

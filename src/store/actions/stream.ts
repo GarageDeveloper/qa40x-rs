@@ -5,7 +5,7 @@
  * orchestration: the loop, the range fit and the clip latch live backend.
  */
 import type { MixerSlotDesc, StreamConfig } from "../../gen";
-import { playedFrequency } from "../../core/bins";
+import { i2sPlayedFrequency, I2S_PORT_RATE_HZ, playedFrequency } from "../../core/bins";
 import type { Ipc } from "../../ipc/ipc";
 import { startStream, type DecodedFrame } from "../../ipc/stream";
 import { putFrames } from "../../data/frames";
@@ -148,6 +148,31 @@ export function slotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlo
   const key = sessionKey ?? s.devices.focus;
   const snap = (hz: number): number => playedFrequencyHz(s, hz, key);
   return sourcesForSession(s, key).map(({ src, route }) => slotFromSource(src, snap, route));
+}
+
+/** The port's pinned sample rate (backend `I2S_RATE_HZ`) — the vendor app
+ * always generates I2S at 48 kHz, independent of the acquisition rate.
+ * Re-exported from core/bins (the leaf home, so selectors can read it). */
+export const I2S_RATE_HZ = I2S_PORT_RATE_HZ;
+
+/** The slot declarations `sessionKey`'s I2S port receives (issue #71): the
+ * playing sources whose matrix routes an I2S dimension onto this session,
+ * each with its coalesced I2S route. NO bin snapping — the FFT grid
+ * describes the acquisition, not the front-panel port: the port plays the
+ * asked frequency (clamped below ITS OWN 48 kHz Nyquist, never the
+ * acquisition rate's — `i2sPlayedFrequency`, the same value the routing
+ * editor's readouts print), with the same 1 s-loop wrap discontinuity the
+ * output-only generator has. Follow-up: snap to the 1 Hz loop grid. */
+export function i2sSlotsFromSources(s: AppState, sessionKey?: SessionKey): MixerSlotDesc[] {
+  const key = sessionKey ?? s.devices.focus;
+  return sourcesForSession(s, key)
+    // Off cells stay OUT of the port's declaration (unlike the DAC's,
+    // where an off cell means "a silent program"): the port streams
+    // silence while enabled regardless, and declaring a DAC-only script
+    // here would compile it a second time just to report a phantom
+    // I2S-tagged error on a source that never routes to the port.
+    .filter(({ i2sRoute }) => i2sRoute !== "off")
+    .map(({ src, i2sRoute }) => slotFromSource(src, i2sPlayedFrequency, i2sRoute));
 }
 
 /** The stream config is a pure projection of the state tree. The spectra

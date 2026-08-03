@@ -14,6 +14,7 @@ import {
   deviceLost,
   refreshTelemetry,
 } from "./store/actions/device";
+import { pollI2sStatus } from "./store/actions/i2s";
 import { refreshDevices } from "./store/actions/devices";
 import { mountDevicePanel } from "./panels/device/panel";
 import { mountStatusBar } from "./panels/status/panel";
@@ -187,6 +188,10 @@ export async function mountApp(
     for (const key of sessionKeys(store.get())) {
       void refreshTelemetry(store, ipc, key);
     }
+    // I2S port readouts on the same cadence (issue #71): a writer that died
+    // on a USB error must surface as a readout, not silence. Pure backend
+    // cache read; pollI2sStatus skips sessions whose port is off and idle.
+    void pollI2sStatus(store, ipc);
   }, TELEMETRY_POLL_MS);
 
   // Auto-connect (v1 parity): at startup and after a replug, connect as

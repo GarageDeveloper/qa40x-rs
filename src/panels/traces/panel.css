@@ -230,9 +230,68 @@ select.traces__group-sel {
   color: var(--ink-1);
 }
 
+/* The front-panel I2S port block (issue #71): toggle + reference on the
+   first row, the readout alone on the second — both always rendered (state
+   flips disabled/text, never presence). Two rows because the one-line form
+   wrapped "FS @" and ellipsized the Σ readout away in the narrow sidebar
+   (screenshot round, 2026-08-01). */
+.traces__group-i2s {
+  padding: 0 4px 2px;
+  min-width: 0;
+}
+
+.traces__group-i2s-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.traces__group-i2s-tgl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  flex: none;
+  white-space: nowrap;
+}
+
+.traces__group-i2s .traces__group-ctl-label {
+  white-space: nowrap;
+}
+
+input.traces__group-i2s-ref {
+  font-size: 11px;
+  width: 52px;
+  padding: 3px 4px;
+}
+
+.traces__group-i2s-readout {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  padding: 1px 0 0 20px; /* aligned under the toggle's label */
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traces__group-i2s-readout--err {
+  color: var(--err);
+}
+
+.traces__group-i2s-readout--clip {
+  color: var(--err);
+}
+
 /* Collapsed group: header only — controls and rows fold away (same
    disclosure idiom as the sidebar sections' is-collapsed). */
 .traces__group--collapsed .traces__group-ctls,
+.traces__group--collapsed .traces__group-i2s,
 .traces__group--collapsed .traces__group-rows {
   display: none;
 }

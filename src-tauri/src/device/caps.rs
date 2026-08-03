@@ -63,6 +63,11 @@ pub struct DeviceCapabilities {
     pub calibration: CalibrationSource,
     /// Whether firmware flashing is supported (QA402 only, never virtual).
     pub supports_flash: bool,
+    /// Whether the front-panel I2S output port is drivable (issue #71).
+    /// From the model table at enumerate time (the whole family has the
+    /// port); refined at open with [`Self::with_i2s`] to the honest
+    /// post-claim value (EP 0x03 claimed or not).
+    pub supports_i2s: bool,
     /// True for the embedded simulator.
     pub is_virtual: bool,
 }
@@ -91,6 +96,9 @@ impl DeviceCapabilities {
             // the demo must not exercise the DFU/HID path the fake bootloader
             // can't complete in-process.
             supports_flash: model.supports_flash() && !is_virtual,
+            // Every QA40x model has the front-panel port; the embedded
+            // simulator emulates its EP3 sink since vqa40x-core v0.5.0.
+            supports_i2s: true,
             is_virtual,
         }
     }
@@ -98,6 +106,14 @@ impl DeviceCapabilities {
     /// Fill the calibration source once the unit is open.
     pub fn with_calibration(mut self, src: CalibrationSource) -> Self {
         self.calibration = src;
+        self
+    }
+
+    /// Refine the I2S support flag once the unit is open (the EP 0x03 claim
+    /// is best-effort — a firmware/OS that refuses it still connects, with
+    /// the port honestly reported unavailable).
+    pub fn with_i2s(mut self, available: bool) -> Self {
+        self.supports_i2s = available;
         self
     }
 }
@@ -166,5 +182,22 @@ mod tests {
         assert_eq!(caps.calibration, CalibrationSource::Unknown);
         let caps = caps.with_calibration(CalibrationSource::FactoryEeprom { page_bytes: 512 });
         assert_eq!(caps.calibration, CalibrationSource::FactoryEeprom { page_bytes: 512 });
+    }
+
+    #[test]
+    fn every_model_and_the_virtual_units_declare_the_i2s_port() {
+        // The whole family has the front-panel port, and the embedded
+        // simulator emulates its EP3 sink — enumerate-time optimism, refined
+        // at open by with_i2s.
+        for (model, is_virtual) in [
+            (Model::Qa402, false),
+            (Model::Qa403, false),
+            (Model::Qa403, true),
+        ] {
+            assert!(DeviceCapabilities::for_model(model, is_virtual).supports_i2s);
+        }
+        // A refused EP 0x03 claim reports honestly at open.
+        let caps = DeviceCapabilities::for_model(Model::Qa402, false).with_i2s(false);
+        assert!(!caps.supports_i2s);
     }
 }

@@ -271,6 +271,96 @@ export class FakeUnit {
     if (!this.connected) throw new Error(`Device not connected (fake, cmd=${cmd})`);
   }
 
+  /* -- front-panel I2S port (issue #71) -------------------------------- */
+
+  /** Mirrors the backend `I2sEngine`'s observable contract: idempotent
+   * apply (enable / rebuild / disable), the port streams silence while
+   * enabled with nothing routed, script slots become NAMED per-slot
+   * refusals, a re-apply while running never resets the block counter. */
+  i2s = {
+    enabled: false,
+    running: false,
+    widthBits: 32,
+    referenceDbv: 0,
+    sigmaPeakDbv: null as number | null,
+    clipped: false,
+    errors: [] as MixSlotError[],
+    blocks: 0,
+    lastError: null as string | null,
+  };
+  private i2sTimer: ReturnType<typeof setInterval> | null = null;
+
+  i2sApply(a: Args): unknown {
+    const enabled = a.enabled as boolean;
+    if (!enabled) {
+      this.stopI2s();
+      this.i2s.enabled = false;
+      this.i2s.sigmaPeakDbv = null;
+      this.i2s.clipped = false;
+      this.i2s.errors = [];
+      return this.i2sStatusWire();
+    }
+    this.assertConnected("i2s_apply");
+    const slots = (a.slots as MixSlotDesc[] | undefined) ?? [];
+    const errors: MixSlotError[] = [];
+    const kept = slots.filter((s) => {
+      if (s.source.kind === "script") {
+        errors.push({ id: s.id, error: "the e2e fake backend does not execute Rhai scripts" });
+        return false;
+      }
+      return true;
+    });
+    // Σ peak from a 48 kHz render of the I2S slot set (0.1 s catches a
+    // periodic mix's crest — the output_only_start fake's recipe), scaled
+    // against the reference for the clip verdict.
+    const mix = this.renderMix(48000, 4800, false, kept);
+    const referenceDbv = a.referenceDbv as number;
+    const sigma = mix.peak > 0 ? 20 * Math.log10(mix.peak) : null;
+    this.i2s.enabled = true;
+    this.i2s.widthBits = (a.widthBits as number | undefined) ?? 32;
+    this.i2s.referenceDbv = referenceDbv;
+    this.i2s.sigmaPeakDbv = sigma;
+    this.i2s.clipped = mix.peak * Math.pow(10, -referenceDbv / 20) > 1;
+    this.i2s.errors = errors;
+    this.i2s.lastError = null;
+    if (!this.i2s.running) {
+      this.i2s.running = true;
+      this.i2s.blocks = 0;
+      // Device-paced blocks: 2048 frames every ~42.7 ms at 48 kHz.
+      this.i2sTimer = setInterval(() => {
+        this.i2s.blocks += 1;
+      }, 43);
+    }
+    return this.i2sStatusWire();
+  }
+
+  i2sStatusWire(): unknown {
+    return {
+      // The real engine derives this from the EP 0x03 cell, cleared on
+      // every teardown — the fake's honest proxy is the connection.
+      supported: this.connected,
+      enabled: this.i2s.enabled,
+      running: this.i2s.running,
+      width_bits: this.i2s.widthBits,
+      reference_dbv: this.i2s.referenceDbv,
+      sigma_peak_dbv: this.i2s.sigmaPeakDbv,
+      clipped: this.i2s.clipped,
+      errors: this.i2s.errors,
+      blocks_written: this.i2s.blocks,
+      last_error: this.i2s.lastError,
+    };
+  }
+
+  /** Stop the paced writer (disable / disconnect — the real engine's
+   * teardown paths). */
+  stopI2s(): void {
+    if (this.i2sTimer !== null) {
+      clearInterval(this.i2sTimer);
+      this.i2sTimer = null;
+    }
+    this.i2s.running = false;
+  }
+
   /**
    * A THD-vs-frequency sweep — the one measurement PROGRAM the fake serves,
    * because the device-lock invariants (a running program suspends the mixer,
@@ -734,7 +824,8 @@ export class FakeUnit {
   renderMix(
     sampleRate: number,
     bufferSize: number,
-    withSlots: boolean
+    withSlots: boolean,
+    slotsOverride?: MixSlotDesc[]
   ): {
     left: number[];
     right: number[];
@@ -745,7 +836,7 @@ export class FakeUnit {
     const left = new Array<number>(bufferSize).fill(0);
     const right = new Array<number>(bufferSize).fill(0);
     const perSlot: { id: string; left: number[]; right: number[] }[] = [];
-    for (const slot of this.slots) {
+    for (const slot of slotsOverride ?? this.slots) {
       if (!slot.enabled || slot.route === "off") {
         if (withSlots)
           perSlot.push({

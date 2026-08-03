@@ -142,7 +142,59 @@ export interface RunState {
   generatorRunning: boolean;
   /** Id of the exclusive measurement program holding the device, if any. */
   programLock: string | null;
+  /** The front-panel I2S port's live readouts (issue #71), mirrored from
+   * the backend's `I2sStatus`. Transient like every RunState field — the
+   * persisted per-device port config lives in `AppState.i2sPorts`. */
+  i2s: SessionI2sState;
 }
+
+/** Live I2S port state of one session (issue #71). */
+export interface SessionI2sState {
+  /** The backend writer task is alive (false while enabled = it died —
+   * see `error`). */
+  running: boolean;
+  /** Peak of the summed I2S mix in dBV; null when silent or off. */
+  sigmaPeakDbv: number | null;
+  /** The I2S mix clips its reference (clamped + reported, never rescaled). */
+  clipped: boolean;
+  /** Blocks the device accepted since the port started (~23.4/s). */
+  blocks: number;
+  /** The writer's last error, surfaced by the status poll. */
+  error: string | null;
+  /** The port's per-source slot problems, in their OWN field: the DAC's
+   * `run.slotErrors` is replaced wholesale by every stream frame, so I2S
+   * entries merged there would be wiped between polls. */
+  slotErrors: SlotError[];
+}
+
+export function initialSessionI2s(): SessionI2sState {
+  return {
+    running: false,
+    sigmaPeakDbv: null,
+    clipped: false,
+    blocks: 0,
+    error: null,
+    slotErrors: [],
+  };
+}
+
+/** Persisted per-device I2S port config (issue #71), slot-keyed like the
+ * `triggers` record (bench-portability rule: docs are slot-keyed, ids are
+ * runtime). `enabled` is normalized to FALSE on save and load — a loaded
+ * workspace must never silently start clocking a digital stream into a
+ * DUT (the `outputOnly` not-persisted rule, port-shaped). */
+export interface I2sPortConfig {
+  enabled: boolean;
+  /** Source level (dBV) that lands at the port's digital full scale. */
+  referenceDbv: number;
+}
+
+export const DEFAULT_I2S_PORT: I2sPortConfig = { enabled: false, referenceDbv: 0 };
+
+/** Sane band for the port reference: −60 dBV (every source far below full
+ * scale) to +18 dBV (the top analog range — one shared levelDbv scale). */
+export const I2S_REFERENCE_MIN_DBV = -60;
+export const I2S_REFERENCE_MAX_DBV = 18;
 
 /* ------------------------------------------------------------------ */
 /* Traces (M1): the pool of displayable trace definitions.              */
@@ -316,6 +368,11 @@ export type SourceRoute = "left" | "right" | "both" | "off";
 export interface SourceTarget {
   slot: number | null;
   route: SourceRoute;
+  /** The device's front-panel I2S port as a second, independent routing
+   * dimension of the SAME cell (issue #71): a source can play to Line out
+   * L/R and/or the I2S port. `"off"` — the default everywhere — keeps the
+   * cell purely analog. */
+  i2sRoute: SourceRoute;
 }
 
 /** Cap on one source's explicit targets, mirroring the registry's slot cap
@@ -342,11 +399,15 @@ interface SourceBase {
    * when `targets` is non-empty: `core/routing.ts::sourceRouting` is the one
    * read path, and `targets.length` is the tag of this two-state union. */
   route: SourceRoute;
+  /** The I2S half of the implicit focus-following target (issue #71) —
+   * `route`'s twin, same two-state union: NEVER read when `targets` is
+   * non-empty (`sourceRouting` materializes it into the focus cell). */
+  i2sRoute: SourceRoute;
   /** The explicit device × channel matrix (issue #25 lot F2, decision R1).
    * `[]` — the default everywhere — is equivalent to the implicit
-   * `[{ slot: null, route }]`: the source follows the focus. Required (not
-   * optional) so tsc forces every construction site to be explicit and
-   * `migrate()` stays the ONE normalization point. */
+   * `[{ slot: null, route, i2sRoute }]`: the source follows the focus.
+   * Required (not optional) so tsc forces every construction site to be
+   * explicit and `migrate()` stays the ONE normalization point. */
   targets: SourceTarget[];
   playing: boolean;
 }
@@ -770,6 +831,10 @@ export interface AppState {
    * co beyond — lot E3). Read-through default: an absent entry means
    * `DEFAULT_TRIGGER` ("off"). */
   triggers: Record<TraceId, TriggerSettings>;
+  /** Per-device I2S port config (issue #71), keyed by the DECIMAL SLOT
+   * (bench-portable like `triggers`). Read-through default: an absent
+   * entry means `DEFAULT_I2S_PORT` (off, 0 dBV reference). */
+  i2sPorts: Record<string, I2sPortConfig>;
   /** The bench's loaded user weighting curve (issue #29), workspace-persisted. */
   weighting: WeightingState;
 }
@@ -910,6 +975,7 @@ export function initialSources(): SourcesState {
     id: "src-sine-1",
     label: "Sine 1",
     route: "left",
+    i2sRoute: "off",
     targets: [],
     playing: false,
     kind: "sine",
@@ -948,6 +1014,7 @@ export function initialRunState(): RunState {
     programLock: null,
     triggers: {},
     trigArmPending: {},
+    i2s: initialSessionI2s(),
   };
 }
 
@@ -996,6 +1063,7 @@ export function initialState(): AppState {
       peakHoldEpoch: 0,
     },
     triggers: {},
+    i2sPorts: {},
     weighting: { userCurve: null, userCurveName: null },
   };
 }
