@@ -53,15 +53,14 @@ pub mod registers {
     pub const TRACE_READ: u8 = 0x14;
     pub const TELEM_TEMPERATURE: u8 = 0x16; // deci-degrees Celsius (÷10)
 
-    /// Capability/feature word (read-only, constant). A real QA402 answers
-    /// 0x40000040, and the official app's device-info screen shows the same
-    /// expected value for a QA403.
+    /// Capability/feature word (read-only, constant). Both a real QA402 and
+    /// a real QA403 (fw 60) answer 0x40000040 — the word is identical across
+    /// models, so it does not discriminate them.
     pub const CAPABILITY: u8 = 0x1B;
 
     /// Second capability-style word (read-only, constant), differing per
-    /// model: 0x02A35B03 observed on a real QA402; the official app's
-    /// device-info screen expects 0x7F31BD30 for a QA403 (not yet confirmed
-    /// on hardware).
+    /// model: 0x02A35B03 on a real QA402, 0x7F31BD30 on a real QA403
+    /// (both confirmed on hardware).
     pub const CAPABILITY2: u8 = 0x1C;
 
     /// Serial-number register (read-only). Returns the unit serial packed as a
