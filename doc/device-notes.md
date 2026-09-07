@@ -56,7 +56,7 @@ register, not necessarily the full hardware capability.
 | `0x0B` | I2S_WIDTH | W | Front-panel I2S frame width: `0x00` = 16-bit, `0x40` = 32-bit (see §10). |
 | `0x0D` | PAGE_SELECT | W | Selects what sequential reads walk through: `0x10 + 2*page` = flash page (page 0 = calibration, see §7), `1` = firmware trace buffer (see §11). Each write resets the read pointer. |
 | `0x0F` | BOOTLOADER_ENTRY | W | Two-value unlock that resets the unit into its DFU bootloader for firmware update. **Device-mutating**; never written except during an explicit, confirmed flash. |
-| `0x10` | FIRMWARE_VERSION | R | Firmware build number as a u32 (e.g. `60`). |
+| `0x10` | FIRMWARE_VERSION | R | Firmware build number as a u32 (`60` observed on real QA402 and QA403 units). |
 | `0x11` | TELEM_USB_VOLTAGE | R | USB rail voltage, millivolts. |
 | `0x12` | TELEM_USB_CURRENT | R | USB current, milliamps. |
 | `0x13` | TELEM_ISO_CURRENT | R | Isolated-rail current, milliamps. |
@@ -64,8 +64,8 @@ register, not necessarily the full hardware capability.
 | `0x15` | TRACE_LEN | R | Byte length of the firmware trace buffer (`0x418` observed) — **not** telemetry, despite sitting in the telemetry range (see §11). |
 | `0x16` | TELEM_TEMPERATURE | R | Temperature in deci-°C (value ÷ 10 = °C). |
 | `0x19` | CALIBRATION | R | Calibration data, read as fixed-size pages (see §7). |
-| `0x1B` | CAPABILITY | R | Constant capability/feature word: `0x40000040` on a real QA402, and the vendor app's device-info screen shows the same expected value for a QA403. Bit meaning *(unknown)*. |
-| `0x1C` | CAPABILITY2 | R | Second constant word, differing per model: `0x02A35B03` on a real QA402. The vendor app's device-info screen expects `0x7F31BD30` for a QA403 *(inferred)*. |
+| `0x1B` | CAPABILITY | R | Constant capability/feature word: `0x40000040` on a real QA402 **and** a real QA403 (fw 60) — identical across both models, so it does not discriminate them. Bit meaning *(unknown)*. |
+| `0x1C` | CAPABILITY2 | R | Second constant word, differing per model: `0x02A35B03` on a real QA402, `0x7F31BD30` on a real QA403 (fw 60). Both confirmed on hardware. |
 | `0x1D` | SERIAL_NUMBER | R | Unit serial packed as a u32; matches the USB serial string. |
 | `0x1E` | STREAM_STATUS | R | Probed by the vendor app between a stream stop and restart. Semantics beyond that use are not settled. *(inferred)* |
 
@@ -158,19 +158,32 @@ Two supporting rules:
 ## 7. Calibration readout
 
 Calibration is read as fixed-size pages: a `PAGE_SELECT = 0x10` write
-followed by a burst of `0x19` reads (512-byte pages). The data is framed as
-fixed-size records with a recurring 16-bit sentinel and a small incrementing
-counter.
+followed by a burst of `0x19` reads (512-byte pages).
 
 `PAGE_SELECT` is a true selector, not a fixed token: `0x10 + 2*page` selects
-flash page 0..=3, page 0 being the factory calibration page — pages 1..=3
-read as all zeros on a real unit — and every write resets the read pointer,
-so a page can be re-read from the top. (Observed via the vendor app's
-device-info screen, which dumps all four pages.)
+flash page 0..=3, page 0 being the factory calibration page, and every write
+resets the read pointer, so a page can be re-read from the top. (Observed via
+the vendor app's device-info screen, which dumps all four pages.) Pages 1..=3
+are unused: they read as all zeros on a real QA402 and as all `0xFF`
+(erased, never-programmed flash) on a real QA403.
 
-*Open:* the byte order of the `0x19` payload (the app reads it little-endian
-while the record framing scans more naturally big-endian) is not settled.
-*(inferred)*
+**Page 0 layout** — decoded from a factory QA403 dump; everything is
+**little-endian** (settling the byte-order question):
+
+| Offset | Content |
+|---|---|
+| `0x00` | Six u32 header words: `0`, `0x48`, `0x39`, magic `0xDEAD0023`, input-entry count (`8`), output-entry count (`4`) |
+| `0x18` | Input table: 8 full-scale levels (0…42 dBV) × 2 channels (L then R per level) |
+| `0x78` | Output table: 4 output levels (−12/−2/+8/+18 dBV) × 2 channels (L then R per level) |
+| `0xA8` | Trailer word `0xDEAD0011`, then zeros |
+| `0x1FE` | 16-bit CRC over the page (the vendor app's "Factory Flash CRC" check; algorithm not identified) |
+
+Each table entry is 6 bytes: an `i16` level in dBV followed by an `f32`
+correction in dB. On the decoded unit the input corrections all sit near
++9.5 dB — a structural chain offset, the per-level calibration being the
+±0.2 dB spread around it — and the output corrections near −1.6 dB; L/R
+matching is within ~0.02 dB. The header words `0x48`/`0x39` are not yet
+understood.
 
 ## 8. Output level management
 
@@ -365,7 +378,7 @@ have to keep completing normally while the paced I2S stream is running.
 
 - **Flash pages** — `0x10 + 2*page` for pages 0..=3, read via `0x19`
   (512 bytes each, see §7). Page 0 is the factory calibration page; pages
-  1..=3 read as zeros on a real unit.
+  1..=3 are unused (all zeros on a real QA402, all `0xFF` on a real QA403).
 - **Firmware trace buffer** — `PAGE_SELECT = 1`, then `TRACE_LEN` (`0x15`)
   answers its byte length (`0x418` observed) and `TRACE_READ` (`0x14`) serves
   it 4 bytes per read. A healthy unit's trace reads all zeros. This is what
@@ -373,11 +386,10 @@ have to keep completing normally while the paced I2S stream is running.
 
 ## 12. Open questions
 
-- **`0x1B` / `0x1C`** — the constant words read as capability/feature values:
-  bit meaning unknown, and the QA403's `0x1C` value is not yet confirmed on
-  hardware.
-- **Calibration** — byte order of the `0x19` payload; the record layout
-  inside a page.
+- **`0x1B` / `0x1C`** — both values are now confirmed on real QA402 and
+  QA403 hardware (see §2), but the bit meaning is still unknown.
+- **Calibration** — the meaning of page-0 header words `0x48`/`0x39`, and
+  the exact 16-bit CRC algorithm (see §7).
 - **EP `0x83`** — the I2S IN endpoint: exposed but never seen carrying data;
   purpose unknown.
 - **Range settle times** — the values in §6 are working figures; the exact

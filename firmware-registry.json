@@ -7,7 +7,8 @@
     "An image's SHA-256 changes from build to build even when the firmware version does not (observed across releases), so a hash identifies a specific official BUILD (integrity/provenance), NOT a firmware version.",
     "AUTHENTICITY is proven cryptographically by the embedded RSA-2048/SHA-256 signature (verify_sb2_signature) \u2014 works even for builds absent here.",
     "device inferred from image size and order: the QA402 image is invariably 52724 B and comes first; the second image is the QA403 (size varies by version). Single-image older builds: 52724 -> QA402, else null.",
-    "firmware_version inferred from release notes: >=1.200 -> 60, 1.142..1.199 -> 58, 1.139..1.141 -> 56; older left null. Verify by flashing + reading register 0x10."
+    "firmware_version inferred from release notes: >=1.200 -> 60, 1.142..1.199 -> 58, 1.139..1.141 -> 56; older left null. Verify by flashing + reading register 0x10.",
+    "The 60 tier is confirmed on hardware: a factory-flashed QA403 running under app 1.220 reads register 0x10 = 60 (2026-08-06)."
   ],
   "releases": [
     {
