@@ -73,6 +73,7 @@ interface DeviceEntryWire {
     max_measurement_hz: number;
     calibration: "Unknown" | { FactoryEeprom: { page_bytes: number } };
     supports_flash: boolean;
+    supports_i2s: boolean;
     is_virtual: boolean;
   };
   open: boolean;
@@ -102,6 +103,14 @@ export class FakeDevice {
    * per-device program specs assert against (issue #25 lot F4: a sweep
    * pinned to B must invoke with B's id, its ⏹ must sweep_stop B only). */
   programCalls: { cmd: string; deviceId: string | null }[] = [];
+  /** Every `i2s_apply` with its routing key and declared slot set (issue
+   * #71) — what the I2S e2e specs assert against. */
+  i2sCalls: {
+    deviceId: string | null;
+    enabled: boolean;
+    slotIds: string[];
+    referenceDbv: number;
+  }[] = [];
   /* REST server mirror — the fake never runs one, but the App drawer's
    * exposure/token state must round-trip like the real backend's. */
   private restExposed = false;
@@ -193,11 +202,18 @@ export class FakeDevice {
       if (slot === 0) {
         u.connected = false;
         u.openId = null;
+        // The real monitor's loss branch flag-stops the I2S engine
+        // (issue #71) — mirror it or the fake's paced timer leaks and
+        // reports a running port on a unit that is gone.
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected");
       } else if (u.openId !== null && u.openId.startsWith("usb/")) {
         const lost = u.openId;
         u.connected = false;
         u.openId = null;
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected", { device_id: lost });
       }
     }
@@ -224,6 +240,10 @@ export class FakeDevice {
       if (u.connected && u.openId === id) {
         u.connected = false;
         u.openId = null;
+        // Mirror the real monitor's loss branch (issue #71) — see
+        // setPresent above.
+        u.stopI2s();
+        u.i2s.enabled = false;
         this.emitter("device-disconnected", { device_id: id });
       }
     }
@@ -237,6 +257,11 @@ export class FakeDevice {
   /** The stream config `slot`'s unit last adopted (null: none / no unit). */
   streamConfigOf(slot: number): StreamConfigWire | null {
     return this.units.get(slot)?.streamConfig ?? null;
+  }
+
+  /** `slot`'s I2S port state (issue #71) — the specs' wire truth. */
+  i2sOf(slot: number): FakeUnit["i2s"] | null {
+    return this.units.get(slot)?.i2s ?? null;
   }
 
   /** Frames `slot`'s unit has pushed on its current stream. */
@@ -293,6 +318,7 @@ export class FakeDevice {
         max_measurement_hz: rates[rates.length - 1] / 2,
         calibration: open ? { FactoryEeprom: { page_bytes: 512 } } : "Unknown",
         supports_flash: false,
+        supports_i2s: true,
         is_virtual: virtual,
       },
       open,
@@ -441,6 +467,10 @@ export class FakeDevice {
         // stopped BEFORE the device closes (clean Stopped, never an Error).
         u.stopStream(true);
         u.generatorRunning = false;
+        // The I2S port too (issue #71): quiesce stops the engine, and the
+        // next connect's I2S_CTRL = 0 leaves the port off.
+        u.stopI2s();
+        u.i2s.enabled = false;
         return "Disconnected (e2e fake device)";
       case "get_device_info": {
         // Identity follows the OPEN unit (lot D review #6): a spec pinning
@@ -680,6 +710,18 @@ export class FakeDevice {
           errors,
         };
       }
+
+      /* -- front-panel I2S port (issue #71) ---------------------------- */
+      case "i2s_apply":
+        this.i2sCalls.push({
+          deviceId: (a.deviceId as string | undefined) ?? null,
+          enabled: a.enabled as boolean,
+          slotIds: ((a.slots as MixSlotDesc[] | undefined) ?? []).map((s) => s.id),
+          referenceDbv: a.referenceDbv as number,
+        });
+        return u.i2sApply(a);
+      case "i2s_status":
+        return u.i2sStatusWire();
 
       case "start_generator":
         u.assertConnected(cmd);

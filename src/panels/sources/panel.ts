@@ -36,7 +36,9 @@ import {
   setSourceKind,
   setSourceLevel,
   setSourcePlaying,
+  setSourceI2sRoute,
   setSourceRoute,
+  setSourceTargetI2sRoute,
   setSourceTargetRoute,
   SOURCE_KINDS,
 } from "../../store/actions/sources";
@@ -56,6 +58,7 @@ import {
   sourceTargetVMs,
   type SourceTargetVM,
 } from "../../store/selectors/sourcetargets";
+import { i2sPlayedFrequency } from "../../core/bins";
 import { routeChecks, routeFromChecks } from "../../core/routing";
 import { toneListStats } from "../../core/tonestats";
 import { el, keyedList } from "../../ui/dom";
@@ -294,11 +297,38 @@ export function mountSourcesPanel(
         setSourceRoute(store, ipc, id, routeFromChecks(routeL.checked, routeR.checked));
       routeL.addEventListener("change", onRouteChange);
       routeR.addEventListener("change", onRouteChange);
+      // The I2S pair (issue #71): the same gesture for the front-panel
+      // port's two channels. Writes the compact i2sRoute directly — an
+      // I2S-only edit never mints an explicit matrix (sourceRowMode stays
+      // "legacy").
+      const i2sL = el("input", { type: "checkbox", "data-testid": `src-i2s-l-${id}` });
+      const i2sR = el("input", { type: "checkbox", "data-testid": `src-i2s-r-${id}` });
+      const onI2sChange = (): void =>
+        setSourceI2sRoute(store, ipc, id, routeFromChecks(i2sL.checked, i2sR.checked));
+      i2sL.addEventListener("change", onI2sChange);
+      i2sR.addEventListener("change", onI2sChange);
       routeCell = el(
         "span.sources__route",
-        { title: "Route to Out L / Out R (nothing checked = Off)" },
-        el("label.sources__route-ch", {}, routeL, "L"),
-        el("label.sources__route-ch", {}, routeR, "R")
+        {},
+        el(
+          "span.sources__route-grp",
+          { title: "Route to Out L / Out R (nothing checked = Off)" },
+          el("label.sources__route-ch", {}, routeL, "L"),
+          el("label.sources__route-ch", {}, routeR, "R")
+        ),
+        el(
+          "span.sources__route-grp",
+          {
+            title:
+              "Route to the front-panel I2S port's L / R (plays once the " +
+              "device's I2S output is enabled in the Traces panel). The " +
+              "port runs at 48 kHz and plays the asked frequency verbatim " +
+              "— no FFT-grid rounding.",
+          },
+          el("span.sources__route-tag", {}, "I2S"),
+          el("label.sources__route-ch", {}, i2sL, "L"),
+          el("label.sources__route-ch", {}, i2sR, "R")
+        )
       );
     } else {
       routeCell = el("button.sources__routing-sum", {
@@ -478,6 +508,26 @@ export function mountSourcesPanel(
         );
       tgtL.addEventListener("change", onChange);
       tgtR.addEventListener("change", onChange);
+      // The cell's I2S dimension (issue #71): its own pair, partial-patch
+      // write — a Line edit and an I2S edit never clobber each other.
+      const i2sL = el("input", {
+        type: "checkbox",
+        "data-testid": `src-tgt-i2s-l-${srcId}-${t.tag}`,
+      });
+      const i2sR = el("input", {
+        type: "checkbox",
+        "data-testid": `src-tgt-i2s-r-${srcId}-${t.tag}`,
+      });
+      const onI2sChange = (): void =>
+        setSourceTargetI2sRoute(
+          store,
+          ipc,
+          srcId,
+          slot,
+          routeFromChecks(i2sL.checked, i2sR.checked)
+        );
+      i2sL.addEventListener("change", onI2sChange);
+      i2sR.addEventListener("change", onI2sChange);
       const del = el(
         "button.btn.btn--small",
         {
@@ -489,15 +539,28 @@ export function mountSourcesPanel(
       );
       // Two-line grid (Raphaël, 2026-07-30 — the one-line flex row crushed
       // the NAME to zero width whenever a note appeared, leaving orphan
-      // L/R pairs and horizontal overflow): line 1 = name | L | R | ✕ in
-      // aligned columns, line 2 = grid readout + note, free to ellipsize
-      // without squeezing anyone.
+      // L/R pairs and horizontal overflow): line 1 = name | L | R | I2S
+      // L | R | ✕ in aligned columns, line 2 = grid readout + note, free
+      // to ellipsize without squeezing anyone.
       return el(
         "div.sources__tgt",
         {},
         el("span.sources__tgt-name"),
         el("label.sources__route-ch", {}, tgtL, "L"),
         el("label.sources__route-ch", {}, tgtR, "R"),
+        el(
+          "span.sources__route-grp",
+          {
+            title:
+              "Route to this device's front-panel I2S port (plays once its " +
+              "I2S output is enabled in the Traces panel). The port runs " +
+              "at 48 kHz and plays the asked frequency verbatim — no " +
+              "FFT-grid rounding.",
+          },
+          el("span.sources__route-tag", {}, "I2S"),
+          el("label.sources__route-ch", {}, i2sL, "L"),
+          el("label.sources__route-ch", {}, i2sR, "R")
+        ),
         del,
         el(
           "div.sources__tgt-sub",
@@ -532,6 +595,14 @@ export function mountSourcesPanel(
       )!;
       tgtL.checked = t.left;
       tgtR.checked = t.right;
+      const i2sL = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-tgt-i2s-l-${srcId}-${t.tag}"]`
+      )!;
+      const i2sR = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-tgt-i2s-r-${srcId}-${t.tag}"]`
+      )!;
+      i2sL.checked = t.i2sLeft;
+      i2sR.checked = t.i2sRight;
       const played = node.querySelector<HTMLElement>(
         `[data-testid="src-tgt-played-${srcId}-${t.tag}"]`
       )!;
@@ -589,6 +660,14 @@ export function mountSourcesPanel(
         const r = snappedReadout(vm.targets, src.frequencyHz);
         snapped.textContent = r.text;
         snapped.title = r.title;
+      } else if (src.route === "off" && src.i2sRoute !== "off") {
+        // Legacy row driving ONLY the I2S port: the port plays the ask
+        // verbatim at its pinned 48 kHz — the DAC's bin-snapped value
+        // would lie about what plays (issue #71 screenshot round).
+        snapped.textContent = `→ ${i2sPlayedFrequency(src.frequencyHz).toFixed(4)} Hz`;
+        snapped.title =
+          "Actually-played frequency on the I2S port (pinned 48 kHz, the " +
+          "ask played verbatim — no FFT-grid rounding)";
       } else if (vm.played !== null) {
         const moved = Math.abs(vm.played - src.frequencyHz) > 1e-9;
         snapped.textContent = `→ ${vm.played.toFixed(4)} Hz`;
@@ -614,6 +693,15 @@ export function mountSourcesPanel(
       const checks = routeChecks(src.route);
       routeLBox.checked = checks.left;
       routeRBox.checked = checks.right;
+      const i2sLBox = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-i2s-l-${id}"]`
+      )!;
+      const i2sRBox = node.querySelector<HTMLInputElement>(
+        `[data-testid="src-i2s-r-${id}"]`
+      )!;
+      const i2sChecks = routeChecks(src.i2sRoute);
+      i2sLBox.checked = i2sChecks.left;
+      i2sRBox.checked = i2sChecks.right;
     } else {
       const sum = node.querySelector<HTMLButtonElement>(
         `[data-testid="src-routing-${id}"]`

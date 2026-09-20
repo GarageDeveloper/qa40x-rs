@@ -30,53 +30,63 @@ export function routeChecks(route: SourceRoute): { left: boolean; right: boolean
  */
 export function sourceRouting(src: {
   route: SourceRoute;
+  i2sRoute: SourceRoute;
   targets: SourceTarget[];
 }): SourceTarget[] {
-  return src.targets.length > 0 ? src.targets : [{ slot: null, route: src.route }];
+  return src.targets.length > 0
+    ? src.targets
+    : [{ slot: null, route: src.route, i2sRoute: src.i2sRoute }];
 }
+
+/** One cell edit: the dimensions to change (Line out and/or I2S — issue
+ * #71 made the cell two-dimensional). A partial patch, so an Out L/R edit
+ * preserves the cell's I2S half and vice versa. `null` removes the cell. */
+export type TargetPatch = { route?: SourceRoute; i2sRoute?: SourceRoute } | null;
 
 /**
  * The matrix's ONE write path (issue #25 lot F3) — the editing twin of
  * `sourceRouting`. Applies one cell edit to the MATERIALIZED matrix (so the
  * legacy compact form's implicit focus cell is a first-class row), then
  * re-canonicalizes (decision D-F3-4):
- *  - `route: null` removes the cell; removing the last one stores the legacy
- *    compact `{ targets: [], route: "off" }` (a silent source, same as the
- *    unchecked legacy pair);
+ *  - `patch: null` removes the cell; removing the last one stores the legacy
+ *    compact `{ targets: [], route: "off", i2sRoute: "off" }` (a silent
+ *    source, same as the unchecked legacy pair);
  *  - a matrix that is exactly one focus cell compacts back to
- *    `{ targets: [], route: <that route> }` — a bench shrinking to one
- *    device finds truthful legacy checkboxes and byte-identical docs;
- *  - anything else stays explicit, `route` untouched (a dead field then —
- *    `targets.length` is the union tag, per state.ts).
- * Writing `route: "off"` KEEPS the cell (the legacy Off meaning: a silent
- * DAC program — what `sessionHasSources` counts); only `null` removes it.
+ *    `{ targets: [], route: <cell's>, i2sRoute: <cell's> }` — a bench
+ *    shrinking to one device finds truthful legacy checkboxes and
+ *    byte-identical docs;
+ *  - anything else stays explicit, `route`/`i2sRoute` untouched (dead
+ *    fields then — `targets.length` is the union tag, per state.ts).
+ * Writing `{ route: "off" }` KEEPS the cell (the legacy Off meaning: a
+ * silent DAC program — what `sessionHasSources` counts); only `null`
+ * removes it. A patch creating a cell fills the unnamed dimension "off".
  *
  * `cap` bounds cell creation (pass MAX_SOURCE_TARGETS — a structural param
  * so core/ stays type-only over the store): an add beyond it is a no-op,
  * matching the persist sanitizer's cap-9 rule.
  */
 export function writeTarget(
-  src: { route: SourceRoute; targets: SourceTarget[] },
+  src: { route: SourceRoute; i2sRoute: SourceRoute; targets: SourceTarget[] },
   slot: number | null,
-  route: SourceRoute | null,
+  patch: TargetPatch,
   cap: number
-): { route: SourceRoute; targets: SourceTarget[] } {
+): { route: SourceRoute; i2sRoute: SourceRoute; targets: SourceTarget[] } {
   const matrix = sourceRouting(src);
   let next: SourceTarget[];
-  if (route === null) {
+  if (patch === null) {
     next = matrix.filter((t) => t.slot !== slot);
   } else if (matrix.some((t) => t.slot === slot)) {
-    next = matrix.map((t) => (t.slot === slot ? { slot, route } : t));
+    next = matrix.map((t) => (t.slot === slot ? { ...t, ...patch } : t));
   } else if (matrix.length >= cap) {
-    return { route: src.route, targets: src.targets };
+    return { route: src.route, i2sRoute: src.i2sRoute, targets: src.targets };
   } else {
-    next = [...matrix, { slot, route }];
+    next = [...matrix, { slot, route: "off", i2sRoute: "off", ...patch }];
   }
-  if (next.length === 0) return { route: "off", targets: [] };
+  if (next.length === 0) return { route: "off", i2sRoute: "off", targets: [] };
   if (next.length === 1 && next[0].slot === null) {
-    return { route: next[0].route, targets: [] };
+    return { route: next[0].route, i2sRoute: next[0].i2sRoute, targets: [] };
   }
-  return { route: src.route, targets: next };
+  return { route: src.route, i2sRoute: src.i2sRoute, targets: next };
 }
 
 /** Cell-wise OR of two routes (L|L, R|R): what one session plays when a

@@ -15,6 +15,7 @@ import {
   isQuotaExceeded,
   migrate,
   sanitizeCapture,
+  sanitizeI2sPorts,
   sanitizeSourceTargets,
   snapshotWorkspace,
   WS_VERSION,
@@ -882,14 +883,14 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
         { slot: -1, route: "left" },
         { slot: 1.5, route: "left" },
         { slot: 1, route: "up" },
-        { slot: 1, route: "left" },
-        { slot: 1, route: "right" }, // duplicate slot: FIRST wins
-        { slot: null, route: "both" },
-        { slot: null, route: "off" }, // duplicate focus target: first wins
+        { slot: 1, route: "left", i2sRoute: "off" },
+        { slot: 1, route: "right", i2sRoute: "off" }, // duplicate slot: FIRST wins
+        { slot: null, route: "both", i2sRoute: "off" },
+        { slot: null, route: "off", i2sRoute: "off" }, // duplicate focus target: first wins
       ])
     ).toEqual([
-      { slot: 1, route: "left" },
-      { slot: null, route: "both" },
+      { slot: 1, route: "left", i2sRoute: "off" },
+      { slot: null, route: "both", i2sRoute: "off" },
     ]);
     // A hand-edited flood is capped, never an unbounded matrix.
     const flood = Array.from({ length: 40 }, (_, i) => ({ slot: i, route: "left" as const }));
@@ -907,8 +908,8 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
           "src-sine-1": {
             ...s.sources.byId["src-sine-1"],
             targets: [
-              { slot: 1, route: "both" },
-              { slot: null, route: "left" },
+              { slot: 1, route: "both", i2sRoute: "off" },
+              { slot: null, route: "left", i2sRoute: "off" },
             ],
           },
         },
@@ -918,8 +919,8 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
     expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([
-      { slot: 1, route: "both" },
-      { slot: null, route: "left" },
+      { slot: 1, route: "both", i2sRoute: "off" },
+      { slot: null, route: "left", i2sRoute: "off" },
     ]);
     // Stability: the reloaded bench re-snapshots to the same document.
     expect(snapshotWorkspace(dest.get())).toEqual(doc);
@@ -943,7 +944,7 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
           ...s.sources.byId,
           "src-sine-1": {
             ...s.sources.byId["src-sine-1"],
-            targets: [{ slot: 1, route: "both" }],
+            targets: [{ slot: 1, route: "both", i2sRoute: "off" }],
           },
         },
       },
@@ -957,11 +958,73 @@ describe("v5 in-version hook: per-source routing matrix (issue #25 lot F2)", () 
   it("applyWorkspaceDoc sanitizes targets itself — a template-style doc that never saw migrate()", () => {
     const doc = snapshotWorkspace(freshStore().get());
     (doc.sources.byId["src-sine-1"] as { targets: unknown }).targets = [
-      { slot: 2, route: "right" },
+      { slot: 2, route: "right", i2sRoute: "off" },
       { slot: "two", route: "right" },
     ];
     const dest = freshStore();
     expect(applyWorkspaceDoc(dest, stubIpc, doc)).toBe(true);
-    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right" }]);
+    expect(dest.get().sources.byId["src-sine-1"].targets).toEqual([{ slot: 2, route: "right", i2sRoute: "off" }]);
+  });
+});
+
+describe("v5 in-version hook: front-panel I2S port (issue #71)", () => {
+  it("a doc predating i2sRoute/i2sPorts loads with the analog defaults", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    for (const src of Object.values(doc.sources.byId) as { i2sRoute?: unknown }[]) {
+      delete src.i2sRoute;
+    }
+    delete (doc as { i2sPorts?: unknown }).i2sPorts;
+    const migrated = migrate(doc)!;
+    for (const src of Object.values(migrated.sources.byId)) {
+      expect(src.i2sRoute).toBe("off");
+    }
+    expect(migrated.i2sPorts).toEqual({});
+  });
+
+  it("garbage i2sRoute degrades to off; a cell's bad I2S half degrades without dropping the cell", () => {
+    const doc = JSON.parse(JSON.stringify(snapshotWorkspace(freshStore().get())));
+    (doc.sources.byId["src-sine-1"] as { i2sRoute: unknown }).i2sRoute = "sideways";
+    const migrated = migrate(doc)!;
+    expect(migrated.sources.byId["src-sine-1"].i2sRoute).toBe("off");
+    expect(
+      sanitizeSourceTargets([{ slot: 1, route: "left", i2sRoute: "up" }])
+    ).toEqual([{ slot: 1, route: "left", i2sRoute: "off" }]);
+    expect(
+      sanitizeSourceTargets([{ slot: 1, route: "left", i2sRoute: "both" }])
+    ).toEqual([{ slot: 1, route: "left", i2sRoute: "both" }]);
+  });
+
+  it("sanitizeI2sPorts: enabled is FORCED off however the doc claims, references clamp, junk keys drop", () => {
+    expect(sanitizeI2sPorts("garbage")).toEqual({});
+    expect(sanitizeI2sPorts(null)).toEqual({});
+    expect(
+      sanitizeI2sPorts({
+        "0": { enabled: true, referenceDbv: -6 },
+        "1": { enabled: false, referenceDbv: 500 },
+        "2": { enabled: true, referenceDbv: "loud" },
+        "-1": { enabled: true, referenceDbv: 0 },
+        "1.5": { enabled: true, referenceDbv: 0 },
+        junk: { enabled: true, referenceDbv: 0 },
+        "3": "not an object",
+      })
+    ).toEqual({
+      "0": { enabled: false, referenceDbv: -6 },
+      "1": { enabled: false, referenceDbv: 18 },
+      "2": { enabled: false, referenceDbv: 0 },
+    });
+  });
+
+  it("the snapshot normalizes enabled OFF while keeping the reference (the outputOnly rule, port-shaped)", () => {
+    const store = freshStore();
+    store.update("test/i2s-on", (s) => ({
+      ...s,
+      i2sPorts: { "0": { enabled: true, referenceDbv: -12 } },
+    }));
+    const doc = snapshotWorkspace(store.get());
+    expect(doc.i2sPorts).toEqual({ "0": { enabled: false, referenceDbv: -12 } });
+    // Round trip: migrate + apply keep the reference and the off state.
+    const dest = freshStore();
+    expect(applyWorkspaceDoc(dest, stubIpc, migrate(JSON.parse(JSON.stringify(doc)))!)).toBe(true);
+    expect(dest.get().i2sPorts).toEqual({ "0": { enabled: false, referenceDbv: -12 } });
   });
 });

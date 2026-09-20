@@ -147,6 +147,10 @@ pub struct UsbEndpoints {
     pub register_read: u8,
     pub data_write: u8,
     pub data_read: u8,
+    /// Front-panel I2S stream (issue #71). OUT only — the paired IN
+    /// endpoint 0x83 is exposed by the device but was never observed
+    /// carrying data, so it is deliberately not claimed.
+    pub i2s_write: u8,
 }
 
 impl Default for UsbEndpoints {
@@ -156,6 +160,7 @@ impl Default for UsbEndpoints {
             register_read: 0x81,
             data_write: 0x02,
             data_read: 0x82,
+            i2s_write: 0x03,
         }
     }
 }

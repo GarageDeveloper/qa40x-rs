@@ -28,6 +28,7 @@ import {
   startRun,
   syncAllStreams,
 } from "./stream";
+import { syncAllI2s } from "./i2s";
 import { toast } from "./ui";
 
 /** Rebuild chains PER SESSION (issue #25 lot E2): several changes landing
@@ -107,6 +108,10 @@ export function syncAllOutputOnly(store: Store<AppState>, ipc: Ipc): void {
 export function syncAllDacOwners(store: Store<AppState>, ipc: Ipc): void {
   syncAllStreams(store, ipc);
   syncAllOutputOnly(store, ipc);
+  // The I2S port too (issue #71): not a DAC owner (it runs concurrently on
+  // its own engine), but the same gestures — focus change, workspace load —
+  // can reshape what the implicit focus target routes to a port.
+  syncAllI2s(store, ipc);
 }
 
 async function sync(store: Store<AppState>, ipc: Ipc, key: SessionKey): Promise<void> {

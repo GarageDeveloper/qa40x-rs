@@ -1,4 +1,5 @@
 pub mod device;
+pub mod i2s;
 pub mod register;
 pub mod error;
 pub mod settle;

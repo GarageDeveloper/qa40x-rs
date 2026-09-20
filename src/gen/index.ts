@@ -26,6 +26,8 @@ export type { LevelOffsetsDb } from "./LevelOffsetsDb";
 export type { LevelResult } from "./LevelResult";
 export type { ClipState } from "./ClipState";
 export type { HarmonicMark } from "./HarmonicMark";
+export type { I2sStatus } from "./I2sStatus";
+export type { I2sWidth } from "./I2sWidth";
 export type { MixStatus } from "./MixStatus";
 export type { MixerSlotDesc } from "./MixerSlotDesc";
 export type { OutputGain } from "./OutputGain";

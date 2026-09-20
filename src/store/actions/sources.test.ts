@@ -38,6 +38,7 @@ function sine(id: string, over: Partial<SourceMeta> = {}): SourceMeta {
     levelDbv: -12,
     extraTones: [],
     route: "left",
+    i2sRoute: "off",
     targets: [],
     playing: true,
     ...over,
@@ -116,8 +117,8 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     expect(lastStreamSlots(calls, undefined)).toEqual(["a"]);
     expect(lastStreamSlots(calls, "usb/B")).toEqual(["a"]);
     expect(store.get().sources.byId["a"].targets).toEqual([
-      { slot: null, route: "left" },
-      { slot: 1, route: "left" },
+      { slot: null, route: "left", i2sRoute: "off" },
+      { slot: 1, route: "left", i2sRoute: "off" },
     ]);
 
     removeSourceTarget(store, ipc, "a", null);
@@ -125,7 +126,7 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     // Slot 0 LOST the source — its running stream must hear about it.
     expect(lastStreamSlots(calls, undefined)).toEqual([]);
     expect(lastStreamSlots(calls, "usb/B")).toEqual(["a"]);
-    expect(store.get().sources.byId["a"].targets).toEqual([{ slot: 1, route: "left" }]);
+    expect(store.get().sources.byId["a"].targets).toEqual([{ slot: 1, route: "left", i2sRoute: "off" }]);
   });
 
   it("the wire carries the CELL's route, not the legacy field", async () => {
@@ -156,6 +157,7 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     expect(store.get().sources.byId["a"].targets).toContainEqual({
       slot: 1,
       route: "both",
+      i2sRoute: "off",
     });
   });
 
@@ -202,8 +204,8 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
       byId: {
         a: sine("a", {
           targets: [
-            { slot: null, route: "left" },
-            { slot: 1, route: "right" },
+            { slot: null, route: "left", i2sRoute: "off" },
+            { slot: 1, route: "right", i2sRoute: "off" },
           ],
         }),
       },
@@ -238,7 +240,7 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     s = withRun(s, { streaming: true }, "slot-1");
     s.sources = {
       order: ["a"],
-      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "right" }] }) },
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "right", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc } = recordingIpc();
@@ -253,7 +255,7 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     s = withRun(s, { streaming: true }, "slot-1");
     s.sources = {
       order: ["a"],
-      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left" }] }) },
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();
@@ -270,7 +272,7 @@ describe("setSourceTargetRoute / removeSourceTarget — the fan-out (issue #25 l
     s = withRun(s, { streaming: true, programLock: "prog-on-B" }, "slot-1");
     s.sources = {
       order: ["a"],
-      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left" }] }) },
+      byId: { a: sine("a", { playing: false, targets: [{ slot: 1, route: "left", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();

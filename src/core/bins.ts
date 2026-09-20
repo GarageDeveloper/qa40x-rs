@@ -30,3 +30,17 @@ export function playedFrequency(
   const clamped = Math.min(Math.max(hz, 1), (sampleRate / 2) * 0.98);
   return coherent ? snapToBin(clamped, fftSize, sampleRate) : clamped;
 }
+
+/** The front-panel I2S port's pinned sample rate (issue #71 — the vendor
+ * app locks the port at 48 kSPS; `doc/device-notes.md` §10). Lives in this
+ * leaf so SELECTORS can compute I2S readouts without importing an action
+ * module. */
+export const I2S_PORT_RATE_HZ = 48000;
+
+/** The frequency the I2S port actually plays for an asked `hz`: clamped
+ * below ITS OWN Nyquist (the port is pinned at 48 kHz whatever the
+ * acquisition rate) and NEVER bin-snapped — the FFT grid describes the
+ * acquisition, not the port. */
+export function i2sPlayedFrequency(hz: number): number {
+  return Math.min(Math.max(hz, 1), (I2S_PORT_RATE_HZ / 2) * 0.98);
+}

@@ -30,6 +30,7 @@ import type {
   AppState,
   CaptureProvenance,
   ExtraTone,
+  I2sPortConfig,
   LayoutPattern,
   LayoutState,
   ProgramMeta,
@@ -45,9 +46,12 @@ import type {
 } from "./state";
 import {
   defaultTile,
+  DEFAULT_I2S_PORT,
   DEFAULT_SWEEP_PARAMS,
   HW_TRACE_IDS,
   hwSlotOfTraceId,
+  I2S_REFERENCE_MAX_DBV,
+  I2S_REFERENCE_MIN_DBV,
   initialState,
   initialTraces,
   MAX_SOURCE_TARGETS,
@@ -103,6 +107,12 @@ export interface WorkspaceDoc {
    * device id). `armEpoch` is normalized to 0 on save/load — a SINGLE arm
    * is a live-session gesture, never a saved-bench fact. */
   triggers: Record<TraceId, TriggerSettings>;
+  /** Per-device I2S port config (issue #71), slot-keyed like `triggers`.
+   * `enabled` is normalized FALSE on save and load — a loaded workspace
+   * must never silently start clocking a digital stream into a DUT (the
+   * `outputOnly` not-persisted rule, port-shaped); the reference level is
+   * the persisted fact. */
+  i2sPorts: Record<string, I2sPortConfig>;
   /** The bench's loaded user weighting curve (issue #29), or null if none
    * was ever imported. `userWeightingCurveName` is display-only. */
   userWeightingCurve: UserWeightingCurve | null;
@@ -221,6 +231,11 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
     triggers[id] = { ...t, armEpoch: 0 };
   }
 
+  const i2sPorts: Record<string, I2sPortConfig> = {};
+  for (const [slot, p] of Object.entries(s.i2sPorts)) {
+    i2sPorts[slot] = { ...p, enabled: false };
+  }
+
   return {
     version: WS_VERSION,
     name: s.workspace.name,
@@ -237,6 +252,7 @@ export function snapshotWorkspace(s: AppState): WorkspaceDoc {
     },
     refFrames,
     triggers,
+    i2sPorts,
     userWeightingCurve: s.weighting.userCurve,
     userWeightingCurveName: s.weighting.userCurveName,
   };
@@ -347,8 +363,16 @@ function importGenerator(id: string, label: string, params: Record<string, unkno
     return o === "left" || o === "right" || o === "off" ? o : "both";
   })();
   const levelDbv = num(params.level, -12);
-  // Every legacy source was bench-global, i.e. focus-following (lot F2).
-  const base = { id, label, route, targets: [] as SourceTarget[], playing: false };
+  // Every legacy source was bench-global, i.e. focus-following (lot F2) —
+  // and purely analog (I2S arrives with issue #71).
+  const base = {
+    id,
+    label,
+    route,
+    i2sRoute: "off" as SourceMeta["i2sRoute"],
+    targets: [] as SourceTarget[],
+    playing: false,
+  };
   switch (waveform) {
     case "sine":
     case "square":
@@ -507,6 +531,7 @@ export function importV4(ws: RawV4): WorkspaceDoc {
               const o = str(params.output, "both");
               return o === "left" || o === "right" || o === "off" ? o : "both";
             })(),
+            i2sRoute: "off",
             targets: [],
             playing: false,
             kind: "script",
@@ -695,7 +720,9 @@ export function importV4(ws: RawV4): WorkspaceDoc {
     refFrames,
     // Not a v4 concept — the trigger arrives with Lot A (issue #26).
     triggers: {},
-    // Not a v4 concept either (issue #29).
+    // Not a v4 concept either (issue #71).
+    i2sPorts: {},
+    // Nor this one (issue #29).
     userWeightingCurve: null,
     userWeightingCurveName: null,
   };
@@ -726,9 +753,40 @@ export function sanitizeSourceTargets(raw: unknown): SourceTarget[] {
     if (slot === undefined) continue;
     const route = t.route;
     if (route !== "left" && route !== "right" && route !== "both" && route !== "off") continue;
+    // The cell's I2S dimension (issue #71): docs predating it — and any
+    // garbage — degrade to "off" (the purely-analog cell), never dropped:
+    // the Line-out half is still valid.
+    const i2sRoute =
+      t.i2sRoute === "left" || t.i2sRoute === "right" || t.i2sRoute === "both"
+        ? t.i2sRoute
+        : "off";
     if (seen.has(slot)) continue;
     seen.add(slot);
-    out.push({ slot, route });
+    out.push({ slot, route, i2sRoute });
+  }
+  return out;
+}
+
+/**
+ * Validate a loaded per-device I2S port map (issue #71): non-object →
+ * `{}`; non-integer-slot keys and malformed entries dropped; the reference
+ * clamped to the sane band; `enabled` FORCED off — however the doc was
+ * produced (hand-edited included), a load must never start clocking a
+ * digital stream into a DUT. Never throws.
+ */
+export function sanitizeI2sPorts(raw: unknown): Record<string, I2sPortConfig> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, I2sPortConfig> = {};
+  for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+    const slot = Number(key);
+    if (!Number.isInteger(slot) || slot < 0) continue;
+    if (!entry || typeof entry !== "object") continue;
+    const p = entry as Record<string, unknown>;
+    const referenceDbv =
+      typeof p.referenceDbv === "number" && Number.isFinite(p.referenceDbv)
+        ? Math.min(Math.max(p.referenceDbv, I2S_REFERENCE_MIN_DBV), I2S_REFERENCE_MAX_DBV)
+        : DEFAULT_I2S_PORT.referenceDbv;
+    out[String(slot)] = { enabled: false, referenceDbv };
   }
   return out;
 }
@@ -834,7 +892,15 @@ export function migrate(raw: unknown): WorkspaceDoc | null {
   // entry-by-entry rather than crash the read path.
   for (const src of Object.values(doc.sources.byId)) {
     src.targets = sanitizeSourceTargets(src.targets);
+    // Issue #71: the implicit target's I2S half — docs predating it (and
+    // garbage) degrade to "off", the purely-analog source.
+    if (src.i2sRoute !== "left" && src.i2sRoute !== "right" && src.i2sRoute !== "both") {
+      src.i2sRoute = "off";
+    }
   }
+  // Issue #71: per-device I2S port config — absent on older docs, and
+  // `enabled` is forced off on ANY doc (see sanitizeI2sPorts).
+  doc.i2sPorts = sanitizeI2sPorts(doc.i2sPorts);
   if (!doc.refFrames || typeof doc.refFrames !== "object") doc.refFrames = {};
   if (doc.acquisition && typeof doc.acquisition.coherentGen !== "boolean") {
     doc.acquisition.coherentGen = true;

@@ -287,6 +287,17 @@ describe("removeDevice — keyed disconnect + eviction + purge (issue #25 lot E4
     expect(s.triggers["hw-in-left@1"]).toBeUndefined();
   });
 
+  it("drops the slot's I2S port toggle with the device — a re-add must never silently start the NEXT tenant's port (issue #71 review MUST-FIX #1)", async () => {
+    const store = slot1Store();
+    store.update("test/i2s-on", (s) => ({
+      ...s,
+      i2sPorts: { "1": { enabled: true, referenceDbv: -6 } },
+    }));
+    const { ipc } = fakeIpc();
+    await removeDevice(store, ipc, "slot-1");
+    expect(store.get().i2sPorts["1"]).toEqual({ enabled: false, referenceDbv: -6 });
+  });
+
   it("swallows an 'Unknown device' disconnect rejection — no error toast, eviction still happens (F8 rule)", async () => {
     const store = slot1Store();
     const { ipc } = fakeIpc({
@@ -451,8 +462,8 @@ function withSlot1Target(s: AppState): AppState {
         "src-sine-1": {
           ...s.sources.byId["src-sine-1"],
           targets: [
-            { slot: 1, route: "both" as const },
-            { slot: null, route: "left" as const },
+            { slot: 1, route: "both" as const, i2sRoute: "off" as const },
+            { slot: null, route: "left" as const, i2sRoute: "off" as const },
           ],
         },
       },
@@ -486,7 +497,7 @@ describe("disconnect of a slot ≥ 1 session EVICTS it (issue #25 lot F2) — on
     expect(s.traces.byId["hw-in-left@1"]).toBeDefined();
     expect(s.traces.byId["hw-in-left@1"].capture?.device?.serial).toBe("0DE0_0002");
     // Targets survive too: the revive reopens the SAME unit on the SAME slot.
-    expect(s.sources.byId["src-sine-1"].targets).toContainEqual({ slot: 1, route: "both" });
+    expect(s.sources.byId["src-sine-1"].targets).toContainEqual({ slot: 1, route: "both", i2sRoute: "off" });
   });
 
   it("slot 0 keeps the historic mark-disconnected shape (session stays, status flips)", async () => {
@@ -575,7 +586,7 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
           "src-sine-1": {
             ...s.sources.byId["src-sine-1"],
             route: "left" as const, // would silently play on focus if read
-            targets: [{ slot: 1, route: "both" as const }],
+            targets: [{ slot: 1, route: "both" as const, i2sRoute: "off" as const }],
           },
         },
       },
@@ -642,6 +653,7 @@ describe("source-target drops (issue #25 lot F2, decision D5) — the stimulus t
     expect(store.get().sources.byId["src-sine-1"].targets).toContainEqual({
       slot: 1,
       route: "both",
+      i2sRoute: "off",
     });
   });
 

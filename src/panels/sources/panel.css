@@ -236,7 +236,8 @@
    long notes never squeeze line 1 or overflow the sidebar. */
 .sources__tgt {
   display: grid;
-  grid-template-columns: minmax(60px, 1fr) auto auto auto;
+  /* name | Out L | Out R | I2S group (issue #71) | ✕ */
+  grid-template-columns: minmax(60px, 1fr) auto auto auto auto;
   align-items: center;
   column-gap: 6px;
   row-gap: 1px;
@@ -289,14 +290,38 @@
   cursor: pointer;
 }
 
-.sources__footer {
+/* A labelled channel-pair group (the I2S pair, issue #71) — the Line pair
+   stays bare so the one-device row keeps its classic look. */
+.sources__route-grp {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.sources__route-tag {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  text-transform: uppercase;
+}
+
+.sources__footer {
+  display: flex;
+  /* Wrap instead of truncate: at ≥ 2 live sessions the device prefix
+     (lot F3) squeezed "Round to bin" / "Output only" off the edge —
+     the toggles drop to a second line when tight (2026-08-01 field
+     round on a two-device bench). */
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
   padding: 4px 8px;
   font-family: var(--mono);
   font-size: 12px;
   color: var(--ink-2);
+}
+
+.sources__outonly {
+  white-space: nowrap;
 }
 
 /* Which device the footer describes (issue #25 lot F3) — present only at

@@ -573,6 +573,117 @@ export class AppV2 {
     );
   }
 
+  /* ---- front-panel I2S port (issue #71) ------------------------------- */
+
+  /** The legacy row's I2S pair (single-device mode). */
+  async setSineI2sRoute(id: string, route: "left" | "right" | "both" | "off"): Promise<void> {
+    const wantL = route === "left" || route === "both";
+    const wantR = route === "right" || route === "both";
+    for (const [side, want] of [["l", wantL], ["r", wantR]] as const) {
+      await this.drv.eval(
+        (a: { testid: string; want: boolean }) => {
+          const box = document.querySelector(
+            `[data-testid="${a.testid}"]`
+          ) as HTMLInputElement;
+          if (box.checked !== a.want) box.click();
+        },
+        { testid: `src-i2s-${side}-${id}`, want }
+      );
+    }
+  }
+
+  /** One matrix target row's I2S pair. */
+  async setSourceTargetI2sRoute(
+    id: string,
+    tag: string,
+    route: "left" | "right" | "both" | "off"
+  ): Promise<void> {
+    const wantL = route === "left" || route === "both";
+    const wantR = route === "right" || route === "both";
+    for (const [side, want] of [["l", wantL], ["r", wantR]] as const) {
+      await this.drv.eval(
+        (a: { testid: string; want: boolean }) => {
+          const box = document.querySelector(
+            `[data-testid="${a.testid}"]`
+          ) as HTMLInputElement;
+          if (box.checked !== a.want) box.click();
+        },
+        { testid: `src-tgt-i2s-${side}-${id}-${tag}`, want }
+      );
+    }
+  }
+
+  /** Flip a group's I2S port toggle. */
+  async setI2sEnabled(slot: number, on: boolean): Promise<void> {
+    await this.drv.eval(
+      (a: { testid: string; on: boolean }) => {
+        const box = document.querySelector(
+          `[data-testid="${a.testid}"]`
+        ) as HTMLInputElement;
+        if (box.checked !== a.on) box.click();
+      },
+      { testid: `i2s-toggle-${slot}`, on }
+    );
+  }
+
+  /** The group toggle's state (checked + disabled + reason). */
+  async i2sToggleState(
+    slot: number
+  ): Promise<{ checked: boolean; disabled: boolean; title: string }> {
+    return this.drv.eval(
+      (a: { testid: string }) => {
+        const box = document.querySelector(
+          `[data-testid="${a.testid}"]`
+        ) as HTMLInputElement;
+        return {
+          checked: box.checked,
+          disabled: box.disabled,
+          title: (box.parentElement as HTMLElement).title,
+        };
+      },
+      { testid: `i2s-toggle-${slot}` }
+    );
+  }
+
+  /** The group's I2S readout text ("off", "48 kHz · 32-bit · Σ …", "⚠ …"),
+   * or null when the node is ABSENT (the no-layout-shift probe: it must
+   * never be). */
+  async i2sReadout(slot: number): Promise<string | null> {
+    return this.drv.eval(
+      (a: { testid: string }) =>
+        document.querySelector(`[data-testid="${a.testid}"]`)?.textContent ?? null,
+      { testid: `i2s-readout-${slot}` }
+    );
+  }
+
+  /** Fake-side truth: `slot`'s I2S port state. */
+  async unitI2s(slot: number): Promise<{
+    enabled: boolean;
+    running: boolean;
+    widthBits: number;
+    referenceDbv: number;
+    sigmaPeakDbv: number | null;
+    clipped: boolean;
+    blocks: number;
+  } | null> {
+    return this.drv.eval((v: number) => {
+      const i2s = window.__qa40xE2E.device.i2sOf(v);
+      if (i2s === null) return null;
+      const { enabled, running, widthBits, referenceDbv, sigmaPeakDbv, clipped, blocks } = i2s;
+      return { enabled, running, widthBits, referenceDbv, sigmaPeakDbv, clipped, blocks };
+    }, slot);
+  }
+
+  /** Every `i2s_apply` the fake recorded (routing key + slot ids). */
+  async i2sApplyCalls(): Promise<
+    { deviceId: string | null; enabled: boolean; slotIds: string[]; referenceDbv: number }[]
+  > {
+    return this.drv.eval(
+      () => window.__qa40xE2E.device.i2sCalls,
+      undefined as void
+    );
+  }
+
   /** The sources-footer device prefix ("" at one live session). */
   async footerDevice(): Promise<string> {
     return this.drv.eval(

@@ -276,7 +276,10 @@ impl DeviceSource for UsbDeviceSource {
             Some(page_bytes) => CalibrationSource::FactoryEeprom { page_bytes },
             None => CalibrationSource::NominalFallback,
         };
-        desc.capabilities = desc.capabilities.with_calibration(cal);
+        desc.capabilities = desc
+            .capabilities
+            .with_calibration(cal)
+            .with_i2s(dev.i2s_available().await);
         Ok(desc)
     }
 }

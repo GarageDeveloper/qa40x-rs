@@ -65,6 +65,7 @@ import {
 import { sourcesForSession } from "../selectors/sources";
 import { removeTraceEverywhere } from "./traces";
 import { startRun, stopRun, syncAllStreams } from "./stream";
+import { syncI2s } from "./i2s";
 import { syncOutputOnly } from "./outputonly";
 import { armSessionForSources } from "./sources";
 import { toast } from "./ui";
@@ -773,6 +774,13 @@ export async function runProgram(store: Store<AppState>, ipc: Ipc, id: string): 
     // its generator idle at entry is not armed either way — the arm
     // deliberately never touches output-only sessions.
     else if (!hadAudibleSources) armSessionForSources(store, ipc, key);
+    // The I2S port's deferred edits land now too (issue #71 review #3):
+    // syncI2s was gated on the program lock for the whole run, so a
+    // routing/reference change made mid-run left the port clocking the OLD
+    // mix — the row's "applies when it finishes" note must be true for
+    // this dimension as well. Unconditional: sync's own gates no-op an
+    // off-and-idle port.
+    syncI2s(store, ipc, key);
   }
 }
 

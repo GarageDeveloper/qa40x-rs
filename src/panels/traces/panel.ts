@@ -29,8 +29,11 @@ import {
   sessionLabel,
   sessionOutputRanges,
   sessionRates,
+  sessionSupportsI2s,
 } from "../../store/selectors/devices";
 import { isRoutable } from "../../store/selectors/session";
+import { sessionHasI2sSources } from "../../store/selectors/sources";
+import { i2sPortConfig } from "../../store/actions/i2s";
 import { el, keyedList } from "../../ui/dom";
 import { collapsiblePanel } from "../../ui/collapse";
 import { openTransformDialog } from "./transformdialog";
@@ -170,6 +173,16 @@ export function mountTracesPanel(
             inputGain: sess?.device.config?.input_gain ?? null,
             outputGain: sess?.device.config?.output_gain ?? null,
             sampleRate: sess?.device.config?.sample_rate ?? null,
+            // Front-panel I2S port (issue #71). run.i2s.blocks stays out
+            // (the no-per-frame-fields rule — it advances every poll).
+            i2sSupported: sessionSupportsI2s(s, g.key),
+            i2sEnabled: i2sPortConfig(s, g.key).enabled,
+            i2sReferenceDbv: i2sPortConfig(s, g.key).referenceDbv,
+            i2sRunning: sess?.run.i2s.running ?? false,
+            i2sSigmaDbv: sess?.run.i2s.sigmaPeakDbv ?? null,
+            i2sClipped: sess?.run.i2s.clipped ?? false,
+            i2sError: sess?.run.i2s.error ?? null,
+            i2sRouted: sessionHasI2sSources(s, g.key),
           },
           rows: g.traceIds.map(rowOf).filter((r): r is Row => r !== null),
         };

@@ -43,6 +43,7 @@ export function fakeEntry(
       max_measurement_hz: rates[rates.length - 1] / 2,
       calibration: opts.open ? { FactoryEeprom: { page_bytes: 512 } } : "Unknown",
       supports_flash: false,
+      supports_i2s: true,
       is_virtual: opts.virtual ?? false,
     },
     open: opts.open ?? false,

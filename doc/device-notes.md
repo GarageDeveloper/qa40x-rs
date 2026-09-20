@@ -359,6 +359,74 @@ Because the endpoints are independent, a host (or an emulator) must not
 serialize them: register operations — the ~1 Hz keepalive in particular —
 have to keep completing normally while the paced I2S stream is running.
 
+### How the official app exposes it (for reference)
+
+Verified against the vendor's public documentation and observed behavior
+(QA40x User Manual rev 1.20 §front-panel connector; forum thread "QA403
+I2S Input / Output"; our USB captures):
+
+- ONE per-device I2S toggle that **mirrors the Generator 1/2 signals** onto
+  the port — it is an *additional* output, not a switch away from the
+  analog DAC: nothing in the app mutes or reroutes the analog path while
+  I2S runs (both streams were captured flowing concurrently), and the port
+  keeps playing between acquisitions.
+- Fixed level mapping: **0 dBV maps to 0 dBFS**, levels above 0 dBV clip
+  (the app shows a clip warning, shared with its PC-mirroring output).
+- A "Front Panel I2S Settings" dialog offers Bit Depth 16/32 (changeable
+  only while the port is stopped) and a Sample Rate selector listing
+  "48 kSPS (locked)" / 96 / 192 — but the rate CHOICE is not applied:
+  only the bit depth is persisted, and the generation loop forces 48 kSPS
+  regardless. The 96/192 entries are UI prepared for a future capability
+  (the manual confirms other rates are not supported today). Generation
+  is only active while Gen1 or Gen2 is active.
+- REST (mono-device API): `PUT /Settings/I2sGen/{On|Off}` and
+  `PUT /Settings/I2sGen/Width/{16|32}` (width refused while running).
+- Hardware facts from the same sources: the expansion port also carries
+  FP_I2S_BCLK (32×/64× Fs), FP_I2S_MCLK (24.576 MHz) and an FP_PWR
+  ~3.2 V / 10–20 mA rail for isolators; the I2S *input* direction is not
+  supported by the official software.
+
+### Deliberate divergence in qa40x-rs (issue #71, decision 2026-08-01)
+
+qa40x-rs generalizes the feature instead of mirroring Gen1/Gen2:
+
+- the I2S port is a **routing target per source** (each routing cell
+  carries an independent I2S L/R dimension beside Line out L/R), so ANY
+  mix of sources — not just one or two sines — can drive the port, and a
+  source can play to Line out and/or I2S;
+- the port's digital full scale is an **adjustable reference level**
+  (default 0 dBV — at the default the level mapping is byte-identical to
+  the official app's);
+- the `/Settings/I2sGen` REST parity endpoints are a recorded follow-up
+  (they would drive the default device's engine directly, independent of
+  the GUI routing model).
+
+The wire protocol driven is identical either way; only the "what plays on
+the port" model is richer here.
+
+qa40x-rs drives the port with a per-device I2S engine (`device::i2s`):
+
+- **48 kHz pinned**: the vendor app always generates I2S at 48 kHz
+  regardless of the acquisition rate, so the I2S mix is rendered by its own
+  mixer instance at 48 kHz — never resampled from an acquisition-rate
+  buffer. A 1 s loop buffer is pre-encoded to wire bytes and sliced into
+  2048-frame blocks with wraparound.
+- **Own endpoint cell**: EP `0x03` is deliberately NOT part of the claimed
+  endpoint set the capture pump locks for a whole acquisition — it lives in
+  its own cell, and the writer (two blocks in flight, one completed / one
+  refilled per device-paced completion) locks only that cell. This is what
+  keeps the acquisition, the keepalive and the I2S stream concurrent, as
+  required above (pinned by an integration test against the `vqa40x-core`
+  EP3 sink).
+- **Levels**: the port is purely digital, so full scale needs a reference —
+  a source at the port's *reference level* (dBV, default 0) lands at digital
+  full scale, same clamp-and-report-never-rescale contract as the analog
+  ranges, and NO factory DAC trims (nothing analog to pre-compensate).
+- **Registers only at start/stop**: a re-mix while running swaps the loop
+  buffer without touching 0x0A/0x0B, so the downstream receiver's clock
+  never glitches. Every connect writes `I2S_CTRL = 0` (the vendor's init),
+  which is the engine's port-comes-up-off contract.
+
 ## 11. Flash pages and the firmware trace buffer
 
 `PAGE_SELECT` (`0x0D`) arms sequential readout of two kinds of content:
@@ -380,6 +448,21 @@ have to keep completing normally while the paced I2S stream is running.
   inside a page.
 - **EP `0x83`** — the I2S IN endpoint: exposed but never seen carrying data;
   purpose unknown.
+- **I2S sample layout** — every observed EP `0x03` block is silence, so the
+  channel order is unvalidated; the host assumes the acquisition path's
+  right-first wire order (`qa40x::i2s::I2S_WIRE_SWAP`, one flippable
+  constant). Validation recipe: enable I2S, route a tone to ONE channel,
+  scope the port.
+- **I2S digital level mapping** — whether the port applies any gain/format
+  processing between the EP `0x03` samples and the pins; the host's
+  reference-level convention (a source at the reference plays 0 dBFS peak)
+  needs a hardware check with a known receiver.
+- **I2S clock vs register 0x09** — the vendor app only ever generates I2S
+  at 48 kHz, its settings dialog shows the port rate as "48 kSPS
+  (locked)", and the user manual states other rates are not currently
+  supported — so 48 kHz-only is confirmed as the OFFICIAL behavior; only
+  whether the hardware could follow register 0x09 remains unobserved (the
+  vqa40x sink pins it at 48 kHz).
 - **Range settle times** — the values in §6 are working figures; the exact
   relay settle and the boundary-crossing cost deserve a dedicated measurement.
 - **Low output ranges** — whether relay clicking observed at the lower output

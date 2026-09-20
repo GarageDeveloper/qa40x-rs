@@ -87,8 +87,8 @@ describe("per-session generator ownership (issue #25 lot F2)", () => {
     s.sources = {
       order: ["a", "b"],
       byId: {
-        a: sine("a", { targets: [{ slot: 0, route: "left" }] }),
-        b: sine("b", { targets: [{ slot: 1, route: "both" }] }),
+        a: sine("a", { targets: [{ slot: 0, route: "left", i2sRoute: "off" }] }),
+        b: sine("b", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }),
       },
     };
     const store = new Store<AppState>(s, { freeze: true });
@@ -160,7 +160,7 @@ describe("per-session generator ownership (issue #25 lot F2)", () => {
     let s = twoSessionState();
     s.sources = {
       order: ["b"],
-      byId: { b: sine("b", { targets: [{ slot: 1, route: "both" }] }) },
+      byId: { b: sine("b", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();
@@ -203,8 +203,8 @@ describe("syncSourcesEverywhere — the fan-out (issue #25 lot F2)", () => {
     s.sources = {
       order: ["a", "b"],
       byId: {
-        a: sine("a", { targets: [{ slot: 0, route: "left" }] }),
-        b: sine("b", { targets: [{ slot: 1, route: "both" }] }),
+        a: sine("a", { targets: [{ slot: 0, route: "left", i2sRoute: "off" }] }),
+        b: sine("b", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }),
       },
     };
     const store = new Store<AppState>(s, { freeze: true });
@@ -231,7 +231,7 @@ describe("program lock vs the generator path (F2 review MUST-FIX #1)", () => {
     );
     s.sources = {
       order: ["b"],
-      byId: { b: sine("b", { targets: [{ slot: 1, route: "both" }] }) },
+      byId: { b: sine("b", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();
@@ -247,7 +247,7 @@ describe("program lock vs the generator path (F2 review MUST-FIX #1)", () => {
     s = withRun(s, { outputOnly: true, programLock: null }, "slot-1");
     s.sources = {
       order: ["b"],
-      byId: { b: sine("b", { targets: [{ slot: 1, route: "both" }] }) },
+      byId: { b: sine("b", { targets: [{ slot: 1, route: "both", i2sRoute: "off" }] }) },
     };
     const store = new Store<AppState>(s, { freeze: true });
     const { ipc, calls } = recordingIpc();

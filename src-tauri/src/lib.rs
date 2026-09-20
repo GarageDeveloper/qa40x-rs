@@ -727,6 +727,47 @@ async fn output_only_start(
     })
 }
 
+/// Declare the front-panel I2S port's full state (issue #71): enable with a
+/// slot set, rebuild the mix, or disable — one idempotent entry point,
+/// mirroring `output_only_start`'s shape. The mix is rendered at the port's
+/// pinned 48 kHz on the device's own I2S engine; while the port is running,
+/// a re-declaration swaps the loop buffer without touching registers, so
+/// the downstream receiver's clock never glitches on a re-mix.
+#[tauri::command]
+async fn i2s_apply(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    enabled: bool,
+    slots: Vec<mixer::MixerSlotDesc>,
+    reference_dbv: f32,
+    width_bits: Option<u8>,
+    device_id: Option<String>,
+) -> Result<device::I2sStatus, String> {
+    let width = match width_bits {
+        None => qa40x::i2s::I2sWidth::Bits32,
+        Some(bits) => qa40x::i2s::I2sWidth::from_bits(bits)
+            .ok_or_else(|| format!("I2S: invalid frame width {bits} (16 or 32)"))?,
+    };
+    if !reference_dbv.is_finite() {
+        return Err("I2S: reference level must be finite".into());
+    }
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    rt.i2s()
+        .apply(device::I2sRequest { enabled, slots, reference_dbv, width })
+        .await
+        .map_err(|e| format!("I2S: {e}"))
+}
+
+/// The I2S engine's observable state — a pure cache read (never takes the
+/// device mutex, the `last_telemetry` rule), safe to poll during a capture.
+#[tauri::command]
+async fn i2s_status(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    device_id: Option<String>,
+) -> Result<device::I2sStatus, String> {
+    let rt = runtime_for_command(&state, device_id.as_deref()).await?;
+    Ok(rt.i2s().status().await)
+}
+
 /// Stop the continuous signal generator.
 #[tauri::command]
 async fn stop_generator(
@@ -1407,6 +1448,8 @@ pub fn run() {
             stream_reset_measure_stats,
             sweep_stop,
             output_only_start,
+            i2s_apply,
+            i2s_status,
             stop_generator,
             is_generator_running,
             get_input_dbv_offset,
@@ -1613,6 +1656,54 @@ mod command_arg_tests {
         .expect_err("an unknown device id must be an error");
         assert!(
             format!("{err:?}").contains("Unknown device: usb/NOPE"),
+            "unexpected error payload: {err:?}"
+        );
+    }
+
+    /// Issue #71: `i2s_apply`'s wire shape through the REAL IPC layer — an
+    /// omitted `deviceId` routes to the default runtime, an omitted
+    /// `widthBits` defaults to 32-bit, and a disable on an idle engine is a
+    /// clean no-op (no device I/O), so the answer's `I2sStatus` documents
+    /// the port off. An invalid width is refused before touching anything.
+    #[test]
+    fn i2s_apply_deserializes_defaults_and_refuses_a_bad_width() {
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(Mutex::new(AppState::new())))
+            .invoke_handler(tauri::generate_handler![i2s_apply])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview");
+
+        let body = invoke(
+            &webview,
+            "i2s_apply",
+            serde_json::json!({
+                "enabled": false,
+                "slots": [],
+                "referenceDbv": 0.0,
+            }),
+        )
+        .expect("disable on an idle engine must succeed with every optional omitted");
+        let status: serde_json::Value = body.deserialize().expect("I2sStatus json");
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["running"], false);
+        assert_eq!(status["width_bits"], 32, "omitted widthBits defaults to 32");
+
+        let err = invoke(
+            &webview,
+            "i2s_apply",
+            serde_json::json!({
+                "enabled": false,
+                "slots": [],
+                "referenceDbv": 0.0,
+                "widthBits": 24,
+            }),
+        )
+        .expect_err("a width the register cannot encode must be refused");
+        assert!(
+            format!("{err:?}").contains("invalid frame width 24"),
             "unexpected error payload: {err:?}"
         );
     }
